@@ -127,7 +127,7 @@ async def lifespan(app: FastAPI):
     if ib_has_data:
         try:
             fetcher.add_new_bar_callback(on_new_bar)
-            await fetcher.subscribe_realtime()
+            await fetcher.subscribe_mktdata()   # tick-level; switch to subscribe_realtime() for 5s bars
             logger.info("IB real-time streaming started.")
         except Exception as e:
             logger.warning("IB real-time subscription failed: %s — historical data still available", e)

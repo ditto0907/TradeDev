@@ -10,6 +10,8 @@ Usage:
 """
 import asyncio
 import logging
+import math
+import time
 from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional
 
@@ -53,10 +55,14 @@ class IBDataFetcher:
         # running event loop (uvicorn's asyncio loop), not the import-time loop.
         self.ib: Optional[IB] = None
         self.bars: Dict[str, List[dict]] = {"1min": [], "5min": []}
-        self._realtime_subscriptions: Dict[str, object] = {}  # key → RealTimeBarList or Task
+        self._realtime_subscriptions: Dict[str, object] = {}  # key → subscription object
         self._new_bar_callbacks: List[Callable[[str, dict], None]] = []
-        # Running aggregated bars for 1min/5min (built from 5s real-time bars)
+        # Running aggregated bars for 1min/5min (built from ticks or 5s bars)
         self._rt_current: Dict[str, Optional[dict]] = {"1min": None, "5min": None}
+        # reqMktData tick state
+        self._prev_tick_price: float = float("nan")
+        self._prev_tick_size:  float = float("nan")
+        self._last_tick_broadcast: float = 0.0   # monotonic time of last WS push
 
     # ─── Connection ──────────────────────────────────────────────────────────
 
@@ -200,6 +206,78 @@ class IBDataFetcher:
             except Exception as exc:
                 logger.error("Callback error: %s", exc)
 
+    # ─── reqMktData (tick-level, sub-second) ─────────────────────────────────
+
+    _TICK_BROADCAST_INTERVAL = 0.25   # broadcast to WebSocket at most 4×/second
+
+    async def subscribe_mktdata(self):
+        """
+        Subscribe to tick-level market data via reqMktData.
+
+        Fires on every last-price change — far faster than 5-second bars.
+        Ticks are aggregated into in-progress 1min/5min OHLCV bars and
+        broadcast to WebSocket clients at most every 250 ms so we don't
+        flood slow connections.
+
+        Call subscribe_realtime() instead for the 5-second bar approach.
+        """
+        contract = await self._get_contract()
+        ticker = self.ib.reqMktData(contract, "", False, False)
+        self._realtime_subscriptions["mktdata"] = ticker
+        ticker.updateEvent += self._on_tick
+        logger.info("Subscribed to market data ticks (≤250 ms chart updates)")
+
+    def _on_tick(self, ticker):
+        """Fires on every bid/ask/last change from reqMktData."""
+        price = ticker.last
+        size  = ticker.lastSize
+
+        # Skip ticks with no valid last-trade price
+        if price is None or math.isnan(price) or price <= 0:
+            return
+        if size is None or math.isnan(size):
+            size = 0.0
+
+        # Only add volume on a genuine new trade (last price or size changed)
+        vol_delta = 0.0
+        if price != self._prev_tick_price or size != self._prev_tick_size:
+            vol_delta = float(size)
+            self._prev_tick_price = price
+            self._prev_tick_size  = size
+
+        wall_ts = int(time.time())
+
+        for key, interval in [("1min", 60), ("5min", 300)]:
+            bar_ts = (wall_ts // interval) * interval
+            cur = self._rt_current[key]
+
+            if cur is None or bar_ts > cur["time"]:
+                # Bar boundary — finalise old bar, open a new one
+                if cur is not None:
+                    self._append_bar(key, cur)
+                    self._dispatch(key, cur)
+                    logger.debug("Completed %s bar: time=%s close=%s", key, cur["time"], cur["close"])
+                cur = {"time": bar_ts, "open": price, "high": price,
+                       "low": price, "close": price, "volume": vol_delta}
+                self._rt_current[key] = cur
+                self._append_bar(key, cur)
+            else:
+                cur["high"]    = max(cur["high"], price)
+                cur["low"]     = min(cur["low"],  price)
+                cur["close"]   = price
+                cur["volume"] += vol_delta
+                if self.bars[key] and self.bars[key][-1]["time"] == bar_ts:
+                    self.bars[key][-1] = cur
+
+        # Throttled broadcast — push at most every 250 ms
+        now = time.monotonic()
+        if now - self._last_tick_broadcast >= self._TICK_BROADCAST_INTERVAL:
+            self._last_tick_broadcast = now
+            for key in ("1min", "5min"):
+                cur = self._rt_current[key]
+                if cur:
+                    self._dispatch(key, cur)
+
     def _append_bar(self, key: str, bar: dict):
         """Append or update the last bar in the in-memory store."""
         bars = self.bars[key]
@@ -211,16 +289,23 @@ class IBDataFetcher:
                 bars.pop(0)
 
     def unsubscribe_realtime(self):
-        """Cancel real-time bar subscription."""
+        """Cancel whichever real-time subscription is active."""
         if not self.ib:
             return
         rt = self._realtime_subscriptions.get("rt")
         if rt is not None:
             try:
                 self.ib.cancelRealTimeBars(rt)
-                logger.info("Cancelled real-time bar subscription")
+                logger.info("Cancelled 5-second real-time bar subscription")
             except Exception as e:
                 logger.warning("Error cancelling real-time bars: %s", e)
+        mktdata = self._realtime_subscriptions.get("mktdata")
+        if mktdata is not None:
+            try:
+                self.ib.cancelMktData(mktdata)
+                logger.info("Cancelled market data tick subscription")
+            except Exception as e:
+                logger.warning("Error cancelling market data: %s", e)
         self._realtime_subscriptions.clear()
 
     # ─── Convenience ─────────────────────────────────────────────────────────
