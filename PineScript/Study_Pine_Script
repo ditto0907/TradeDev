@@ -1,0 +1,467 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © cassiel0907
+
+//@version=6
+indicator("Study", overlay = true,max_labels_count=500)
+
+var GRP1 = "Options"
+
+_show_signal        = input(1,"Show 3cc Signal", group = GRP1)
+_show_detail        = input(1,"Show 3cc detail", group = GRP1)
+_RangeLookBack		= input.int(8, "Range Look Back", minval = 1, group = GRP1)
+_Bull_IBS		    = input.int(69, "Bull IBS", minval = 1, group = GRP1)
+_Bear_IBS		    = input.int(31, "Bear IBS", minval = 1, group = GRP1)
+
+
+opverlap_tho = 0.65
+bo_opverlap_tho = 0.40
+
+atr = ta.atr(10)
+atr_pct_1 = 0.8
+atr_pct_2 = 1.6
+atr_body_tho_1 = 0.5
+atr_body_tho_2 = 0.8
+
+// IBS
+float IBS		= 0		// Internal Bar Strength
+float BarRange 	= 0
+float AvgRange	= 0
+
+BarRange := high - low
+AvgRange := ta.sma(BarRange, _RangeLookBack)
+if BarRange > 0 or BarRange < 0  
+	IBS := (close - low) / BarRange * 100
+
+
+// --------------------------------------------------
+// function
+is_new_day() => 
+    d = dayofweek
+    na(d[1]) or d != d[1]
+
+// --------------------------------------------------
+// function
+close_on_high() =>
+    ((close[0]-low[0])/(high[0]-low[0])>=0.6)
+
+no_out_side_low() =>
+    low[0] > low[1]
+
+higher_high() =>
+    high[0] > close[1]
+
+con_bull_bar(_pre_cnt) =>
+    
+    temp_pre = 0
+    if is_new_day()
+        temp_pre := 0
+    else
+        temp_pre := _pre_cnt
+
+    if na(temp_pre) or temp_pre==0
+        if (close[0] > open[0])
+            1
+    else
+        if (close[0] > open[0]) or (close_on_high() and no_out_side_low() and higher_high())
+            temp_pre + 1
+            // if(_pre_cnt < 1 or (_close[0] > _high[1]))
+            //     na(_pre_cnt)? 0:_pre_cnt + 1
+            // else 
+            //     _pre_cnt
+        else 
+            0
+
+one_bull_atr(atr,atr_pct,atr_bo_body_tho) =>
+    body = close[0]-open[0]
+    whole_range = high[0]-low[0]
+    if(body >= atr * atr_pct and body/whole_range >= atr_bo_body_tho)
+        true
+    else
+        false
+
+
+two_bull_atr(atr,atr_pct,atr_bo_body_tho) =>
+    body0 = close[0]-open[0]
+    body1 = close[1]-open[1]
+    whole_range = high[0]-low[1]
+
+    if((body0+body1) >= atr * atr_pct and (body0+body1)/whole_range >= atr_bo_body_tho )
+        true
+    else
+        false
+
+
+// --------------------------------------------------
+// function
+
+// function
+close_on_low() =>
+    ((high[0] - close[0])/(high[0]-low[0])>=0.6)
+
+no_out_side_high() =>
+    high[0] < high[1]
+
+lower_low() =>
+    low[0] < close[1]
+
+con_bear_bar(_pre_cnt) =>
+
+    temp_pre = 0
+    if is_new_day()
+        temp_pre := 0
+    else
+        temp_pre := _pre_cnt
+
+    if na(temp_pre) or temp_pre==0
+        if (close[0] < open[0])
+            1
+    else
+        if (close[0] < open[0]) or (close_on_low() and no_out_side_high() and lower_low())
+            temp_pre + 1
+            // if(_pre_cnt < 1 or (_close[0] > _high[1]))
+            //     na(_pre_cnt)? 0:_pre_cnt + 1
+            // else 
+            //     _pre_cnt
+        else 
+            0
+
+one_bear_atr(atr,atr_pct,atr_bo_body_tho) =>
+    body = open[0] - close[0]
+    whole_range = high[0] - low[0]
+    if(body >= atr * atr_pct and body/whole_range >= atr_bo_body_tho)
+        true
+    else
+        false
+
+two_bear_atr(atr,atr_pct,atr_bo_body_tho) =>
+    body0 = open[0] - close[0]
+    body1 = open[1] - close[1]
+    whole_range = high[0] - low[1]
+
+    if((body0+body1) >= atr * atr_pct and (body0+body1)/whole_range >= atr_bo_body_tho )
+        true
+    else
+        false
+
+
+// --------------------------------------------------
+// function
+overlap() => 
+    overlapAmount = math.max(0,math.min(high, high[1]) - math.max(low, low[1]))
+    barAmount = math.abs(high - low)
+    overlap = overlapAmount / barAmount
+
+
+micro_gap(_bull_or_bear) => 
+    micro_gap = false
+    // bull
+    if(_bull_or_bear == 1 and (low[0] > high[2]))
+        micro_gap := true
+    if(_bull_or_bear == -1 and (high[0] < low[2]))
+        micro_gap := true
+    micro_gap
+
+// --------------------------------------------------
+// overlapping
+overlap = overlap()
+// log.info("overlap: {0}", overlap)
+
+
+// --------------------------------------------------
+// function
+bull_fade_atr(_bull_cnt,_atr,_bear_atr_arr)=>
+    fade = false
+    body = close[0] - open[2]
+    if _bull_cnt == 3 and body < _atr
+        for i = 3 to 5 
+            if _bear_atr_arr[i]>0
+                fade := true
+    fade
+
+bear_fade_atr(_bear_cnt,_atr,_bull_atr_arr)=>
+    fade = false
+    body = open[2] - close[0]
+    if _bear_cnt == 3 and body < _atr
+        for i = 3 to 5 
+            if _bull_atr_arr[i]>0
+                fade := true
+    fade
+
+
+// bull atr bars
+bull_atr_arr = 0
+if one_bull_atr(atr,atr_pct_1,atr_body_tho_1)
+    bull_atr_arr := 1 
+else if two_bull_atr(atr,atr_pct_2,atr_body_tho_2)
+    bull_atr_arr := 2
+else 
+    bull_atr_arr := 0
+
+// bear atr bars
+bear_atr_arr = 0
+if one_bear_atr(atr,atr_pct_1,atr_body_tho_1)
+    bear_atr_arr := 1 
+else if two_bear_atr(atr,atr_pct_2,atr_body_tho_2)
+    bear_atr_arr := 2
+else 
+    bear_atr_arr := 0
+
+
+// 3cc bull bars
+bull_cnt = 0
+bull_cnt := con_bull_bar(bull_cnt[1])
+// 3cc bear bars
+bear_cnt = 0
+bear_cnt := con_bear_bar(bear_cnt[1])
+
+// weak fade atr
+bull_fade_atr_arr = false
+bull_fade_atr_arr := bull_fade_atr(bull_cnt,atr * atr_pct_1,bear_atr_arr)
+
+bear_fade_atr_arr = false
+bear_fade_atr_arr := bear_fade_atr(bear_cnt,atr * atr_pct_1,bull_atr_arr)
+
+// --------------------------------------------------
+// 绘图
+
+// function
+format_detail(bull_cnt,bear_cnt) => 
+    str = str.tostring(bull_cnt)
+    if(bull_cnt >= 3)
+
+        str := "CC:" + str.tostring(bull_cnt) + "\n"
+
+        risk = close - low[2]
+        uptail = high - close
+
+        body_size = math.abs(close[2] - open[2]) + math.abs(close[1] - open[1]) + math.abs(close[0] - open[0])
+
+        str := str + "Risk:" + str.tostring(risk) + "\n"
+        str := str + "Tail:" + str.tostring(uptail) + "\n"
+
+        str := str + "CC body:" + str.tostring(body_size) + "\n"
+        str := str + "Avg Range:" + str.tostring(AvgRange) + "\n"
+
+        str := str + "IBS1:" + str.tostring(IBS[2],format.percent) + "\n"
+        str := str + "IBS2:" + str.tostring(IBS[1],format.percent) + "\n"
+        str := str + "IBS3:" + str.tostring(IBS[0],format.percent) + "\n"
+        
+        str := str + "\n"
+
+        score_gap = 0
+
+        micro_gap = 'N' 
+        if(low - high[2] > 0)
+            micro_gap:= 'Y'
+            str := str + "M_gap: +1" + "\n"
+            score_gap := score_gap + 1
+        else
+            str := str + "M_gap: +0" + "\n"
+
+        tick_gap = 'N'
+        if(open[1] - close[2] > 0 or open - close[1] > 0)
+            tick_gap:= 'Y'
+            str := str + "T_gap: +1" + "\n"
+            score_gap := score_gap + 1
+        else
+            str := str + "T_gap: +0" + "\n"
+
+        neg_gap = 'N'
+        if(open[1] - close[2] < 0 or open - close[1] < 0)
+            neg_gap:= 'Y'
+            str := str + "Neg_gap: +0" + "\n"
+        else
+            str := str + "Neg_gap: +1" + "\n"
+            score_gap := score_gap + 1
+        
+        
+        str := str + "--Gap score:" + str.tostring(score_gap) + "\n"
+        str := str + "\n"
+        
+        score_hl = 0
+
+         // close on high
+        if( (IBS[0]>=_Bull_IBS and IBS[1]>=_Bull_IBS) or (IBS[1]>=_Bull_IBS and IBS[2]>=_Bull_IBS) or (IBS[0]>=_Bull_IBS and IBS[2]>=_Bull_IBS) )
+            str := str + "COH/L: +1" + "\n"
+            score_hl := score_hl + 1
+        else
+            str := str + "COH/L: +0" + "\n"
+
+
+        // close above high
+        if(close > high[1] and close[1] > high[2])
+            str := str + "CAH/CBL: +1" + "\n"
+            score_hl := score_hl + 1
+        else
+            str := str + "CAH/CBL: +0" + "\n"
+
+        // HH HL
+        if(high > high[1] and high[1] > high[2] and low > low[1] and low[1] > low[2])
+            str := str + "HH/LL: +1" + "\n"
+            score_hl := score_hl + 1
+        else
+            str := str + "HH/LL: +0" + "\n"
+        
+        str := str + "--HL score:" + str.tostring(score_hl) + "\n"
+        // str := str + "\n"
+
+    if(bear_cnt >= 3)
+
+        str := "CC:" + str.tostring(bull_cnt) + "\n"
+
+        risk = high[2] - close
+        dwtail = high - close
+
+        body_size = math.abs(close[2] - open[2]) + math.abs(close[1] - open[1]) + math.abs(close[0] - open[0])
+
+        str := str + "Risk:" + str.tostring(risk) + "\n"
+        str := str + "Tail:" + str.tostring(dwtail) + "\n"
+
+            
+
+        str := str + "CC body:" + str.tostring(body_size) + "\n"
+        str := str + "Avg Range:" + str.tostring(AvgRange) + "\n"
+
+        str := str + "IBS1:" + str.tostring(IBS[2],format.percent) + "\n"
+        str := str + "IBS2:" + str.tostring(IBS[1],format.percent) + "\n"
+        str := str + "IBS3:" + str.tostring(IBS[0],format.percent) + "\n"
+        
+        str := str + "\n"
+
+        score_gap = 0
+
+        micro_gap = 'N' 
+        if(low[2] - high > 0)
+            micro_gap:= 'Y'
+            str := str + "M_gap: +1" + "\n"
+            score_gap := score_gap + 1
+        else
+            str := str + "M_gap: +0" + "\n"
+
+        tick_gap = 'N'
+        if(open[1] - close[2] < 0 or open - close[1] < 0)
+            tick_gap:= 'Y'
+            str := str + "T_gap: +1" + "\n"
+            score_gap := score_gap + 1
+        else
+            str := str + "T_gap: +0" + "\n"
+
+        neg_gap = 'N'
+        if(open[1] - close[2] > 0 or open - close[1] > 0)
+            neg_gap:= 'Y'
+            str := str + "Neg_gap: +0" + "\n"
+        else
+            str := str + "Neg_gap: +1" + "\n"
+            score_gap := score_gap + 1
+        
+        
+        str := str + "--Gap score:" + str.tostring(score_gap) + "\n"
+        str := str + "\n"
+        
+        score_hl = 0
+
+         // close on low
+        if( (IBS[0]<=_Bear_IBS and IBS[1]>=_Bear_IBS) or (IBS[1]>=_Bear_IBS and IBS[2]>=_Bear_IBS) or (IBS[0]>=_Bear_IBS and IBS[2]>=_Bear_IBS) )
+            str := str + "COH/L: +1" + "\n"
+            score_hl := score_hl + 1
+        else
+            str := str + "COH/L: +0" + "\n"
+
+
+        // close below low
+        if(close > high[1] and close[1] > high[2])
+            str := str + "CAH/CBL: +1" + "\n"
+            score_hl := score_hl + 1
+        else
+            str := str + "CAH/CBL: +0" + "\n"
+
+        // LH LL
+        if(high < high[1] and high[1] < high[2] and low < low[1] and low[1] < low[2])
+            str := str + "HH/LL: +1" + "\n"
+            score_hl := score_hl + 1
+        else
+            str := str + "HH/LL: +0" + "\n"
+        
+        str := str + "--HL score:" + str.tostring(score_hl) + "\n"
+        // str := str + "\n"    
+    str
+
+
+detail = format_detail(bull_cnt,bear_cnt)
+
+// 3cc bull signal
+if (_show_signal == 1 and (bull_cnt >= 3 or bull_atr_arr[0]>0))
+    // log.info("bull cnt: {0}", bull_cnt)
+    label_bull = label.new(bar_index, 0, style=label.style_none, text= str.tostring(bull_cnt), textalign = text.align_left)
+    
+    if(bull_cnt == 3)
+        label_bull := label.new(bar_index, 0, style=label.style_none, text=str.tostring(bull_cnt), textalign = text.align_left, tooltip = detail) 
+
+    label.set_textcolor(label_bull, textcolor= color.blue)
+    label.set_yloc(label_bull, yloc.abovebar)
+    label.set_size(label_bull, size.normal)
+
+plotshape(series=((_show_signal == 1) and (bull_cnt == 3 and micro_gap(1) == true and bull_fade_atr_arr==false)) , size=size.tiny, style= shape.arrowup, color = color.blue)
+plotshape(series=((_show_signal == 1) and (bull_cnt == 3 and micro_gap(1) == false and bull_fade_atr_arr==false)) , size=size.tiny, style= shape.circle, color = color.blue)
+
+// 3cc bear signal
+if (_show_signal == 1 and (bear_cnt >= 3 or bear_atr_arr[0]>0))
+    // log.info("bull cnt: {0}", bull_cnt)
+    label_bear = label.new(bar_index, 0, style=label.style_none, text=str.tostring(bear_cnt))
+
+    if(bear_cnt == 3)
+        label_bear := label.new(bar_index, 0, style=label.style_none, text=str.tostring(bear_cnt), textalign = text.align_left, tooltip = detail) 
+
+    label.set_textcolor(label_bear, textcolor= color.rgb(197, 85, 0))
+    label.set_yloc(label_bear, yloc.abovebar)
+    label.set_size(label_bear, size.normal)
+plotshape(series=((_show_signal == 1) and (bear_cnt == 3 and micro_gap(-1) == true and bear_fade_atr_arr==false)), size=size.tiny, style= shape.arrowdown, color = color.orange)
+plotshape(series=((_show_signal == 1) and (bear_cnt == 3 and micro_gap(-1) == false and bear_fade_atr_arr==false)), size=size.tiny, style= shape.circle, color = color.orange)
+
+// ATR signal
+plotshape(series=((_show_signal == 1) and (bull_atr_arr[0]==2)) , size=size.tiny, style= shape.diamond, color = color.blue ,location = location.belowbar)
+plotshape(series=((_show_signal == 1) and (bull_atr_arr[0]==1)) , size=size.tiny, style= shape.arrowup, color = color.blue ,location = location.belowbar)
+
+plotshape(series=((_show_signal == 1) and (bear_atr_arr[0]==2)) , size=size.tiny, style= shape.diamond, color = color.orange,location = location.belowbar)
+plotshape(series=((_show_signal == 1) and (bear_atr_arr[0]==1)) , size=size.tiny, style= shape.arrowdown, color = color.orange,location = location.belowbar)
+
+
+// Weak fade ATR signal
+plotshape(series=((_show_signal == 1) and (bull_fade_atr_arr)), size=size.tiny, style= shape.xcross, color = color.rgb(248, 5, 5))
+plotshape(series=((_show_signal == 1) and (bear_fade_atr_arr)), size=size.tiny, style= shape.xcross, color = color.rgb(248, 5, 5))
+
+
+
+// --------------------------------------------------
+// bar count
+sizeOption = input.string(defval="Normal", title="Label Size",
+     options=["Auto", "Huge", "Large", "Normal", "Small", "Tiny"],
+     group='Bar Index')
+     
+labelSize = (sizeOption == "Huge") ? size.huge :
+     (sizeOption == "Large") ? size.large :
+     (sizeOption == "Small") ? size.small :
+     (sizeOption == "Tiny") ? size.tiny :
+     (sizeOption == "Auto") ? size.auto :
+         size.normal     
+
+color c_labelColor = input.color(color.rgb(20, 0, 0, 70), "Text Color", group='Bar Index')
+c_contador = input.int(title="Display at every X bars", defval=3)
+
+var count = 1
+if timeframe.isdaily
+    count:=(dayofmonth)
+else if is_new_day()
+    count := 1
+else
+    count := count + 1
+
+if (count % c_contador == 0 or count == 1)
+    label1 = label.new(bar_index, 0, style=label.style_none, text=str.tostring(count))
+    label.set_textcolor(label1, c_labelColor)
+    label.set_yloc(label1, yloc.belowbar)
+    label.set_size(label1, labelSize)
+// --------------------------------------------------
+
+
+
