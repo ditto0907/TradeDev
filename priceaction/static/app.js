@@ -505,9 +505,8 @@ function initSRLegendDrag() {
 
   document.addEventListener('mousemove', e => {
     if (!dragging) return;
-    const wrap = document.getElementById('chart-wrap');
-    const maxW = wrap ? wrap.offsetWidth  - legend.offsetWidth  : 9999;
-    const maxH = wrap ? wrap.offsetHeight - legend.offsetHeight : 9999;
+    const maxW = window.innerWidth  - legend.offsetWidth;
+    const maxH = window.innerHeight - legend.offsetHeight;
     const left = Math.max(0, Math.min(maxW, startLeft + (e.clientX - startX)));
     const top  = Math.max(0, Math.min(maxH, startTop  + (e.clientY - startY)));
     legend.style.left = left + 'px';
