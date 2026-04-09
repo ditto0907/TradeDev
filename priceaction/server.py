@@ -12,12 +12,13 @@ import asyncio
 import json
 import logging
 import os
+import time
 from pathlib import Path
 from typing import List
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import JSONResponse, FileResponse, Response
 from contextlib import asynccontextmanager
 
 import config
@@ -28,6 +29,13 @@ from test_data import generate_bars
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s")
 logger = logging.getLogger(__name__)
+
+# Set DATAFEED_DEBUG=1 when starting the server to enable verbose request/response logs:
+#   DATAFEED_DEBUG=1 python3 -m uvicorn server:app --host 0.0.0.0 --port 8000 --loop asyncio
+DATAFEED_DEBUG = os.environ.get("DATAFEED_DEBUG", "0") == "1"
+datafeed_logger = logging.getLogger("datafeed")
+if DATAFEED_DEBUG:
+    datafeed_logger.setLevel(logging.DEBUG)
 
 BASE_DIR = Path(__file__).parent
 
@@ -129,6 +137,54 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="MES Price Action Server", lifespan=lifespan)
+
+
+# ─── Debug Middleware ──────────────────────────────────────────────────────────
+
+@app.middleware("http")
+async def datafeed_debug_middleware(request: Request, call_next):
+    """Log every /api/* request and response when DATAFEED_DEBUG=1."""
+    if DATAFEED_DEBUG and request.url.path.startswith("/api"):
+        t0 = time.perf_counter()
+        response: Response = await call_next(request)
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+
+        # Buffer the response body so we can log it
+        body = b""
+        async for chunk in response.body_iterator:
+            body += chunk
+
+        try:
+            payload = json.loads(body)
+            # Summarise large arrays instead of dumping everything
+            summary = {}
+            for k, v in payload.items():
+                if isinstance(v, list) and len(v) > 6:
+                    summary[k] = f"[{v[0]!r} … {v[-1]!r}] ({len(v)} items)"
+                else:
+                    summary[k] = v
+            body_log = json.dumps(summary)
+        except Exception:
+            body_log = body.decode(errors="replace")[:300]
+
+        datafeed_logger.debug(
+            "%-6s %-40s  →  %d  (%.1f ms)  %s",
+            request.method,
+            str(request.url.path) + ("?" + str(request.url.query) if request.url.query else ""),
+            response.status_code,
+            elapsed_ms,
+            body_log,
+        )
+        # Return a new response with the buffered body
+        return Response(
+            content=body,
+            status_code=response.status_code,
+            headers=dict(response.headers),
+            media_type=response.media_type,
+        )
+
+    return await call_next(request)
+
 
 # ─── Static Files ─────────────────────────────────────────────────────────────
 
