@@ -37,11 +37,12 @@ const MES_MARGIN = 1650;   // approximate initial margin per contract (USD)
 
 // ── State ──────────────────────────────────────────────────────────────────────
 
-let _widget      = null;   // TradingView widget instance
-let _activeShapes = [];    // IDs of drawn S/R / cycle shapes
-let _lastBar     = null;   // most recent 5min bar
-let _openPrice   = null;   // day open price (first bar of session)
-let _orderSide   = 'buy';  // current order side
+let _widget        = null;   // TradingView widget instance
+let _activeShapes  = [];     // IDs of drawn S/R / cycle shapes
+let _volumeStudyId = null;   // ID of the Volume sub-pane study
+let _lastBar       = null;   // most recent 5min bar
+let _openPrice     = null;   // day open price (first bar of session)
+let _orderSide     = 'buy';  // current order side
 
 // ── DOMContentLoaded ──────────────────────────────────────────────────────────
 
@@ -101,6 +102,26 @@ function initChart() {
 
   _widget.onChartReady(() => {
     setWsStatus('live', 'Live');
+
+    // Add Volume in a separate sub-pane below the candlestick chart.
+    // forceOverlay=false creates a new pane; TradingView adds a drag handle
+    // between panes automatically so the user can resize it.
+    if (!_volumeStudyId) {
+      _widget.activeChart().createStudy(
+        'Volume', false, false, [],
+        {
+          'volume.color.0':    'rgba(239,83,80,0.55)',   // bearish bar
+          'volume.color.1':    'rgba(38,166,154,0.55)',  // bullish bar
+          'volume ma.visible': false,                    // hide MA line
+        }
+      ).then(id => { _volumeStudyId = id; })
+       .catch(() => {
+         // Older TV library versions return the id synchronously via callback
+         _volumeStudyId = _widget.activeChart().createStudy(
+           'Volume', false, false
+         );
+       });
+    }
 
     fetch('/api/analysis')
       .then(r => r.json())
