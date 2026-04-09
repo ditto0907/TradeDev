@@ -263,4 +263,6 @@ async def websocket_endpoint(websocket: WebSocket):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("server:app", host=config.SERVER_HOST, port=config.SERVER_PORT, reload=False)
+    # loop="asyncio" is required: ib_insync is not compatible with uvloop
+    uvicorn.run("server:app", host=config.SERVER_HOST, port=config.SERVER_PORT,
+                reload=False, loop="asyncio")

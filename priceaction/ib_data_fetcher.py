@@ -48,7 +48,9 @@ class IBDataFetcher:
     """
 
     def __init__(self):
-        self.ib = IB()
+        # NOTE: IB() is created lazily inside connect() so it binds to the
+        # running event loop (uvicorn's asyncio loop), not the import-time loop.
+        self.ib: Optional[IB] = None
         self.bars: Dict[str, List[dict]] = {"1min": [], "5min": []}
         self._realtime_subscriptions: Dict[str, object] = {}  # bar_size → BarDataList
         self._new_bar_callbacks: List[Callable[[str, dict], None]] = []
@@ -57,8 +59,15 @@ class IBDataFetcher:
 
     async def connect(self):
         """Connect to IB TWS/Gateway. Retries up to 3 times."""
+        # ib_insync uses asyncio.get_event_loop() internally. In Python 3.10+,
+        # uvicorn's loop is not set as the thread-default loop, so we set it
+        # explicitly here so ib_insync's socket operations use the correct loop.
+        asyncio.set_event_loop(asyncio.get_running_loop())
+
         for attempt in range(1, 4):
             try:
+                # Create IB() here so it captures the running event loop
+                self.ib = IB()
                 await self.ib.connectAsync(
                     config.IB_HOST, config.IB_PORT, clientId=config.IB_CLIENT_ID
                 )
@@ -71,7 +80,7 @@ class IBDataFetcher:
         raise ConnectionError(f"Cannot connect to IB TWS at {config.IB_HOST}:{config.IB_PORT}")
 
     def disconnect(self):
-        if self.ib.isConnected():
+        if self.ib and self.ib.isConnected():
             self.ib.disconnect()
             logger.info("Disconnected from IB TWS")
 
@@ -171,6 +180,8 @@ class IBDataFetcher:
 
     def unsubscribe_realtime(self):
         """Cancel all real-time subscriptions."""
+        if not self.ib:
+            return
         for key, bars_obj in self._realtime_subscriptions.items():
             self.ib.cancelHistoricalData(bars_obj)
             logger.info("Cancelled real-time subscription for %s", key)
