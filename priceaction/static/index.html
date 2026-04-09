@@ -3,112 +3,776 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>MES Price Action Chart</title>
+  <title>MES Trading Terminal</title>
   <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
+    /* ── Reset & Base ──────────────────────────────────────────────────────── */
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 
-    body {
-      background: #131722;
-      color: #d1d4dc;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      display: flex;
-      flex-direction: column;
-      height: 100vh;
+    :root {
+      --bg:           #131722;
+      --panel:        #1e222d;
+      --panel-hover:  #2a2e3d;
+      --border:       #2a2e39;
+      --text:         #d1d4dc;
+      --text-dim:     #787b86;
+      --text-faint:   #4c505c;
+      --green:        #26a69a;
+      --green-bg:     #0d2b2a;
+      --green-hover:  #1e9c90;
+      --red:          #ef5350;
+      --red-bg:       #2c1616;
+      --red-hover:    #d94240;
+      --blue:         #2962ff;
+      --orange:       #ff9800;
+      --input-bg:     #0e1015;
+      --topbar-h:     48px;
+      --left-w:       200px;
+      --right-w:      280px;
+      --bottom-h:     180px;
+    }
+
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Trebuchet MS", "Segoe UI", sans-serif;
+      font-size: 13px;
       overflow: hidden;
     }
 
-    #header {
+    /* ── Top Bar ───────────────────────────────────────────────────────────── */
+    #topbar {
+      height: var(--topbar-h);
+      background: var(--panel);
+      border-bottom: 1px solid var(--border);
       display: flex;
       align-items: center;
+      padding: 0 12px;
       gap: 16px;
-      padding: 8px 16px;
-      background: #1e222d;
-      border-bottom: 1px solid #2a2e39;
+      flex-shrink: 0;
+      z-index: 100;
+    }
+
+    .logo {
+      font-size: 14px;
+      font-weight: 700;
+      color: var(--text);
+      letter-spacing: 0.5px;
+      white-space: nowrap;
+    }
+    .logo span { color: var(--blue); }
+
+    .topbar-sep {
+      width: 1px;
+      height: 24px;
+      background: var(--border);
       flex-shrink: 0;
     }
 
-    #header h1 {
+    .symbol-info {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+    }
+    .symbol-name {
       font-size: 15px;
       font-weight: 600;
       color: #e0e3eb;
     }
+    .symbol-desc {
+      font-size: 11px;
+      color: var(--text-dim);
+    }
+    #last-price {
+      font-size: 18px;
+      font-weight: 600;
+      color: var(--text);
+      min-width: 80px;
+    }
+    #price-change {
+      font-size: 12px;
+      font-weight: 500;
+      padding: 2px 6px;
+      border-radius: 3px;
+      background: var(--panel-hover);
+    }
+    #price-change.up   { color: var(--green); background: var(--green-bg); }
+    #price-change.down { color: var(--red);   background: var(--red-bg); }
 
+    .ohlc-row {
+      display: flex;
+      gap: 14px;
+      font-size: 11px;
+      color: var(--text-dim);
+    }
+    .ohlc-row span b { color: var(--text); font-weight: 500; }
+
+    /* Cycle badge in topbar */
     #cycle-badge {
       padding: 3px 10px;
       border-radius: 4px;
-      font-size: 12px;
-      font-weight: 700;
-      letter-spacing: 0.5px;
-      text-transform: uppercase;
-      background: #2a2e39;
-      color: #9598a1;
-    }
-    #cycle-badge.markup      { background: #1a3628; color: #26a69a; }
-    #cycle-badge.markdown    { background: #3b1a1a; color: #ef5350; }
-    #cycle-badge.accumulation{ background: #1a2f3b; color: #2196f3; }
-    #cycle-badge.distribution{ background: #3a2e14; color: #ff9800; }
-
-    #status {
-      margin-left: auto;
-      font-size: 12px;
-      color: #787b86;
-    }
-    #status.connected { color: #26a69a; }
-    #status.error     { color: #ef5350; }
-
-    #chart-container {
-      flex: 1;
-      position: relative;
-      min-height: 0;
-    }
-
-    #tv-chart {
-      width: 100%;
-      height: 100%;
-    }
-
-    #legend {
-      position: absolute;
-      top: 8px;
-      right: 12px;
-      z-index: 10;
-      background: rgba(19, 23, 34, 0.88);
-      border: 1px solid #2a2e39;
-      border-radius: 6px;
-      padding: 8px 12px;
       font-size: 11px;
-      line-height: 1.8;
+      font-weight: 700;
+      letter-spacing: 0.6px;
+      text-transform: uppercase;
+      background: var(--panel-hover);
+      color: var(--text-dim);
+      white-space: nowrap;
     }
-    .legend-item { display: flex; align-items: center; gap: 6px; }
-    .legend-dot  { width: 12px; height: 3px; border-radius: 2px; }
+    #cycle-badge.markup       { background: #0d2420; color: var(--green); }
+    #cycle-badge.markdown     { background: #2c1414; color: var(--red); }
+    #cycle-badge.accumulation { background: #0d1e30; color: #4fc3f7; }
+    #cycle-badge.distribution { background: #2e2010; color: var(--orange); }
+
+    .topbar-right {
+      margin-left: auto;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    #ws-status {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 11px;
+      color: var(--text-dim);
+    }
+    .status-dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: var(--text-faint);
+    }
+    .status-dot.live { background: var(--green); box-shadow: 0 0 4px var(--green); }
+    .status-dot.error { background: var(--red); }
+
+    /* ── Main Layout ───────────────────────────────────────────────────────── */
+    #main {
+      display: grid;
+      grid-template-columns: var(--left-w) 1fr var(--right-w);
+      grid-template-rows: 1fr var(--bottom-h);
+      height: calc(100vh - var(--topbar-h));
+    }
+
+    /* ── Left Panel — Watchlist ─────────────────────────────────────────────── */
+    #watchlist {
+      grid-column: 1;
+      grid-row: 1 / 3;
+      background: var(--panel);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .panel-header {
+      padding: 9px 12px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.7px;
+      color: var(--text-dim);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+
+    #watchlist-search {
+      padding: 7px 10px;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    #watchlist-search input {
+      width: 100%;
+      background: var(--input-bg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--text);
+      font-size: 12px;
+      padding: 5px 8px;
+      outline: none;
+    }
+    #watchlist-search input:focus { border-color: var(--blue); }
+
+    #watchlist-items { flex: 1; overflow-y: auto; }
+    #watchlist-items::-webkit-scrollbar { width: 4px; }
+    #watchlist-items::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+    .watch-item {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      grid-template-rows: auto auto;
+      gap: 1px 4px;
+      padding: 8px 12px;
+      cursor: pointer;
+      border-bottom: 1px solid rgba(42,46,57,0.5);
+      transition: background 0.1s;
+    }
+    .watch-item:hover  { background: var(--panel-hover); }
+    .watch-item.active { background: rgba(41,98,255,0.12); border-left: 2px solid var(--blue); padding-left: 10px; }
+
+    .watch-symbol  { font-size: 13px; font-weight: 600; color: var(--text); grid-column:1; grid-row:1; }
+    .watch-name    { font-size: 10px; color: var(--text-dim); grid-column:1; grid-row:2; }
+    .watch-price   { font-size: 13px; font-weight: 500; text-align:right; grid-column:2; grid-row:1; }
+    .watch-change  { font-size: 10px; text-align:right; grid-column:2; grid-row:2; }
+    .watch-change.up   { color: var(--green); }
+    .watch-change.down { color: var(--red); }
+
+    /* ── Center — Chart ────────────────────────────────────────────────────── */
+    #chart-wrap {
+      grid-column: 2;
+      grid-row: 1;
+      position: relative;
+      overflow: hidden;
+      background: var(--bg);
+    }
+    #tv-chart { width: 100%; height: 100%; }
+
+    /* SR legend overlay */
+    #sr-legend {
+      position: absolute;
+      top: 8px; left: 8px;
+      z-index: 10;
+      background: rgba(19,23,34,0.85);
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      padding: 6px 10px;
+      font-size: 10px;
+      line-height: 1.9;
+      pointer-events: none;
+    }
+    .leg-row { display:flex; align-items:center; gap:6px; }
+    .leg-line { width:14px; height:2px; border-radius:1px; }
+    .leg-box  { width:14px; height:10px; border-radius:2px; }
+
+    /* ── Right Panel — Order Entry ─────────────────────────────────────────── */
+    #order-panel {
+      grid-column: 3;
+      grid-row: 1 / 3;
+      background: var(--panel);
+      border-left: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* Bid/Ask bar */
+    #bid-ask {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      border-bottom: 1px solid var(--border);
+    }
+    .ba-side {
+      padding: 10px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .ba-side:first-child { border-right: 1px solid var(--border); }
+    .ba-label { font-size: 10px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
+    .ba-price  { font-size: 18px; font-weight: 700; }
+    .ba-price.bid { color: var(--red); }
+    .ba-price.ask { color: var(--green); }
+    .ba-size   { font-size: 10px; color: var(--text-dim); }
+
+    /* Buy / Sell tabs */
+    #order-tabs {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    .order-tab {
+      padding: 10px;
+      text-align: center;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      letter-spacing: 0.3px;
+      color: var(--text-dim);
+      border-bottom: 2px solid transparent;
+      transition: background 0.15s, color 0.15s;
+    }
+    .order-tab:hover { background: var(--panel-hover); }
+    .order-tab.active-buy  { color: var(--green); border-bottom-color: var(--green); }
+    .order-tab.active-sell { color: var(--red);   border-bottom-color: var(--red); }
+
+    /* Order form */
+    #order-form {
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      flex: 1;
+      overflow-y: auto;
+    }
+
+    .form-group { display: flex; flex-direction: column; gap: 5px; }
+    .form-label {
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-dim);
+    }
+
+    .form-select, .form-input {
+      background: var(--input-bg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--text);
+      font-size: 13px;
+      padding: 7px 10px;
+      outline: none;
+      width: 100%;
+      -webkit-appearance: none;
+      appearance: none;
+    }
+    .form-select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23787b86'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 10px center; padding-right: 28px; cursor: pointer; }
+    .form-select:focus, .form-input:focus { border-color: var(--blue); }
+
+    .qty-row { display: grid; grid-template-columns: 1fr 32px 1fr; align-items: center; gap: 4px; }
+    .qty-btn {
+      height: 32px;
+      background: var(--panel-hover);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--text);
+      font-size: 16px;
+      cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      transition: background 0.1s;
+    }
+    .qty-btn:hover { background: #3a3f4d; }
+    .qty-input {
+      text-align: center;
+      background: var(--input-bg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--text);
+      font-size: 14px;
+      font-weight: 600;
+      padding: 6px 4px;
+      width: 100%;
+      outline: none;
+    }
+    .qty-input:focus { border-color: var(--blue); }
+
+    .order-summary {
+      background: var(--input-bg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 8px 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .summary-row { display: flex; justify-content: space-between; font-size: 11px; }
+    .summary-row span:first-child { color: var(--text-dim); }
+    .summary-row span:last-child  { color: var(--text); font-weight: 500; }
+
+    #submit-order {
+      padding: 11px;
+      border-radius: 5px;
+      border: none;
+      font-size: 14px;
+      font-weight: 700;
+      cursor: pointer;
+      letter-spacing: 0.4px;
+      transition: background 0.15s, transform 0.1s;
+    }
+    #submit-order:active { transform: scale(0.98); }
+    #submit-order.buy  { background: var(--green); color: #fff; }
+    #submit-order.buy:hover  { background: var(--green-hover); }
+    #submit-order.sell { background: var(--red);   color: #fff; }
+    #submit-order.sell:hover { background: var(--red-hover); }
+
+    /* SR levels in right panel */
+    #sr-panel {
+      border-top: 1px solid var(--border);
+      padding: 10px 12px;
+      flex-shrink: 0;
+    }
+    .sr-panel-title {
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-dim);
+      margin-bottom: 7px;
+    }
+    .sr-levels-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 4px 8px;
+    }
+    .sr-level-item {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 11px;
+    }
+    .sr-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    .sr-price { font-weight: 600; }
+    .sr-price.sup { color: var(--green); }
+    .sr-price.res { color: var(--red); }
+
+    /* ── Bottom Panel ──────────────────────────────────────────────────────── */
+    #bottom {
+      grid-column: 2;
+      grid-row: 2;
+      background: var(--panel);
+      border-top: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    #bottom-tabs {
+      display: flex;
+      align-items: center;
+      border-bottom: 1px solid var(--border);
+      padding: 0 4px;
+      flex-shrink: 0;
+    }
+    .btab {
+      padding: 9px 14px;
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--text-dim);
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      transition: color 0.15s;
+      white-space: nowrap;
+    }
+    .btab:hover  { color: var(--text); }
+    .btab.active { color: var(--text); border-bottom-color: var(--blue); }
+
+    #bottom-content { flex: 1; overflow: hidden; }
+
+    .btab-pane { display: none; height: 100%; overflow-y: auto; }
+    .btab-pane.active { display: block; }
+    .btab-pane::-webkit-scrollbar { width: 4px; }
+    .btab-pane::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+    /* Data table */
+    .data-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+    .data-table th {
+      position: sticky; top: 0;
+      background: var(--panel);
+      color: var(--text-dim);
+      font-weight: 500;
+      font-size: 11px;
+      text-align: left;
+      padding: 6px 12px;
+      border-bottom: 1px solid var(--border);
+      white-space: nowrap;
+      z-index: 2;
+    }
+    .data-table td {
+      padding: 6px 12px;
+      border-bottom: 1px solid rgba(42,46,57,0.4);
+      color: var(--text);
+      white-space: nowrap;
+    }
+    .data-table tr:hover td { background: rgba(41,62,81,0.18); }
+    .data-table .up   { color: var(--green); }
+    .data-table .down { color: var(--red); }
+
+    .empty-table {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 100%;
+      color: var(--text-faint);
+      font-size: 12px;
+    }
+
+    /* Scrollbar global */
+    ::-webkit-scrollbar { width: 5px; height: 5px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+    /* Resize handle for bottom panel */
+    #bottom-resize {
+      height: 4px;
+      background: transparent;
+      cursor: row-resize;
+      flex-shrink: 0;
+    }
+    #bottom-resize:hover { background: var(--blue); }
   </style>
 </head>
 <body>
 
-<div id="header">
-  <h1>MES — Micro E-mini S&amp;P 500</h1>
+<!-- ── TOP BAR ─────────────────────────────────────────────────────────────── -->
+<div id="topbar">
+  <div class="logo">TRADE<span>DEV</span></div>
+  <div class="topbar-sep"></div>
+
+  <div class="symbol-info">
+    <span class="symbol-name">MES</span>
+    <span class="symbol-desc">Micro E-mini S&amp;P 500 · CME</span>
+  </div>
+
+  <span id="last-price">—</span>
+  <span id="price-change">—</span>
+
+  <div class="topbar-sep"></div>
+
+  <div class="ohlc-row">
+    <span>O <b id="tb-open">—</b></span>
+    <span>H <b id="tb-high">—</b></span>
+    <span>L <b id="tb-low">—</b></span>
+    <span>C <b id="tb-close">—</b></span>
+    <span>V <b id="tb-vol">—</b></span>
+  </div>
+
+  <div class="topbar-sep"></div>
   <span id="cycle-badge">—</span>
-  <span id="status">Connecting…</span>
-</div>
 
-<div id="chart-container">
-  <div id="tv-chart"></div>
-
-  <div id="legend">
-    <div class="legend-item"><div class="legend-dot" style="background:#26a69a"></div>Support</div>
-    <div class="legend-item"><div class="legend-dot" style="background:#ef5350"></div>Resistance</div>
-    <div class="legend-item"><div class="legend-dot" style="background:#26a69a;opacity:.35;height:10px"></div>Markup</div>
-    <div class="legend-item"><div class="legend-dot" style="background:#ef5350;opacity:.35;height:10px"></div>Markdown</div>
-    <div class="legend-item"><div class="legend-dot" style="background:#2196f3;opacity:.35;height:10px"></div>Accumulation</div>
-    <div class="legend-item"><div class="legend-dot" style="background:#ff9800;opacity:.35;height:10px"></div>Distribution</div>
+  <div class="topbar-right">
+    <div id="ws-status">
+      <div class="status-dot" id="ws-dot"></div>
+      <span id="ws-text">Connecting…</span>
+    </div>
   </div>
 </div>
 
+<!-- ── MAIN GRID ───────────────────────────────────────────────────────────── -->
+<div id="main">
+
+  <!-- LEFT: Watchlist -->
+  <div id="watchlist">
+    <div class="panel-header">Watchlist</div>
+    <div id="watchlist-search">
+      <input type="text" placeholder="Search symbol…" id="wl-search-input" />
+    </div>
+    <div id="watchlist-items">
+      <div class="watch-item active" data-symbol="MES">
+        <span class="watch-symbol">MES</span>
+        <span class="watch-name">Micro E-mini S&amp;P</span>
+        <span class="watch-price" id="wl-mes-price">—</span>
+        <span class="watch-change" id="wl-mes-chg">—</span>
+      </div>
+      <div class="watch-item" data-symbol="ES">
+        <span class="watch-symbol">ES</span>
+        <span class="watch-name">E-mini S&amp;P 500</span>
+        <span class="watch-price">—</span>
+        <span class="watch-change">—</span>
+      </div>
+      <div class="watch-item" data-symbol="NQ">
+        <span class="watch-symbol">NQ</span>
+        <span class="watch-name">E-mini Nasdaq-100</span>
+        <span class="watch-price">—</span>
+        <span class="watch-change">—</span>
+      </div>
+      <div class="watch-item" data-symbol="RTY">
+        <span class="watch-symbol">RTY</span>
+        <span class="watch-name">E-mini Russell 2000</span>
+        <span class="watch-price">—</span>
+        <span class="watch-change">—</span>
+      </div>
+      <div class="watch-item" data-symbol="YM">
+        <span class="watch-symbol">YM</span>
+        <span class="watch-name">E-mini Dow</span>
+        <span class="watch-price">—</span>
+        <span class="watch-change">—</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- CENTER: Chart -->
+  <div id="chart-wrap">
+    <div id="tv-chart"></div>
+
+    <div id="sr-legend">
+      <div class="leg-row"><div class="leg-line" style="background:#26a69a"></div>Support</div>
+      <div class="leg-row"><div class="leg-line" style="background:#ef5350"></div>Resistance</div>
+      <div class="leg-row"><div class="leg-box" style="background:rgba(38,166,154,.18)"></div>Markup</div>
+      <div class="leg-row"><div class="leg-box" style="background:rgba(239,83,80,.18)"></div>Markdown</div>
+      <div class="leg-row"><div class="leg-box" style="background:rgba(33,150,243,.18)"></div>Accumulation</div>
+      <div class="leg-row"><div class="leg-box" style="background:rgba(255,152,0,.18)"></div>Distribution</div>
+    </div>
+  </div>
+
+  <!-- RIGHT: Order Entry -->
+  <div id="order-panel">
+    <div class="panel-header">Order Entry</div>
+
+    <!-- Bid / Ask -->
+    <div id="bid-ask">
+      <div class="ba-side">
+        <span class="ba-label">Bid</span>
+        <span class="ba-price bid" id="bid-price">—</span>
+        <span class="ba-size" id="bid-size">—</span>
+      </div>
+      <div class="ba-side">
+        <span class="ba-label">Ask</span>
+        <span class="ba-price ask" id="ask-price">—</span>
+        <span class="ba-size" id="ask-size">—</span>
+      </div>
+    </div>
+
+    <!-- Buy / Sell Tabs -->
+    <div id="order-tabs">
+      <div class="order-tab active-buy" id="tab-buy"  onclick="setOrderSide('buy')">BUY / LONG</div>
+      <div class="order-tab"           id="tab-sell" onclick="setOrderSide('sell')">SELL / SHORT</div>
+    </div>
+
+    <!-- Form -->
+    <div id="order-form">
+      <div class="form-group">
+        <label class="form-label">Order Type</label>
+        <select class="form-select" id="order-type" onchange="onOrderTypeChange()">
+          <option value="market">Market</option>
+          <option value="limit">Limit</option>
+          <option value="stop">Stop</option>
+          <option value="stop_limit">Stop Limit</option>
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Quantity (Contracts)</label>
+        <div class="qty-row">
+          <button class="qty-btn" onclick="adjustQty(-1)">−</button>
+          <input  class="qty-input" type="number" id="order-qty" value="1" min="1" max="50" onchange="updateSummary()" />
+          <button class="qty-btn" onclick="adjustQty(+1)">+</button>
+        </div>
+      </div>
+
+      <div class="form-group" id="price-group">
+        <label class="form-label">Limit Price</label>
+        <input class="form-input" type="number" id="order-price" placeholder="0.00" step="0.25" onchange="updateSummary()" />
+      </div>
+
+      <div class="form-group" id="stop-group" style="display:none">
+        <label class="form-label">Stop Price</label>
+        <input class="form-input" type="number" id="order-stop" placeholder="0.00" step="0.25" onchange="updateSummary()" />
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Time In Force</label>
+        <select class="form-select" id="order-tif">
+          <option value="day">Day</option>
+          <option value="gtc">GTC</option>
+          <option value="ioc">IOC</option>
+          <option value="fok">FOK</option>
+        </select>
+      </div>
+
+      <div class="order-summary">
+        <div class="summary-row">
+          <span>Contract Value</span>
+          <span id="sum-value">—</span>
+        </div>
+        <div class="summary-row">
+          <span>Tick Size</span>
+          <span>0.25 pt = $1.25</span>
+        </div>
+        <div class="summary-row">
+          <span>Margin Req.</span>
+          <span id="sum-margin">—</span>
+        </div>
+      </div>
+
+      <button id="submit-order" class="buy" onclick="placeOrder()">
+        BUY MES
+      </button>
+    </div>
+
+    <!-- S/R quick view -->
+    <div id="sr-panel">
+      <div class="sr-panel-title">Key Levels</div>
+      <div class="sr-levels-grid" id="sr-levels-list">
+        <span style="color:var(--text-faint);font-size:11px;grid-column:1/-1">Loading…</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- BOTTOM: Positions / Orders -->
+  <div id="bottom">
+    <div id="bottom-resize"></div>
+    <div id="bottom-tabs">
+      <div class="btab active" data-pane="positions">Positions</div>
+      <div class="btab"        data-pane="orders">Working Orders</div>
+      <div class="btab"        data-pane="fills">Filled Orders</div>
+      <div class="btab"        data-pane="history">Trade History</div>
+    </div>
+    <div id="bottom-content">
+
+      <!-- Positions -->
+      <div class="btab-pane active" id="pane-positions">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Symbol</th><th>Side</th><th>Qty</th>
+              <th>Avg Price</th><th>Last</th>
+              <th>Unrealized P&amp;L</th><th>Realized P&amp;L</th>
+              <th>Value</th>
+            </tr>
+          </thead>
+          <tbody id="pos-tbody">
+            <tr><td colspan="8"><div class="empty-table">No open positions</div></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Working Orders -->
+      <div class="btab-pane" id="pane-orders">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Time</th><th>Symbol</th><th>Side</th><th>Type</th>
+              <th>Qty</th><th>Price</th><th>Status</th><th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="orders-tbody">
+            <tr><td colspan="8"><div class="empty-table">No working orders</div></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Filled Orders -->
+      <div class="btab-pane" id="pane-fills">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Time</th><th>Symbol</th><th>Side</th><th>Type</th>
+              <th>Qty</th><th>Fill Price</th><th>Commission</th>
+            </tr>
+          </thead>
+          <tbody id="fills-tbody">
+            <tr><td colspan="7"><div class="empty-table">No filled orders</div></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Trade History -->
+      <div class="btab-pane" id="pane-history">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Date</th><th>Symbol</th><th>Side</th>
+              <th>Qty</th><th>Entry</th><th>Exit</th><th>P&amp;L</th>
+            </tr>
+          </thead>
+          <tbody id="history-tbody">
+            <tr><td colspan="7"><div class="empty-table">No trade history</div></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+    </div><!-- /bottom-content -->
+  </div><!-- /bottom -->
+
+</div><!-- /main -->
+
 <!-- TradingView Charting Library -->
 <script src="/charting_library/charting_library.standalone.js"></script>
-<!-- Custom DataFeed -->
 <script src="/static/datafeed.js"></script>
-<!-- App Logic -->
 <script src="/static/app.js"></script>
 
 </body>
