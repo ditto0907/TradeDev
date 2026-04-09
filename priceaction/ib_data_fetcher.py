@@ -133,41 +133,69 @@ class IBDataFetcher:
 
     async def subscribe_realtime(self):
         """
-        Subscribe to real-time bars using keepUpToDate=True.
-        New/updated bars are detected and dispatched to registered callbacks.
+        Subscribe to real-time bars via asyncio polling tasks.
+
+        reqHistoricalDataAsync(keepUpToDate=True) resolves a one-shot Future
+        and never fires updateEvent — so we use periodic polling instead.
+        Each task fetches the last 2 minutes of bars on a fixed interval and
+        dispatches any bar whose timestamp is newer than what we already have.
         """
         contract = await self._get_contract()
 
-        for bar_size in ("1 min", "5 mins"):
-            key = "1min" if "1 min" in bar_size else "5min"
-            # reqHistoricalDataAsync with keepUpToDate=True — safe inside a running event loop
-            bars_obj = await self.ib.reqHistoricalDataAsync(
-                contract,
-                endDateTime="",
-                durationStr="60 S",      # small window; keepUpToDate streams new bars
-                barSizeSetting=bar_size,
-                whatToShow="TRADES",
-                useRTH=False,
-                formatDate=2,
-                keepUpToDate=True,
+        for bar_size, key, poll_secs in [
+            ("1 min",  "1min", 15),   # poll every 15s for 1min bars
+            ("5 mins", "5min", 30),   # poll every 30s for 5min bars
+        ]:
+            task = asyncio.create_task(
+                self._poll_bars(contract, bar_size, key, poll_secs),
+                name=f"poll-{key}",
             )
-            self._realtime_subscriptions[key] = bars_obj
+            self._realtime_subscriptions[key] = task
+            logger.info("Started polling task for real-time %s bars (interval=%ds)", key, poll_secs)
 
-            # Attach update handler via ib_insync's BarDataList.updateEvent
-            def make_handler(k):
-                def on_update(bars_list, has_new_bar):
-                    if has_new_bar and len(bars_list) > 0:
-                        new_bar = _bar_to_dict(bars_list[-1])
-                        self._append_bar(k, new_bar)
+    async def _poll_bars(self, contract, bar_size: str, key: str, interval_sec: int):
+        """Background task: periodically fetch the latest bar and notify callbacks."""
+        while self.ib and self.ib.isConnected():
+            await asyncio.sleep(interval_sec)
+            try:
+                bars = await self.ib.reqHistoricalDataAsync(
+                    contract,
+                    endDateTime="",
+                    durationStr="120 S",
+                    barSizeSetting=bar_size,
+                    whatToShow="TRADES",
+                    useRTH=False,
+                    formatDate=2,
+                )
+                if not bars:
+                    continue
+
+                new_bar = _bar_to_dict(bars[-1])
+                last_ts  = self.bars[key][-1]["time"] if self.bars[key] else 0
+
+                if new_bar["time"] > last_ts:
+                    # Genuinely new bar
+                    self._append_bar(key, new_bar)
+                    for cb in self._new_bar_callbacks:
+                        try:
+                            cb(key, new_bar)
+                        except Exception as exc:
+                            logger.error("Callback error: %s", exc)
+                    logger.debug("New %s bar dispatched: time=%s close=%s", key, new_bar["time"], new_bar["close"])
+                else:
+                    # Update current in-progress bar (same timestamp) and notify
+                    if self.bars[key] and self.bars[key][-1]["time"] == new_bar["time"]:
+                        self.bars[key][-1] = new_bar
                         for cb in self._new_bar_callbacks:
                             try:
-                                cb(k, new_bar)
+                                cb(key, new_bar)
                             except Exception as exc:
                                 logger.error("Callback error: %s", exc)
-                return on_update
 
-            bars_obj.updateEvent += make_handler(key)
-            logger.info("Subscribed to real-time %s bars", key)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.warning("Poll error for %s: %s", key, e)
 
     def _append_bar(self, key: str, bar: dict):
         """Append or update the last bar in the in-memory store."""
@@ -180,12 +208,11 @@ class IBDataFetcher:
                 bars.pop(0)
 
     def unsubscribe_realtime(self):
-        """Cancel all real-time subscriptions."""
-        if not self.ib:
-            return
-        for key, bars_obj in self._realtime_subscriptions.items():
-            self.ib.cancelHistoricalData(bars_obj)
-            logger.info("Cancelled real-time subscription for %s", key)
+        """Cancel all real-time polling tasks."""
+        for key, task in self._realtime_subscriptions.items():
+            if isinstance(task, asyncio.Task) and not task.done():
+                task.cancel()
+                logger.info("Cancelled polling task for %s", key)
         self._realtime_subscriptions.clear()
 
     # ─── Convenience ─────────────────────────────────────────────────────────
