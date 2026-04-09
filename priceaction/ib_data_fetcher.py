@@ -156,7 +156,8 @@ class IBDataFetcher:
             return
 
         rb = rt_bars[-1]   # latest RealTimeBar namedtuple
-        rt_ts   = int(rb.time)
+        # rb.time is a datetime in newer ib_insync versions, an int in older ones
+        rt_ts = int(rb.time.timestamp()) if isinstance(rb.time, datetime) else int(rb.time)
         rb_open = float(rb.open_)   # ib_insync uses open_ to avoid Python keyword clash
         rb_high = float(rb.high)
         rb_low  = float(rb.low)
