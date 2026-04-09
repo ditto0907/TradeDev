@@ -24,6 +24,7 @@ import config
 from ib_data_fetcher import IBDataFetcher
 from google_sheets_sync import GoogleSheetsSync
 from price_action_analyzer import PriceActionAnalyzer
+from test_data import generate_bars
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s")
 logger = logging.getLogger(__name__)
@@ -87,14 +88,24 @@ async def lifespan(app: FastAPI):
     logger.info("Starting up…")
 
     # Connect to IB
+    ib_connected = False
     try:
         await fetcher.connect()
         await fetcher.load_history()
         fetcher.add_new_bar_callback(on_new_bar)
         await fetcher.subscribe_realtime()
+        ib_connected = True
         logger.info("IB data streaming started.")
     except Exception as e:
-        logger.error("IB startup error: %s — server running without live data", e)
+        logger.error("IB startup error: %s — loading synthetic test data instead", e)
+
+    # Fall back to 500-bar synthetic test data when IB is unavailable
+    if not ib_connected or not fetcher.get_bars("5min"):
+        logger.info("Loading synthetic test data (500 bars each for 1min and 5min)…")
+        fetcher.bars["5min"] = generate_bars(n=500, bar_minutes=5)
+        fetcher.bars["1min"] = generate_bars(n=500, bar_minutes=1)
+        logger.info("Test data loaded: %d 5min bars, %d 1min bars",
+                    len(fetcher.bars["5min"]), len(fetcher.bars["1min"]))
 
     # Google Sheets authentication (optional — graceful degradation)
     if sheets.authenticate():
