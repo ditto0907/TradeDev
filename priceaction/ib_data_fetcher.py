@@ -16,6 +16,7 @@ from typing import Callable, Dict, List, Optional
 from ib_insync import IB, ContFuture, util
 
 import config
+import ib_log_translator  # auto-installs translation filter on import
 
 logger = logging.getLogger(__name__)
 
