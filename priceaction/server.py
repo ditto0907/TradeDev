@@ -46,6 +46,7 @@ sheets = GoogleSheetsSync()
 analyzer = PriceActionAnalyzer()
 _ws_clients: List[WebSocket] = []
 _latest_analysis: dict = {}
+_last_analysis_bar_ts: int = 0   # timestamp of the 5min bar last analysed
 
 
 # ─── WebSocket Broadcast ──────────────────────────────────────────────────────
@@ -65,23 +66,33 @@ async def broadcast(message: dict):
 # ─── New Bar Handler ──────────────────────────────────────────────────────────
 
 def on_new_bar(bar_size_key: str, bar: dict):
-    """Called by IBDataFetcher on each completed new bar."""
-    # Buffer to Google Sheets (non-blocking best-effort)
+    """
+    Called by IBDataFetcher on every 5-second tick for both 1min and 5min bars.
+    Price-action analysis is re-run only when a new 5min bar is completed (i.e.
+    bar timestamp advances), not on every in-progress tick.
+    """
+    global _latest_analysis, _last_analysis_bar_ts
+
+    # Buffer completed bars to Google Sheets (non-blocking best-effort).
+    # Only buffer when the bar timestamp is new to avoid duplicate rows.
     sheets.buffer_bar(bar_size_key, bar)
 
-    # Rerun price-action analysis on 5min bars
-    if bar_size_key == "5min":
-        global _latest_analysis
+    # Rerun price-action analysis only when a brand-new 5min bar is completed
+    analysis_updated = False
+    if bar_size_key == "5min" and bar["time"] > _last_analysis_bar_ts:
+        _last_analysis_bar_ts = bar["time"]
         bars_5min = fetcher.get_bars("5min")
         _latest_analysis = analyzer.get_analysis(bars_5min)
+        analysis_updated = True
 
-    # Broadcast to all WebSocket clients
+    # Broadcast bar tick to all WebSocket clients (every ~5s)
     asyncio.create_task(broadcast({
         "type": "bar",
         "bar_size": bar_size_key,
         "bar": bar,
     }))
-    if bar_size_key == "5min":
+    # Broadcast updated analysis only when a new 5min bar is completed
+    if analysis_updated:
         asyncio.create_task(broadcast({
             "type": "analysis",
             "data": _latest_analysis,

@@ -13,7 +13,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional
 
-from ib_insync import IB, ContFuture, util
+from ib_insync import IB, ContFuture, RealTimeBar, util
 
 import config
 import ib_log_translator  # auto-installs translation filter on import
@@ -53,8 +53,10 @@ class IBDataFetcher:
         # running event loop (uvicorn's asyncio loop), not the import-time loop.
         self.ib: Optional[IB] = None
         self.bars: Dict[str, List[dict]] = {"1min": [], "5min": []}
-        self._realtime_subscriptions: Dict[str, object] = {}  # bar_size → BarDataList
+        self._realtime_subscriptions: Dict[str, object] = {}  # key → RealTimeBarList or Task
         self._new_bar_callbacks: List[Callable[[str, dict], None]] = []
+        # Running aggregated bars for 1min/5min (built from 5s real-time bars)
+        self._rt_current: Dict[str, Optional[dict]] = {"1min": None, "5min": None}
 
     # ─── Connection ──────────────────────────────────────────────────────────
 
@@ -133,69 +135,69 @@ class IBDataFetcher:
 
     async def subscribe_realtime(self):
         """
-        Subscribe to real-time bars via asyncio polling tasks.
+        Subscribe to real-time 5-second bars via reqRealTimeBars.
 
-        reqHistoricalDataAsync(keepUpToDate=True) resolves a one-shot Future
-        and never fires updateEvent — so we use periodic polling instead.
-        Each task fetches the last 2 minutes of bars on a fixed interval and
-        dispatches any bar whose timestamp is newer than what we already have.
+        IB streams a new 5-second OHLCV bar every 5 seconds via event callback.
+        We aggregate those into 1min and 5min bars and notify registered callbacks
+        on every tick so the frontend chart updates every ~5 seconds.
         """
         contract = await self._get_contract()
+        rt_bars = self.ib.reqRealTimeBars(contract, 5, "TRADES", False)
+        self._realtime_subscriptions["rt"] = rt_bars
+        rt_bars.updateEvent += self._on_rt_bar
+        logger.info("Subscribed to 5-second real-time bars (updates every ~5s)")
 
-        for bar_size, key, poll_secs in [
-            ("1 min",  "1min", 15),   # poll every 15s for 1min bars
-            ("5 mins", "5min", 30),   # poll every 30s for 5min bars
-        ]:
-            task = asyncio.create_task(
-                self._poll_bars(contract, bar_size, key, poll_secs),
-                name=f"poll-{key}",
-            )
-            self._realtime_subscriptions[key] = task
-            logger.info("Started polling task for real-time %s bars (interval=%ds)", key, poll_secs)
+    def _on_rt_bar(self, rt_bars, has_new_bar: bool):
+        """
+        Called by ib_insync every 5 seconds with the latest 5-second bar.
+        Aggregates into 1min and 5min OHLCV bars and dispatches callbacks.
+        """
+        if not has_new_bar or not rt_bars:
+            return
 
-    async def _poll_bars(self, contract, bar_size: str, key: str, interval_sec: int):
-        """Background task: periodically fetch the latest bar and notify callbacks."""
-        while self.ib and self.ib.isConnected():
-            await asyncio.sleep(interval_sec)
+        rb = rt_bars[-1]   # latest RealTimeBar namedtuple
+        rt_ts   = int(rb.time)
+        rb_open = float(rb.open_)   # ib_insync uses open_ to avoid Python keyword clash
+        rb_high = float(rb.high)
+        rb_low  = float(rb.low)
+        rb_close= float(rb.close)
+        rb_vol  = float(rb.volume)
+
+        for key, interval in [("1min", 60), ("5min", 300)]:
+            bar_ts = (rt_ts // interval) * interval  # floor to bar boundary
+            cur = self._rt_current[key]
+
+            if cur is None or bar_ts > cur["time"]:
+                # Bar boundary crossed — old bar is complete, start a new one
+                if cur is not None:
+                    # Finalise old bar in store and notify
+                    self._append_bar(key, cur)
+                    self._dispatch(key, cur)
+                    logger.debug("Completed %s bar: time=%s close=%s", key, cur["time"], cur["close"])
+                # Initialise new in-progress bar
+                cur = {"time": bar_ts, "open": rb_open, "high": rb_high,
+                       "low": rb_low, "close": rb_close, "volume": rb_vol}
+                self._rt_current[key] = cur
+                self._append_bar(key, cur)
+            else:
+                # Same bar — update OHLCV in place
+                cur["high"]   = max(cur["high"], rb_high)
+                cur["low"]    = min(cur["low"],  rb_low)
+                cur["close"]  = rb_close
+                cur["volume"] += rb_vol
+                if self.bars[key] and self.bars[key][-1]["time"] == bar_ts:
+                    self.bars[key][-1] = cur
+
+            # Notify on every tick (both in-progress and new-bar)
+            self._dispatch(key, cur)
+
+    def _dispatch(self, key: str, bar: dict):
+        """Call all registered callbacks with a copy of bar."""
+        for cb in self._new_bar_callbacks:
             try:
-                bars = await self.ib.reqHistoricalDataAsync(
-                    contract,
-                    endDateTime="",
-                    durationStr="120 S",
-                    barSizeSetting=bar_size,
-                    whatToShow="TRADES",
-                    useRTH=False,
-                    formatDate=2,
-                )
-                if not bars:
-                    continue
-
-                new_bar = _bar_to_dict(bars[-1])
-                last_ts  = self.bars[key][-1]["time"] if self.bars[key] else 0
-
-                if new_bar["time"] > last_ts:
-                    # Genuinely new bar
-                    self._append_bar(key, new_bar)
-                    for cb in self._new_bar_callbacks:
-                        try:
-                            cb(key, new_bar)
-                        except Exception as exc:
-                            logger.error("Callback error: %s", exc)
-                    logger.debug("New %s bar dispatched: time=%s close=%s", key, new_bar["time"], new_bar["close"])
-                else:
-                    # Update current in-progress bar (same timestamp) and notify
-                    if self.bars[key] and self.bars[key][-1]["time"] == new_bar["time"]:
-                        self.bars[key][-1] = new_bar
-                        for cb in self._new_bar_callbacks:
-                            try:
-                                cb(key, new_bar)
-                            except Exception as exc:
-                                logger.error("Callback error: %s", exc)
-
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.warning("Poll error for %s: %s", key, e)
+                cb(key, dict(bar))
+            except Exception as exc:
+                logger.error("Callback error: %s", exc)
 
     def _append_bar(self, key: str, bar: dict):
         """Append or update the last bar in the in-memory store."""
@@ -208,11 +210,16 @@ class IBDataFetcher:
                 bars.pop(0)
 
     def unsubscribe_realtime(self):
-        """Cancel all real-time polling tasks."""
-        for key, task in self._realtime_subscriptions.items():
-            if isinstance(task, asyncio.Task) and not task.done():
-                task.cancel()
-                logger.info("Cancelled polling task for %s", key)
+        """Cancel real-time bar subscription."""
+        if not self.ib:
+            return
+        rt = self._realtime_subscriptions.get("rt")
+        if rt is not None:
+            try:
+                self.ib.cancelRealTimeBars(rt)
+                logger.info("Cancelled real-time bar subscription")
+            except Exception as e:
+                logger.warning("Error cancelling real-time bars: %s", e)
         self._realtime_subscriptions.clear()
 
     # ─── Convenience ─────────────────────────────────────────────────────────
