@@ -87,6 +87,7 @@ function initChart() {
       'header_symbol_search',
       'header_compare',
       'display_market_status',
+      'create_volume_indicator_by_default',  // prevent auto volume on main chart
     ],
 
     autosize: true,
@@ -103,24 +104,38 @@ function initChart() {
   _widget.onChartReady(() => {
     setWsStatus('live', 'Live');
 
-    // Add Volume in a separate sub-pane below the candlestick chart.
-    // forceOverlay=false creates a new pane; TradingView adds a drag handle
-    // between panes automatically so the user can resize it.
+    // Add Volume in a separate sub-pane (no overlay on the main chart).
+    // 'create_volume_indicator_by_default' is disabled above so TradingView
+    // won't auto-add volume to the main chart — only our sub-pane version exists.
     if (!_volumeStudyId) {
-      _widget.activeChart().createStudy(
+      const chart = _widget.activeChart();
+      const studyPromise = chart.createStudy(
         'Volume', false, false, [],
         {
           'volume.color.0':    'rgba(239,83,80,0.55)',   // bearish bar
           'volume.color.1':    'rgba(38,166,154,0.55)',  // bullish bar
-          'volume ma.visible': false,                    // hide MA line
+          'volume ma.visible': false,
         }
-      ).then(id => { _volumeStudyId = id; })
-       .catch(() => {
-         // Older TV library versions return the id synchronously via callback
-         _volumeStudyId = _widget.activeChart().createStudy(
-           'Volume', false, false
-         );
-       });
+      );
+
+      const afterCreate = (id) => {
+        _volumeStudyId = id;
+        // Shrink the volume pane to ~half its default height
+        try {
+          const panes = chart.getPanes();
+          if (panes.length > 1) {
+            const mainH = panes[0].getHeight();
+            panes[1].setHeight(Math.round(mainH * 0.15));
+          }
+        } catch {}
+      };
+
+      if (studyPromise && typeof studyPromise.then === 'function') {
+        studyPromise.then(afterCreate).catch(() => {});
+      } else {
+        // Sync return (older TV builds)
+        afterCreate(studyPromise);
+      }
     }
 
     fetch('/api/analysis')
