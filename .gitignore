@@ -1,4 +1,73 @@
+
 priceaction/credentials/*.json
-__pycache__/
 *.pyc
 .env
+
+# --- 操作系统文件 ---
+.DS_Store
+Thumbs.db
+*.swp
+desktop.ini
+
+# --- 编辑器/IDE 配置 ---
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+.project
+.classpath
+.settings/
+
+# --- 环境变量与私钥 (极其重要！永远不要提交) ---
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+*.pem
+*.key
+google_credentials.json
+cert.pfx
+
+# --- 前端 (Node/React/Vue/Next.js) ---
+node_modules/
+dist/
+build/
+.next/
+out/
+.nuxt/
+.cache/
+.parcel-cache/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.eslintcache
+
+# --- 后端 (Python/Django/Flask/FastAPI) ---
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.tox/
+.nox/
+.coverage
+htmlcov/
+nosetests.xml
+coverage.xml
+*.db
+*.sqlite3
+
+# --- 数据库与日志 ---
+*.log
+logs/
+*.sql
+*.dump
+RiskControl.log
+
+# --- 编译输出与依赖管理 ---
+*.exe
+*.dll
+*.so
+*.dylib
+*.bin
+
