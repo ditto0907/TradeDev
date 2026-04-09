@@ -148,6 +148,15 @@ class IBDataFetcher:
         on every tick so the frontend chart updates every ~5 seconds.
         """
         contract = await self._get_contract()
+
+        # Seed _rt_current from last historical bar (same reason as subscribe_mktdata)
+        now_ts = int(time.time())
+        for key, interval in [("1min", 60), ("5min", 300)]:
+            if self.bars[key]:
+                last = dict(self.bars[key][-1])
+                if last["time"] == (now_ts // interval) * interval:
+                    self._rt_current[key] = last
+
         rt_bars = self.ib.reqRealTimeBars(contract, 5, "TRADES", False)
         self._realtime_subscriptions["rt"] = rt_bars
         rt_bars.updateEvent += self._on_rt_bar
@@ -222,6 +231,21 @@ class IBDataFetcher:
         Call subscribe_realtime() instead for the 5-second bar approach.
         """
         contract = await self._get_contract()
+
+        # Seed _rt_current from the last historical bar so the tick aggregator
+        # continues building the in-progress bar rather than starting fresh.
+        # Without this, the first tick would reset open/high/low/vol to zero,
+        # creating a visible gap at the right edge of the chart.
+        now_ts = int(time.time())
+        for key, interval in [("1min", 60), ("5min", 300)]:
+            if self.bars[key]:
+                last = dict(self.bars[key][-1])
+                bar_ts = (now_ts // interval) * interval
+                if last["time"] == bar_ts:
+                    # Last historical bar is the current in-progress bar — seed it
+                    self._rt_current[key] = last
+                    logger.debug("Seeded %s rt_current from history: time=%s", key, last["time"])
+
         ticker = self.ib.reqMktData(contract, "", False, False)
         self._realtime_subscriptions["mktdata"] = ticker
         ticker.updateEvent += self._on_tick
