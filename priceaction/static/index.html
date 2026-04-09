@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MES Price Action Chart</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: #131722;
+      color: #d1d4dc;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    #header {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      padding: 8px 16px;
+      background: #1e222d;
+      border-bottom: 1px solid #2a2e39;
+      flex-shrink: 0;
+    }
+
+    #header h1 {
+      font-size: 15px;
+      font-weight: 600;
+      color: #e0e3eb;
+    }
+
+    #cycle-badge {
+      padding: 3px 10px;
+      border-radius: 4px;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+      background: #2a2e39;
+      color: #9598a1;
+    }
+    #cycle-badge.markup      { background: #1a3628; color: #26a69a; }
+    #cycle-badge.markdown    { background: #3b1a1a; color: #ef5350; }
+    #cycle-badge.accumulation{ background: #1a2f3b; color: #2196f3; }
+    #cycle-badge.distribution{ background: #3a2e14; color: #ff9800; }
+
+    #status {
+      margin-left: auto;
+      font-size: 12px;
+      color: #787b86;
+    }
+    #status.connected { color: #26a69a; }
+    #status.error     { color: #ef5350; }
+
+    #chart-container {
+      flex: 1;
+      position: relative;
+      min-height: 0;
+    }
+
+    #tv-chart {
+      width: 100%;
+      height: 100%;
+    }
+
+    #legend {
+      position: absolute;
+      top: 8px;
+      right: 12px;
+      z-index: 10;
+      background: rgba(19, 23, 34, 0.88);
+      border: 1px solid #2a2e39;
+      border-radius: 6px;
+      padding: 8px 12px;
+      font-size: 11px;
+      line-height: 1.8;
+    }
+    .legend-item { display: flex; align-items: center; gap: 6px; }
+    .legend-dot  { width: 12px; height: 3px; border-radius: 2px; }
+  </style>
+</head>
+<body>
+
+<div id="header">
+  <h1>MES — Micro E-mini S&amp;P 500</h1>
+  <span id="cycle-badge">—</span>
+  <span id="status">Connecting…</span>
+</div>
+
+<div id="chart-container">
+  <div id="tv-chart"></div>
+
+  <div id="legend">
+    <div class="legend-item"><div class="legend-dot" style="background:#26a69a"></div>Support</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#ef5350"></div>Resistance</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#26a69a;opacity:.35;height:10px"></div>Markup</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#ef5350;opacity:.35;height:10px"></div>Markdown</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#2196f3;opacity:.35;height:10px"></div>Accumulation</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#ff9800;opacity:.35;height:10px"></div>Distribution</div>
+  </div>
+</div>
+
+<!-- TradingView Charting Library -->
+<script src="/charting_library/charting_library.standalone.js"></script>
+<!-- Custom DataFeed -->
+<script src="/static/datafeed.js"></script>
+<!-- App Logic -->
+<script src="/static/app.js"></script>
+
+</body>
+</html>
