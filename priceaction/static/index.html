@@ -231,14 +231,28 @@
       position: absolute;
       top: 8px; left: 8px;
       z-index: 10;
-      background: rgba(19,23,34,0.85);
+      background: rgba(19,23,34,0.88);
       border: 1px solid var(--border);
       border-radius: 5px;
-      padding: 6px 10px;
       font-size: 10px;
       line-height: 1.9;
-      pointer-events: none;
+      user-select: none;
+      min-width: 120px;
     }
+    #sr-legend-handle {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 4px 8px 3px;
+      border-bottom: 1px solid var(--border);
+      cursor: grab;
+      color: var(--text-faint);
+      font-size: 10px;
+      letter-spacing: 0.4px;
+    }
+    #sr-legend-handle:active { cursor: grabbing; }
+    #sr-legend-handle .drag-dots { font-size: 12px; letter-spacing: -1px; opacity: 0.5; }
+    #sr-legend-body { padding: 5px 10px 6px; }
     .leg-row { display:flex; align-items:center; gap:6px; }
     .leg-line { width:14px; height:2px; border-radius:1px; }
     .leg-box  { width:14px; height:10px; border-radius:2px; }
@@ -589,12 +603,18 @@
     <div id="tv-chart"></div>
 
     <div id="sr-legend">
-      <div class="leg-row"><div class="leg-line" style="background:#26a69a"></div>Support</div>
-      <div class="leg-row"><div class="leg-line" style="background:#ef5350"></div>Resistance</div>
-      <div class="leg-row"><div class="leg-box" style="background:rgba(38,166,154,.18)"></div>Markup</div>
-      <div class="leg-row"><div class="leg-box" style="background:rgba(239,83,80,.18)"></div>Markdown</div>
-      <div class="leg-row"><div class="leg-box" style="background:rgba(33,150,243,.18)"></div>Accumulation</div>
-      <div class="leg-row"><div class="leg-box" style="background:rgba(255,152,0,.18)"></div>Distribution</div>
+      <div id="sr-legend-handle">
+        <span>Levels</span>
+        <span class="drag-dots">⠿</span>
+      </div>
+      <div id="sr-legend-body">
+        <div class="leg-row"><div class="leg-line" style="background:#26a69a"></div>Support</div>
+        <div class="leg-row"><div class="leg-line" style="background:#ef5350"></div>Resistance</div>
+        <div class="leg-row"><div class="leg-box" style="background:rgba(38,166,154,.18)"></div>Markup</div>
+        <div class="leg-row"><div class="leg-box" style="background:rgba(239,83,80,.18)"></div>Markdown</div>
+        <div class="leg-row"><div class="leg-box" style="background:rgba(33,150,243,.18)"></div>Accumulation</div>
+        <div class="leg-row"><div class="leg-box" style="background:rgba(255,152,0,.18)"></div>Distribution</div>
+      </div>
     </div>
   </div>
 

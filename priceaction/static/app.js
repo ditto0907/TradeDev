@@ -50,6 +50,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initBottomTabs();
   initBottomResize();
   initOrderForm();
+  initSRLegendDrag();
 });
 
 // ── Chart Init ────────────────────────────────────────────────────────────────
@@ -468,6 +469,59 @@ function initBottomResize() {
   document.addEventListener('mouseup', () => {
     dragging = false;
     document.body.style.cursor = '';
+  });
+}
+
+// ── SR Legend Drag ────────────────────────────────────────────────────────────
+
+function initSRLegendDrag() {
+  const legend = document.getElementById('sr-legend');
+  const handle = document.getElementById('sr-legend-handle');
+  if (!legend || !handle) return;
+
+  // Restore saved position
+  const saved = localStorage.getItem('srLegendPos');
+  if (saved) {
+    try {
+      const { left, top } = JSON.parse(saved);
+      legend.style.left = left;
+      legend.style.top  = top;
+    } catch {}
+  }
+
+  let dragging = false;
+  let startX = 0, startY = 0;
+  let startLeft = 0, startTop = 0;
+
+  handle.addEventListener('mousedown', e => {
+    dragging  = true;
+    startX    = e.clientX;
+    startY    = e.clientY;
+    startLeft = parseInt(legend.style.left) || legend.offsetLeft;
+    startTop  = parseInt(legend.style.top)  || legend.offsetTop;
+    document.body.style.cursor = 'grabbing';
+    e.preventDefault();
+  });
+
+  document.addEventListener('mousemove', e => {
+    if (!dragging) return;
+    const wrap = document.getElementById('chart-wrap');
+    const maxW = wrap ? wrap.offsetWidth  - legend.offsetWidth  : 9999;
+    const maxH = wrap ? wrap.offsetHeight - legend.offsetHeight : 9999;
+    const left = Math.max(0, Math.min(maxW, startLeft + (e.clientX - startX)));
+    const top  = Math.max(0, Math.min(maxH, startTop  + (e.clientY - startY)));
+    legend.style.left = left + 'px';
+    legend.style.top  = top  + 'px';
+  });
+
+  document.addEventListener('mouseup', () => {
+    if (!dragging) return;
+    dragging = false;
+    document.body.style.cursor = '';
+    localStorage.setItem('srLegendPos', JSON.stringify({
+      left: legend.style.left,
+      top:  legend.style.top,
+    }));
   });
 }
 
