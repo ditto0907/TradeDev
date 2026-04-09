@@ -95,25 +95,31 @@ async def lifespan(app: FastAPI):
     """Application lifespan: connect IB, load history, set up Google Sheets."""
     logger.info("Starting up…")
 
-    # Connect to IB
-    ib_connected = False
+    # Step 1: connect + fetch historical data
+    ib_has_data = False
     try:
         await fetcher.connect()
         await fetcher.load_history()
-        fetcher.add_new_bar_callback(on_new_bar)
-        await fetcher.subscribe_realtime()
-        ib_connected = True
-        logger.info("IB data streaming started.")
+        ib_has_data = bool(fetcher.get_bars("5min"))
     except Exception as e:
-        logger.error("IB startup error: %s — loading synthetic test data instead", e)
+        logger.error("IB connect/history error: %s", e)
 
-    # Fall back to 500-bar synthetic test data when IB is unavailable
-    if not ib_connected or not fetcher.get_bars("5min"):
+    # Fall back to synthetic data only when IB returned nothing
+    if not ib_has_data:
         logger.info("Loading synthetic test data (500 bars each for 1min and 5min)…")
         fetcher.bars["5min"] = generate_bars(n=500, bar_minutes=5)
         fetcher.bars["1min"] = generate_bars(n=500, bar_minutes=1)
         logger.info("Test data loaded: %d 5min bars, %d 1min bars",
                     len(fetcher.bars["5min"]), len(fetcher.bars["1min"]))
+
+    # Step 2: subscribe to real-time streaming (independent — failure keeps real data)
+    if ib_has_data:
+        try:
+            fetcher.add_new_bar_callback(on_new_bar)
+            await fetcher.subscribe_realtime()
+            logger.info("IB real-time streaming started.")
+        except Exception as e:
+            logger.warning("IB real-time subscription failed: %s — historical data still available", e)
 
     # Google Sheets authentication (optional — graceful degradation)
     if sheets.authenticate():

@@ -140,8 +140,8 @@ class IBDataFetcher:
 
         for bar_size in ("1 min", "5 mins"):
             key = "1min" if "1 min" in bar_size else "5min"
-            # Use keepUpToDate=True — IB keeps streaming updates to the returned BarDataList
-            bars_obj = self.ib.reqHistoricalData(
+            # reqHistoricalDataAsync with keepUpToDate=True — safe inside a running event loop
+            bars_obj = await self.ib.reqHistoricalDataAsync(
                 contract,
                 endDateTime="",
                 durationStr="60 S",      # small window; keepUpToDate streams new bars
