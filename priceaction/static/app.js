@@ -1,16 +1,3 @@
-/**
- * app.js — Trading Terminal UI logic
- *
- * Responsibilities:
- *  1. Initialize TradingView widget
- *  2. Wire WebSocket price updates → topbar OHLC, watchlist, bid/ask
- *  3. Draw S/R lines and market cycle ranges on the chart
- *  4. Update cycle badge + key levels panel
- *  5. Order entry panel interactions (UI only — wire to backend when ready)
- *  6. Bottom panel tab switching
- *  7. Bottom panel resize handle
- */
-
 'use strict';
 
 // ── Constants ──────────────────────────────────────────────────────────────────
@@ -21,7 +8,6 @@ const CYCLE_COLORS = {
   accumulation: 'rgba(33,150,243,0.10)',
   distribution: 'rgba(255,152,0,0.10)',
 };
-
 const CYCLE_LABELS = {
   markup:       'Markup (Uptrend)',
   markdown:     'Markdown (Downtrend)',
@@ -29,20 +15,25 @@ const CYCLE_LABELS = {
   distribution: 'Distribution',
   unknown:      '—',
 };
-
-// MES multiplier: each point = $5
 const MES_TICK   = 0.25;
 const MES_TICK_$ = 1.25;
-const MES_MARGIN = 1650;   // approximate initial margin per contract (USD)
+const MES_MARGIN = 1650;
 
 // ── State ──────────────────────────────────────────────────────────────────────
 
-let _widget        = null;   // TradingView widget instance
-let _activeShapes  = [];     // IDs of drawn S/R / cycle shapes
-let _volumeStudyId = null;   // ID of the Volume sub-pane study
-let _lastBar       = null;   // most recent 5min bar
-let _openPrice     = null;   // day open price (first bar of session)
-let _orderSide     = 'buy';  // current order side
+let _widget        = null;
+let _volumeStudyId = null;
+let _lastBar       = null;
+let _openPrice     = null;
+let _orderSide     = 'buy';
+let _lastAnalysis  = null;   // last received analysis object
+
+// S/R shape tracking (separate arrays so we can toggle each independently)
+let _supportShapes    = [];
+let _resistanceShapes = [];
+let _cycleShapes      = [];
+let _showSupport      = true;
+let _showResistance   = true;
 
 // ── DOMContentLoaded ──────────────────────────────────────────────────────────
 
@@ -60,6 +51,7 @@ function initChart() {
   const datafeed = new MESDatafeed();
 
   datafeed.setAnalysisCallback((analysis) => {
+    _lastAnalysis = analysis;
     updateAnnotations(analysis);
     updateCycleBadge(analysis.market_cycle);
     updateSRPanel(analysis);
@@ -70,15 +62,12 @@ function initChart() {
     datafeed:     datafeed,
     symbol:       'MES',
     interval:     '5',
-
     library_path: '/charting_library/',
     locale:       'en',
     timezone:     'America/New_York',
-
     theme:        'dark',
     toolbar_bg:   '#1e222d',
     loading_screen: { backgroundColor: '#131722', foregroundColor: '#2962ff' },
-
     enabled_features: [
       'use_localstorage_for_settings',
       'move_logo_to_main_pane',
@@ -87,60 +76,44 @@ function initChart() {
       'header_symbol_search',
       'header_compare',
       'display_market_status',
-      'create_volume_indicator_by_default',  // prevent auto volume on main chart
+      'create_volume_indicator_by_default',
     ],
-
     autosize: true,
-
     overrides: {
-      'paneProperties.background':          '#131722',
-      'paneProperties.backgroundType':      'solid',
+      'paneProperties.background':               '#131722',
+      'paneProperties.backgroundType':           'solid',
       'paneProperties.vertGridProperties.color': '#1e222d',
       'paneProperties.horzGridProperties.color': '#1e222d',
-      'scalesProperties.textColor':         '#787b86',
+      'scalesProperties.textColor':              '#787b86',
     },
   });
 
   _widget.onChartReady(() => {
     setWsStatus('live', 'Live');
 
-    // Add Volume in a separate sub-pane (no overlay on the main chart).
-    // 'create_volume_indicator_by_default' is disabled above so TradingView
-    // won't auto-add volume to the main chart — only our sub-pane version exists.
+    // Volume sub-pane
     if (!_volumeStudyId) {
       const chart = _widget.activeChart();
-      const studyPromise = chart.createStudy(
-        'Volume', false, false, [],
-        {
-          'volume.color.0':    'rgba(239,83,80,0.55)',   // bearish bar
-          'volume.color.1':    'rgba(38,166,154,0.55)',  // bullish bar
-          'volume ma.visible': false,
-        }
-      );
-
+      const p = chart.createStudy('Volume', false, false, [], {
+        'volume.color.0':    'rgba(239,83,80,0.55)',
+        'volume.color.1':    'rgba(38,166,154,0.55)',
+        'volume ma.visible': false,
+      });
       const afterCreate = (id) => {
         _volumeStudyId = id;
-        // Shrink the volume pane to ~half its default height
         try {
           const panes = chart.getPanes();
-          if (panes.length > 1) {
-            const mainH = panes[0].getHeight();
-            panes[1].setHeight(Math.round(mainH * 0.15));
-          }
+          if (panes.length > 1) panes[1].setHeight(Math.round(panes[0].getHeight() * 0.15));
         } catch {}
       };
-
-      if (studyPromise && typeof studyPromise.then === 'function') {
-        studyPromise.then(afterCreate).catch(() => {});
-      } else {
-        // Sync return (older TV builds)
-        afterCreate(studyPromise);
-      }
+      if (p && typeof p.then === 'function') p.then(afterCreate).catch(() => {});
+      else afterCreate(p);
     }
 
     fetch('/api/analysis')
       .then(r => r.json())
       .then(analysis => {
+        _lastAnalysis = analysis;
         updateAnnotations(analysis);
         updateCycleBadge(analysis.market_cycle);
         updateSRPanel(analysis);
@@ -148,15 +121,12 @@ function initChart() {
       .catch(e => console.warn('Analysis fetch error:', e));
   });
 
-  // Connect WebSocket for live price/bar updates
   connectPriceFeed(datafeed);
 }
 
 // ── WebSocket price feed ───────────────────────────────────────────────────────
 
 function connectPriceFeed(datafeed) {
-  // Reuse the datafeed's WebSocket — hook into it before it connects
-  // by overriding the onmessage handler wrapper
   const origEnsure = datafeed._ensureWebSocket.bind(datafeed);
   datafeed._ensureWebSocket = function() {
     origEnsure();
@@ -168,7 +138,6 @@ function connectPriceFeed(datafeed) {
       };
     }
   };
-  // Trigger WebSocket connection now
   datafeed._ensureWebSocket();
 }
 
@@ -182,13 +151,16 @@ function handlePriceMessage(event) {
     updateBidAsk(msg.bar.close);
     _lastBar = msg.bar;
 
-  } else if (msg.type === 'snapshot' && msg.bars_5min && msg.bars_5min.length > 0) {
+  } else if (msg.type === 'snapshot' && msg.bars_5min?.length > 0) {
     const latest = msg.bars_5min[msg.bars_5min.length - 1];
     updateTopbarOHLC(latest);
     updateWatchlistMES(latest.close);
     updateBidAsk(latest.close);
     _lastBar = latest;
     setWsStatus('live', 'Live');
+
+  } else if (msg.type === 'order_update') {
+    updateWorkingOrderRow(msg.order);
   }
 }
 
@@ -203,13 +175,9 @@ function updateTopbarOHLC(bar) {
   setText('tb-vol',   bar.volume != null ? bar.volume.toLocaleString() : '—');
   setText('last-price', fmt(bar.close));
 
-  const el = document.getElementById('last-price');
-  if (el) el.style.color = '#d1d4dc';
-
-  // Price change vs open
   if (_openPrice == null) _openPrice = bar.open;
   const chg    = bar.close - _openPrice;
-  const chgPct = (_openPrice > 0) ? (chg / _openPrice * 100) : 0;
+  const chgPct = _openPrice > 0 ? (chg / _openPrice * 100) : 0;
   const chgEl  = document.getElementById('price-change');
   if (chgEl) {
     chgEl.textContent = `${chg >= 0 ? '+' : ''}${chg.toFixed(2)} (${chgPct >= 0 ? '+' : ''}${chgPct.toFixed(2)}%)`;
@@ -235,15 +203,12 @@ function updateWatchlistMES(price) {
 
 function updateBidAsk(lastPrice) {
   if (lastPrice == null) return;
-  // Simulate bid/ask spread (0.25 pt = 1 tick for MES)
   const bid = (lastPrice - MES_TICK).toFixed(2);
   const ask = (lastPrice + MES_TICK).toFixed(2);
   setText('bid-price', bid);
   setText('ask-price', ask);
   setText('bid-size', '—');
   setText('ask-size', '—');
-
-  // Pre-fill limit price input if empty
   const priceInput = document.getElementById('order-price');
   if (priceInput && !priceInput.value) {
     priceInput.value = _orderSide === 'buy' ? bid : ask;
@@ -265,12 +230,10 @@ function updateCycleBadge(cycle) {
 function updateSRPanel(analysis) {
   const container = document.getElementById('sr-levels-list');
   if (!container) return;
-
   const sup = (analysis.support_levels    || []).slice(0, 3);
   const res = (analysis.resistance_levels || []).slice(0, 3);
-
   let html = '';
-  res.reverse().forEach(l => {
+  [...res].reverse().forEach(l => {
     html += `<div class="sr-level-item">
       <div class="sr-dot" style="background:#ef5350"></div>
       <span class="sr-price res">${l.price.toFixed(2)}</span>
@@ -282,80 +245,88 @@ function updateSRPanel(analysis) {
       <span class="sr-price sup">${l.price.toFixed(2)}</span>
     </div>`;
   });
-
-  container.innerHTML = html || '<span style="color:var(--text-faint);font-size:11px;grid-column:1/-1">No levels detected</span>';
+  container.innerHTML = html ||
+    '<span style="color:var(--text-faint);font-size:11px;grid-column:1/-1">No levels detected</span>';
 }
 
 // ── Chart Annotations ─────────────────────────────────────────────────────────
 
 function updateAnnotations(analysis) {
   if (!_widget) return;
-
   let chart;
   try { chart = _widget.activeChart(); } catch { return; }
 
-  // Clear previous shapes
-  _activeShapes.forEach(id => { try { chart.removeEntity(id); } catch {} });
-  _activeShapes = [];
-
-  // Cycle range backgrounds
+  // Always redraw cycle backgrounds
+  _cycleShapes.forEach(id => { try { chart.removeEntity(id); } catch {} });
+  _cycleShapes = [];
   (analysis.cycle_ranges || []).slice(-8).forEach(range => {
     const color = CYCLE_COLORS[range.type] || 'rgba(128,128,128,0.06)';
     try {
       const id = chart.createMultipointShape(
         [{ time: range.start_time, price: 0 }, { time: range.end_time, price: 0 }],
-        {
-          shape: 'rect',
-          lock: true,
-          disableSelection: true,
-          overrides: {
-            backgroundColor: color,
-            borderColor: 'rgba(0,0,0,0)',
-            borderWidth: 0,
-            showLabel: true,
-            text: range.type,
-            textcolor: 'rgba(255,255,255,0.35)',
-            fontsize: 10,
-          },
-        }
+        { shape: 'rect', lock: true, disableSelection: true,
+          overrides: { backgroundColor: color, borderColor: 'rgba(0,0,0,0)',
+                       borderWidth: 0, showLabel: true, text: range.type,
+                       textcolor: 'rgba(255,255,255,0.35)', fontsize: 10 } }
       );
-      if (id) _activeShapes.push(id);
+      if (id) _cycleShapes.push(id);
     } catch {}
   });
 
-  // Support lines
-  (analysis.support_levels || []).forEach(level => {
-    drawHLine(chart, level.price, '#26a69a', Math.min(level.touches, 3));
-  });
-
-  // Resistance lines
-  (analysis.resistance_levels || []).forEach(level => {
-    drawHLine(chart, level.price, '#ef5350', Math.min(level.touches, 3));
-  });
+  // Redraw S/R only when currently visible
+  if (_showSupport) {
+    _supportShapes.forEach(id => { try { chart.removeEntity(id); } catch {} });
+    _supportShapes = [];
+    (analysis.support_levels || []).forEach(l => drawHLine(chart, l.price, '#26a69a', Math.min(l.touches, 3), _supportShapes));
+  }
+  if (_showResistance) {
+    _resistanceShapes.forEach(id => { try { chart.removeEntity(id); } catch {} });
+    _resistanceShapes = [];
+    (analysis.resistance_levels || []).forEach(l => drawHLine(chart, l.price, '#ef5350', Math.min(l.touches, 3), _resistanceShapes));
+  }
 }
 
-function drawHLine(chart, price, color, width) {
+function drawHLine(chart, price, color, width, shapeArr) {
   try {
     const id = chart.createShape(
       { price, time: 0 },
-      {
-        shape: 'horizontal_line',
-        lock: true,
-        disableSelection: true,
-        overrides: {
-          linecolor:  color,
-          linewidth:  width,
-          linestyle:  0,
-          showPrice:  true,
-          showLabel:  true,
-          text:       price.toFixed(2),
-          textcolor:  color,
-          fontsize:   11,
-        },
-      }
+      { shape: 'horizontal_line', lock: true, disableSelection: true,
+        overrides: { linecolor: color, linewidth: width, linestyle: 0,
+                     showPrice: true, showLabel: true,
+                     text: price.toFixed(2), textcolor: color, fontsize: 11 } }
     );
-    if (id) _activeShapes.push(id);
+    if (id) shapeArr.push(id);
   } catch {}
+}
+
+// ── S/R Toggle ────────────────────────────────────────────────────────────────
+
+function toggleSR(type) {
+  if (!_widget) return;
+  let chart;
+  try { chart = _widget.activeChart(); } catch { return; }
+
+  if (type === 'support') {
+    _showSupport = !_showSupport;
+    if (!_showSupport) {
+      _supportShapes.forEach(id => { try { chart.removeEntity(id); } catch {} });
+      _supportShapes = [];
+    } else if (_lastAnalysis) {
+      (_lastAnalysis.support_levels || []).forEach(l =>
+        drawHLine(chart, l.price, '#26a69a', Math.min(l.touches, 3), _supportShapes));
+    }
+    document.getElementById('leg-support')?.classList.toggle('sr-off', !_showSupport);
+  } else {
+    _showResistance = !_showResistance;
+    if (!_showResistance) {
+      _resistanceShapes.forEach(id => { try { chart.removeEntity(id); } catch {} });
+      _resistanceShapes = [];
+    } else if (_lastAnalysis) {
+      (_lastAnalysis.resistance_levels || []).forEach(l =>
+        drawHLine(chart, l.price, '#ef5350', Math.min(l.touches, 3), _resistanceShapes));
+    }
+    document.getElementById('leg-resistance')?.classList.toggle('sr-off', !_showResistance);
+  }
 }
 
 // ── Order Entry Panel ─────────────────────────────────────────────────────────
@@ -370,13 +341,11 @@ function setOrderSide(side) {
   const buyTab  = document.getElementById('tab-buy');
   const sellTab = document.getElementById('tab-sell');
   const btn     = document.getElementById('submit-order');
-
   if (side === 'buy') {
     buyTab.className  = 'order-tab active-buy';
     sellTab.className = 'order-tab';
     btn.className     = 'buy';
     btn.textContent   = 'BUY MES';
-    // Pre-fill bid price
     const bid = document.getElementById('bid-price').textContent;
     const inp = document.getElementById('order-price');
     if (inp && bid !== '—') inp.value = bid;
@@ -396,20 +365,19 @@ function onOrderTypeChange() {
   const type      = document.getElementById('order-type').value;
   const priceGrp  = document.getElementById('price-group');
   const stopGrp   = document.getElementById('stop-group');
-  const priceLabel = priceGrp ? priceGrp.querySelector('.form-label') : null;
-
+  const priceLabel = priceGrp?.querySelector('.form-label');
   if (type === 'market') {
     if (priceGrp) priceGrp.style.display = 'none';
     if (stopGrp)  stopGrp.style.display  = 'none';
   } else if (type === 'limit') {
     if (priceGrp) { priceGrp.style.display = ''; if (priceLabel) priceLabel.textContent = 'Limit Price'; }
-    if (stopGrp)  stopGrp.style.display  = 'none';
+    if (stopGrp)  stopGrp.style.display = 'none';
   } else if (type === 'stop') {
     if (priceGrp) priceGrp.style.display = 'none';
     if (stopGrp)  stopGrp.style.display  = '';
   } else if (type === 'stop_limit') {
     if (priceGrp) { priceGrp.style.display = ''; if (priceLabel) priceLabel.textContent = 'Limit Price'; }
-    if (stopGrp)  stopGrp.style.display  = '';
+    if (stopGrp)  stopGrp.style.display = '';
   }
   updateSummary();
 }
@@ -417,95 +385,126 @@ function onOrderTypeChange() {
 function adjustQty(delta) {
   const inp = document.getElementById('order-qty');
   if (!inp) return;
-  const val = Math.max(1, Math.min(50, (parseInt(inp.value) || 1) + delta));
-  inp.value = val;
+  inp.value = Math.max(1, Math.min(50, (parseInt(inp.value) || 1) + delta));
   updateSummary();
 }
 
 function updateSummary() {
   const qty  = parseInt(document.getElementById('order-qty')?.value) || 1;
   const type = document.getElementById('order-type')?.value;
-
-  let price = null;
+  let price  = null;
   if (type === 'market') {
-    // Use last trade price
     const lastEl = document.getElementById('last-price');
     price = lastEl ? parseFloat(lastEl.textContent) : null;
   } else {
     price = parseFloat(document.getElementById('order-price')?.value);
   }
-
-  // MES contract value = price × $5 per point
   const contractValue = (price && !isNaN(price)) ? (price * 5 * qty).toFixed(0) : '—';
-  const margin        = (MES_MARGIN * qty).toLocaleString();
-
   setText('sum-value',  contractValue !== '—' ? `$${parseInt(contractValue).toLocaleString()}` : '—');
-  setText('sum-margin', `$${margin}`);
+  setText('sum-margin', `$${(MES_MARGIN * qty).toLocaleString()}`);
 }
 
-function placeOrder() {
-  // UI feedback — actual order submission wired to backend when ready
-  const qty   = document.getElementById('order-qty')?.value || 1;
-  const type  = document.getElementById('order-type')?.value || 'market';
-  const side  = _orderSide.toUpperCase();
-  const tif   = document.getElementById('order-tif')?.value?.toUpperCase() || 'DAY';
+async function placeOrder() {
+  const qty       = parseInt(document.getElementById('order-qty')?.value) || 1;
+  const type      = document.getElementById('order-type')?.value || 'market';
+  const tif       = document.getElementById('order-tif')?.value  || 'day';
+  const limitPx   = parseFloat(document.getElementById('order-price')?.value) || null;
+  const stopPx    = parseFloat(document.getElementById('order-stop')?.value)  || null;
 
-  let priceStr = '';
-  if (type !== 'market') {
-    const p = document.getElementById('order-price')?.value;
-    if (p) priceStr = ` @ ${p}`;
-  }
+  const body = {
+    action:      _orderSide.toUpperCase(),
+    quantity:    qty,
+    order_type:  type,
+    limit_price: type === 'limit' || type === 'stop_limit' ? limitPx : null,
+    stop_price:  type === 'stop'  || type === 'stop_limit' ? stopPx  : null,
+    tif,
+  };
 
-  console.log(`[Order] ${side} ${qty} MES ${type.toUpperCase()}${priceStr} ${tif}`);
-  alert(`Order submitted (UI demo):\n${side} ${qty} MES ${type.toUpperCase()}${priceStr} ${tif}`);
-}
+  const btn = document.getElementById('submit-order');
+  if (btn) { btn.disabled = true; btn.textContent = 'Submitting…'; }
 
-// ── Bottom Tabs ───────────────────────────────────────────────────────────────
-
-function initBottomTabs() {
-  document.querySelectorAll('.btab').forEach(tab => {
-    tab.addEventListener('click', () => {
-      const pane = tab.dataset.pane;
-      document.querySelectorAll('.btab').forEach(t => t.classList.remove('active'));
-      document.querySelectorAll('.btab-pane').forEach(p => p.classList.remove('active'));
-      tab.classList.add('active');
-      const paneEl = document.getElementById(`pane-${pane}`);
-      if (paneEl) paneEl.classList.add('active');
+  try {
+    const res  = await fetch('/api/order', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify(body),
     });
-  });
+    const data = await res.json();
+
+    if (data.success) {
+      showToast(`Order #${data.order_id} submitted: ${body.action} ${qty} MES`, 'success');
+      addWorkingOrderRow(data);
+      // Switch to Working Orders tab
+      document.querySelector('.btab[data-pane="orders"]')?.click();
+    } else {
+      showToast(`Order failed: ${data.error}`, 'error');
+    }
+  } catch (e) {
+    showToast(`Network error: ${e.message}`, 'error');
+  } finally {
+    if (btn) {
+      btn.disabled    = false;
+      btn.textContent = _orderSide === 'buy' ? 'BUY MES' : 'SELL MES';
+    }
+  }
 }
 
-// ── Bottom Panel Resize ───────────────────────────────────────────────────────
+// ── Working Orders Table ───────────────────────────────────────────────────────
 
-function initBottomResize() {
-  const handle = document.getElementById('bottom-resize');
-  const main   = document.getElementById('main');
-  if (!handle || !main) return;
+function addWorkingOrderRow(order) {
+  const tbody = document.getElementById('orders-tbody');
+  if (!tbody) return;
 
-  let dragging = false;
-  let startY   = 0;
-  let startH   = 0;
+  // Remove placeholder row
+  const empty = tbody.querySelector('tr td[colspan]');
+  if (empty) empty.closest('tr').remove();
 
-  handle.addEventListener('mousedown', e => {
-    dragging = true;
-    startY   = e.clientY;
-    const bottom = document.getElementById('bottom');
-    startH = bottom ? bottom.offsetHeight : 180;
-    document.body.style.cursor = 'row-resize';
-    e.preventDefault();
-  });
+  const priceStr = order.lmt_price ? order.lmt_price.toFixed(2)
+                 : order.stp_price ? `STP ${order.stp_price.toFixed(2)}`
+                 : 'MKT';
+  const sideClass = order.action === 'BUY' ? 'up' : 'down';
 
-  document.addEventListener('mousemove', e => {
-    if (!dragging) return;
-    const delta  = startY - e.clientY;
-    const newH   = Math.max(100, Math.min(500, startH + delta));
-    main.style.gridTemplateRows = `1fr ${newH}px`;
-  });
+  const tr = document.createElement('tr');
+  tr.id = `order-row-${order.order_id}`;
+  tr.innerHTML = `
+    <td>${new Date().toLocaleTimeString()}</td>
+    <td>MES</td>
+    <td class="${sideClass}">${order.action}</td>
+    <td>${order.order_type}</td>
+    <td>${order.quantity}</td>
+    <td>${priceStr}</td>
+    <td id="order-status-${order.order_id}">${order.status || 'Submitted'}</td>
+    <td><button class="cancel-btn" onclick="cancelOrder(${order.order_id})">Cancel</button></td>
+  `;
+  tbody.prepend(tr);
+}
 
-  document.addEventListener('mouseup', () => {
-    dragging = false;
-    document.body.style.cursor = '';
-  });
+function updateWorkingOrderRow(order) {
+  const statusEl = document.getElementById(`order-status-${order.order_id}`);
+  if (statusEl) {
+    statusEl.textContent = order.status;
+    if (order.status === 'Filled') {
+      statusEl.style.color = 'var(--green)';
+      // Remove cancel button once filled
+      const btn = statusEl.closest('tr')?.querySelector('.cancel-btn');
+      if (btn) btn.remove();
+    } else if (['Cancelled', 'Inactive'].includes(order.status)) {
+      statusEl.style.color = 'var(--text-faint)';
+    }
+  } else {
+    // New order we don't know about yet (e.g. placed externally)
+    addWorkingOrderRow(order);
+  }
+}
+
+async function cancelOrder(orderId) {
+  try {
+    const res  = await fetch(`/api/order/${orderId}`, { method: 'DELETE' });
+    const data = await res.json();
+    if (!data.success) showToast('Cancel failed', 'error');
+  } catch (e) {
+    showToast(`Cancel error: ${e.message}`, 'error');
+  }
 }
 
 // ── SR Legend Drag ────────────────────────────────────────────────────────────
@@ -515,7 +514,6 @@ function initSRLegendDrag() {
   const handle = document.getElementById('sr-legend-handle');
   if (!legend || !handle) return;
 
-  // Restore saved position
   const saved = localStorage.getItem('srLegendPos');
   if (saved) {
     try {
@@ -525,9 +523,7 @@ function initSRLegendDrag() {
     } catch {}
   }
 
-  let dragging = false;
-  let startX = 0, startY = 0;
-  let startLeft = 0, startTop = 0;
+  let dragging = false, startX = 0, startY = 0, startLeft = 0, startTop = 0;
 
   handle.addEventListener('mousedown', e => {
     dragging  = true;
@@ -543,10 +539,8 @@ function initSRLegendDrag() {
     if (!dragging) return;
     const maxW = window.innerWidth  - legend.offsetWidth;
     const maxH = window.innerHeight - legend.offsetHeight;
-    const left = Math.max(0, Math.min(maxW, startLeft + (e.clientX - startX)));
-    const top  = Math.max(0, Math.min(maxH, startTop  + (e.clientY - startY)));
-    legend.style.left = left + 'px';
-    legend.style.top  = top  + 'px';
+    legend.style.left = Math.max(0, Math.min(maxW, startLeft + (e.clientX - startX))) + 'px';
+    legend.style.top  = Math.max(0, Math.min(maxH, startTop  + (e.clientY - startY))) + 'px';
   });
 
   document.addEventListener('mouseup', () => {
@@ -554,19 +548,68 @@ function initSRLegendDrag() {
     dragging = false;
     document.body.style.cursor = '';
     localStorage.setItem('srLegendPos', JSON.stringify({
-      left: legend.style.left,
-      top:  legend.style.top,
+      left: legend.style.left, top: legend.style.top,
     }));
   });
+}
+
+// ── Bottom Tabs ───────────────────────────────────────────────────────────────
+
+function initBottomTabs() {
+  document.querySelectorAll('.btab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      const pane = tab.dataset.pane;
+      document.querySelectorAll('.btab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.btab-pane').forEach(p => p.classList.remove('active'));
+      tab.classList.add('active');
+      document.getElementById(`pane-${pane}`)?.classList.add('active');
+    });
+  });
+}
+
+// ── Bottom Panel Resize ───────────────────────────────────────────────────────
+
+function initBottomResize() {
+  const handle = document.getElementById('bottom-resize');
+  const main   = document.getElementById('main');
+  if (!handle || !main) return;
+  let dragging = false, startY = 0, startH = 0;
+  handle.addEventListener('mousedown', e => {
+    dragging = true; startY = e.clientY;
+    startH   = document.getElementById('bottom')?.offsetHeight || 180;
+    document.body.style.cursor = 'row-resize';
+    e.preventDefault();
+  });
+  document.addEventListener('mousemove', e => {
+    if (!dragging) return;
+    const newH = Math.max(100, Math.min(500, startH + (startY - e.clientY)));
+    main.style.gridTemplateRows = `1fr ${newH}px`;
+  });
+  document.addEventListener('mouseup', () => { dragging = false; document.body.style.cursor = ''; });
+}
+
+// ── Toast Notification ────────────────────────────────────────────────────────
+
+function showToast(message, type = 'info') {
+  const toast = document.createElement('div');
+  toast.className = `toast toast-${type}`;
+  toast.textContent = message;
+  document.body.appendChild(toast);
+  // Animate in
+  requestAnimationFrame(() => toast.classList.add('toast-show'));
+  setTimeout(() => {
+    toast.classList.remove('toast-show');
+    toast.addEventListener('transitionend', () => toast.remove(), { once: true });
+  }, 3000);
 }
 
 // ── WebSocket Status ──────────────────────────────────────────────────────────
 
 function setWsStatus(state, text) {
-  const dot  = document.getElementById('ws-dot');
+  const dot   = document.getElementById('ws-dot');
   const label = document.getElementById('ws-text');
-  if (dot)   { dot.className = `status-dot ${state}`; }
-  if (label) { label.textContent = text; }
+  if (dot)   dot.className   = `status-dot ${state}`;
+  if (label) label.textContent = text;
 }
 
 // ── Utility ───────────────────────────────────────────────────────────────────

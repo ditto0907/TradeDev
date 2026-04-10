@@ -1,12 +1,6 @@
 """
 IB Data Fetcher — connects to Interactive Brokers TWS/Gateway via ib_insync,
 fetches MES 1min/5min historical OHLCV bars, and streams real-time updates.
-
-Usage:
-    fetcher = IBDataFetcher()
-    await fetcher.connect()
-    await fetcher.load_history()
-    fetcher.subscribe_realtime(on_new_bar_callback)
 """
 import asyncio
 import logging
@@ -23,59 +17,67 @@ import ib_log_translator  # auto-installs translation filter on import
 logger = logging.getLogger(__name__)
 
 
+# ─── Helpers ─────────────────────────────────────────────────────────────────
+
 def _bar_to_dict(bar) -> dict:
-    """Convert ib_insync BarData to a plain dict with UTC ms timestamp."""
+    """Convert ib_insync BarData to a plain dict with UTC seconds timestamp."""
     dt = bar.date
-    # bar.date may be a datetime or a string depending on the request type
     if isinstance(dt, str):
         dt = datetime.strptime(dt, "%Y%m%d %H:%M:%S %Z") if " " in dt else datetime.strptime(dt, "%Y%m%d")
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return {
-        "time": int(dt.timestamp()),       # seconds since epoch (TradingView format)
-        "open": float(bar.open),
-        "high": float(bar.high),
-        "low": float(bar.low),
-        "close": float(bar.close),
+        "time":   int(dt.timestamp()),
+        "open":   float(bar.open),
+        "high":   float(bar.high),
+        "low":    float(bar.low),
+        "close":  float(bar.close),
         "volume": float(bar.volume),
     }
 
+
+def _ib_duration(gap_sec: int, key: str) -> str:
+    """
+    Convert a time gap (seconds) to an IB durationStr string, capped at
+    IB's per-bar-size limits (2 days for 1min, 7 days for 5min).
+    """
+    cap = 86_400 * 2 if key == "1min" else 86_400 * 7
+    gap_sec = min(gap_sec + 3_600, cap)   # +1h buffer, then cap
+    if gap_sec < 86_400:
+        return f"{max(gap_sec, 3_600)} S"
+    return f"{math.ceil(gap_sec / 86_400)} D"
+
+
+# ─── IBDataFetcher ────────────────────────────────────────────────────────────
 
 class IBDataFetcher:
     """
     Async wrapper around ib_insync for fetching and streaming MES OHLCV data.
 
-    Maintains two in-memory stores:
-        self.bars["1min"]  — list of bar dicts sorted by time
-        self.bars["5min"]  — list of bar dicts sorted by time
+    In-memory bar stores (self.bars) serve as a fast cache for the HTTP/WS
+    layer.  The SQLite DB (db.py) is the durable store — managed by server.py.
     """
 
     def __init__(self):
-        # NOTE: IB() is created lazily inside connect() so it binds to the
-        # running event loop (uvicorn's asyncio loop), not the import-time loop.
         self.ib: Optional[IB] = None
         self.bars: Dict[str, List[dict]] = {"1min": [], "5min": []}
-        self._realtime_subscriptions: Dict[str, object] = {}  # key → subscription object
+        self._contract = None                        # cached qualified contract
+        self._realtime_subscriptions: Dict[str, object] = {}
         self._new_bar_callbacks: List[Callable[[str, dict], None]] = []
-        # Running aggregated bars for 1min/5min (built from ticks or 5s bars)
+        # Aggregated in-progress bars (built from ticks / 5s bars)
         self._rt_current: Dict[str, Optional[dict]] = {"1min": None, "5min": None}
         # reqMktData tick state
         self._prev_tick_price: float = float("nan")
         self._prev_tick_size:  float = float("nan")
-        self._last_tick_broadcast: float = 0.0   # monotonic time of last WS push
+        self._last_tick_broadcast: float = 0.0
 
     # ─── Connection ──────────────────────────────────────────────────────────
 
     async def connect(self):
         """Connect to IB TWS/Gateway. Retries up to 3 times."""
-        # ib_insync uses asyncio.get_event_loop() internally. In Python 3.10+,
-        # uvicorn's loop is not set as the thread-default loop, so we set it
-        # explicitly here so ib_insync's socket operations use the correct loop.
         asyncio.set_event_loop(asyncio.get_running_loop())
-
         for attempt in range(1, 4):
             try:
-                # Create IB() here so it captures the running event loop
                 self.ib = IB()
                 await self.ib.connectAsync(
                     config.IB_HOST, config.IB_PORT, clientId=config.IB_CLIENT_ID
@@ -96,173 +98,194 @@ class IBDataFetcher:
     # ─── Contract ────────────────────────────────────────────────────────────
 
     async def _get_contract(self):
-        """Return a qualified MES continuous front-month contract."""
+        """Return a qualified MES continuous front-month contract (cached)."""
+        if self._contract is not None:
+            return self._contract
+        logger.info("Qualifying MES contract…")
         contract = ContFuture(
             symbol=config.MES_SYMBOL,
             exchange=config.MES_EXCHANGE,
             currency=config.MES_CURRENCY,
         )
         [qualified] = await self.ib.qualifyContractsAsync(contract)
-        logger.info("Qualified contract: %s %s %s", qualified.symbol, qualified.lastTradeDateOrContractMonth, qualified.localSymbol)
+        self._contract = qualified
+        logger.info("Qualified contract: %s %s %s",
+                    qualified.symbol,
+                    qualified.lastTradeDateOrContractMonth,
+                    qualified.localSymbol)
         return qualified
 
     # ─── Historical Data ─────────────────────────────────────────────────────
 
-    async def load_history(self):
-        """Fetch historical 1min and 5min bars from IB and populate in-memory stores."""
+    async def load_history(
+        self,
+        since_1min: Optional[int] = None,
+        since_5min: Optional[int] = None,
+    ):
+        """
+        Fetch 1min and 5min bars from IB.
+
+        If since_Xmin is provided, only fetch bars newer than that timestamp
+        (for startup incremental sync from DB). Falls back to full default
+        duration if the gap exceeds IB's per-size limit.
+        """
         contract = await self._get_contract()
 
-        for bar_size, duration in [
-            ("1 min", config.HISTORY_DURATION_1MIN),
-            ("5 mins", config.HISTORY_DURATION_5MIN),
+        for bar_size_str, key, since_ts, default_dur in [
+            ("1 min",  "1min", since_1min, config.HISTORY_DURATION_1MIN),
+            ("5 mins", "5min", since_5min, config.HISTORY_DURATION_5MIN),
         ]:
-            key = "1min" if "1 min" in bar_size else "5min"
-            logger.info("Fetching historical %s bars (duration=%s)...", bar_size, duration)
-            bars = await self.ib.reqHistoricalDataAsync(
+            now = int(time.time())
+            max_gap = 86_400 * 2 if key == "1min" else 86_400 * 7
+
+            if since_ts and (now - since_ts) <= max_gap:
+                duration_str = _ib_duration(now - since_ts, key)
+                logger.info("Fetching %s bars since %s (duration=%s)",
+                            key, datetime.fromtimestamp(since_ts, tz=timezone.utc).isoformat(),
+                            duration_str)
+            else:
+                duration_str = default_dur
+                since_ts     = None
+                logger.info("Fetching historical %s bars (duration=%s)", key, duration_str)
+
+            raw = await self.ib.reqHistoricalDataAsync(
                 contract,
-                endDateTime="",          # up to now
-                durationStr=duration,
-                barSizeSetting=bar_size,
+                endDateTime="",
+                durationStr=duration_str,
+                barSizeSetting=bar_size_str,
                 whatToShow="TRADES",
                 useRTH=False,
-                formatDate=2,            # UTC datetime
+                formatDate=2,
             )
-            self.bars[key] = [_bar_to_dict(b) for b in bars]
-            # Keep last MAX_BARS_IN_MEMORY
+            new_bars = [_bar_to_dict(b) for b in raw]
+
+            if since_ts:
+                # Only keep bars strictly newer than what we already have
+                new_bars = [b for b in new_bars if b["time"] > since_ts]
+                # Merge with in-memory (from DB load) without duplicates
+                existing = {b["time"]: b for b in self.bars[key]}
+                for b in new_bars:
+                    existing[b["time"]] = b
+                self.bars[key] = sorted(existing.values(), key=lambda b: b["time"])
+            else:
+                self.bars[key] = new_bars
+
             if len(self.bars[key]) > config.MAX_BARS_IN_MEMORY:
                 self.bars[key] = self.bars[key][-config.MAX_BARS_IN_MEMORY:]
-            logger.info("Loaded %d %s bars", len(self.bars[key]), key)
 
-    # ─── Real-time Streaming ──────────────────────────────────────────────────
+            logger.info("Loaded %d %s bars total (%d new from IB)",
+                        len(self.bars[key]), key, len(new_bars))
 
-    def add_new_bar_callback(self, callback: Callable[[str, dict], None]):
-        """Register a callback(bar_size_key, bar_dict) for each new completed bar."""
-        self._new_bar_callbacks.append(callback)
+    async def fetch_range(self, bar_size_key: str, from_ts: int, to_ts: int) -> List[dict]:
+        """
+        Fetch a specific historical time range from IB on demand.
+        Used by the server when the chart scrolls to an uncached region.
+        Returns bars filtered to [from_ts, to_ts].
+        """
+        contract   = await self._get_contract()
+        bar_size   = "1 min" if bar_size_key == "1min" else "5 mins"
+        end_dt     = datetime.fromtimestamp(to_ts, tz=timezone.utc)
+        end_str    = end_dt.strftime("%Y%m%d %H:%M:%S UTC")
+        dur_str    = _ib_duration(to_ts - from_ts, bar_size_key)
+
+        logger.info("On-demand fetch: %s  %s → %s  (%s)",
+                    bar_size_key,
+                    datetime.fromtimestamp(from_ts, tz=timezone.utc).isoformat(),
+                    datetime.fromtimestamp(to_ts,   tz=timezone.utc).isoformat(),
+                    dur_str)
+
+        raw  = await self.ib.reqHistoricalDataAsync(
+            contract,
+            endDateTime=end_str,
+            durationStr=dur_str,
+            barSizeSetting=bar_size,
+            whatToShow="TRADES",
+            useRTH=False,
+            formatDate=2,
+        )
+        return [b for b in (_bar_to_dict(r) for r in raw) if b["time"] >= from_ts]
+
+    # ─── Real-time (reqRealTimeBars — 5-second bars) ─────────────────────────
 
     async def subscribe_realtime(self):
-        """
-        Subscribe to real-time 5-second bars via reqRealTimeBars.
-
-        IB streams a new 5-second OHLCV bar every 5 seconds via event callback.
-        We aggregate those into 1min and 5min bars and notify registered callbacks
-        on every tick so the frontend chart updates every ~5 seconds.
-        """
+        """5-second bar streaming (kept as fallback; use subscribe_mktdata for speed)."""
         contract = await self._get_contract()
-
-        # Seed _rt_current from last historical bar (same reason as subscribe_mktdata)
-        now_ts = int(time.time())
-        for key, interval in [("1min", 60), ("5min", 300)]:
-            if self.bars[key]:
-                last = dict(self.bars[key][-1])
-                if last["time"] == (now_ts // interval) * interval:
-                    self._rt_current[key] = last
+        self._seed_rt_current()
 
         rt_bars = self.ib.reqRealTimeBars(contract, 5, "TRADES", False)
         self._realtime_subscriptions["rt"] = rt_bars
         rt_bars.updateEvent += self._on_rt_bar
-        logger.info("Subscribed to 5-second real-time bars (updates every ~5s)")
+        logger.info("Subscribed to 5-second real-time bars")
 
     def _on_rt_bar(self, rt_bars, has_new_bar: bool):
-        """
-        Called by ib_insync every 5 seconds with the latest 5-second bar.
-        Aggregates into 1min and 5min OHLCV bars and dispatches callbacks.
-        """
         if not has_new_bar or not rt_bars:
             return
-
-        rb = rt_bars[-1]   # latest RealTimeBar namedtuple
-        # rb.time is a datetime in newer ib_insync versions, an int in older ones
-        rt_ts = int(rb.time.timestamp()) if isinstance(rb.time, datetime) else int(rb.time)
-        rb_open = float(rb.open_)   # ib_insync uses open_ to avoid Python keyword clash
-        rb_high = float(rb.high)
-        rb_low  = float(rb.low)
-        rb_close= float(rb.close)
-        rb_vol  = float(rb.volume)
+        rb     = rt_bars[-1]
+        rt_ts  = int(rb.time.timestamp()) if isinstance(rb.time, datetime) else int(rb.time)
+        rb_open  = float(rb.open_)
+        rb_high  = float(rb.high)
+        rb_low   = float(rb.low)
+        rb_close = float(rb.close)
+        rb_vol   = float(rb.volume)
 
         for key, interval in [("1min", 60), ("5min", 300)]:
-            bar_ts = (rt_ts // interval) * interval  # floor to bar boundary
-            cur = self._rt_current[key]
+            bar_ts = (rt_ts // interval) * interval
+            cur    = self._rt_current[key]
 
             if cur is None or bar_ts > cur["time"]:
-                # Bar boundary crossed — old bar is complete, start a new one
                 if cur is not None:
-                    # Finalise old bar in store and notify
                     self._append_bar(key, cur)
                     self._dispatch(key, cur)
-                    logger.debug("Completed %s bar: time=%s close=%s", key, cur["time"], cur["close"])
-                # Initialise new in-progress bar
                 cur = {"time": bar_ts, "open": rb_open, "high": rb_high,
                        "low": rb_low, "close": rb_close, "volume": rb_vol}
                 self._rt_current[key] = cur
                 self._append_bar(key, cur)
             else:
-                # Same bar — update OHLCV in place
-                cur["high"]   = max(cur["high"], rb_high)
-                cur["low"]    = min(cur["low"],  rb_low)
-                cur["close"]  = rb_close
+                cur["high"]    = max(cur["high"], rb_high)
+                cur["low"]     = min(cur["low"],  rb_low)
+                cur["close"]   = rb_close
                 cur["volume"] += rb_vol
                 if self.bars[key] and self.bars[key][-1]["time"] == bar_ts:
                     self.bars[key][-1] = cur
 
-            # Notify on every tick (both in-progress and new-bar)
             self._dispatch(key, cur)
 
-    def _dispatch(self, key: str, bar: dict):
-        """Call all registered callbacks with a copy of bar."""
-        for cb in self._new_bar_callbacks:
-            try:
-                cb(key, dict(bar))
-            except Exception as exc:
-                logger.error("Callback error: %s", exc)
+    # ─── Real-time (reqMktData — tick level) ─────────────────────────────────
 
-    # ─── reqMktData (tick-level, sub-second) ─────────────────────────────────
-
-    _TICK_BROADCAST_INTERVAL = 0.25   # broadcast to WebSocket at most 4×/second
+    _TICK_BROADCAST_INTERVAL = 0.25   # max 4 WebSocket pushes per second
 
     async def subscribe_mktdata(self):
         """
-        Subscribe to tick-level market data via reqMktData.
-
-        Fires on every last-price change — far faster than 5-second bars.
-        Ticks are aggregated into in-progress 1min/5min OHLCV bars and
-        broadcast to WebSocket clients at most every 250 ms so we don't
-        flood slow connections.
-
-        Call subscribe_realtime() instead for the 5-second bar approach.
+        Tick-level streaming via reqMktData — updates chart every ~250 ms.
+        Seeds _rt_current from last historical bar to avoid a gap at startup.
         """
         contract = await self._get_contract()
-
-        # Seed _rt_current from the last historical bar so the tick aggregator
-        # continues building the in-progress bar rather than starting fresh.
-        # Without this, the first tick would reset open/high/low/vol to zero,
-        # creating a visible gap at the right edge of the chart.
-        now_ts = int(time.time())
-        for key, interval in [("1min", 60), ("5min", 300)]:
-            if self.bars[key]:
-                last = dict(self.bars[key][-1])
-                bar_ts = (now_ts // interval) * interval
-                if last["time"] == bar_ts:
-                    # Last historical bar is the current in-progress bar — seed it
-                    self._rt_current[key] = last
-                    logger.debug("Seeded %s rt_current from history: time=%s", key, last["time"])
+        self._seed_rt_current()
 
         ticker = self.ib.reqMktData(contract, "", False, False)
         self._realtime_subscriptions["mktdata"] = ticker
         ticker.updateEvent += self._on_tick
         logger.info("Subscribed to market data ticks (≤250 ms chart updates)")
 
+    def _seed_rt_current(self):
+        """Pre-fill _rt_current from last historical bar to avoid startup gap."""
+        now_ts = int(time.time())
+        for key, interval in [("1min", 60), ("5min", 300)]:
+            if self.bars[key]:
+                last   = dict(self.bars[key][-1])
+                bar_ts = (now_ts // interval) * interval
+                if last["time"] == bar_ts:
+                    self._rt_current[key] = last
+                    logger.debug("Seeded %s rt_current from history ts=%s", key, last["time"])
+
     def _on_tick(self, ticker):
-        """Fires on every bid/ask/last change from reqMktData."""
         price = ticker.last
         size  = ticker.lastSize
-
-        # Skip ticks with no valid last-trade price
         if price is None or math.isnan(price) or price <= 0:
             return
         if size is None or math.isnan(size):
             size = 0.0
 
-        # Only add volume on a genuine new trade (last price or size changed)
         vol_delta = 0.0
         if price != self._prev_tick_price or size != self._prev_tick_size:
             vol_delta = float(size)
@@ -270,17 +293,14 @@ class IBDataFetcher:
             self._prev_tick_size  = size
 
         wall_ts = int(time.time())
-
         for key, interval in [("1min", 60), ("5min", 300)]:
             bar_ts = (wall_ts // interval) * interval
-            cur = self._rt_current[key]
+            cur    = self._rt_current[key]
 
             if cur is None or bar_ts > cur["time"]:
-                # Bar boundary — finalise old bar, open a new one
                 if cur is not None:
                     self._append_bar(key, cur)
                     self._dispatch(key, cur)
-                    logger.debug("Completed %s bar: time=%s close=%s", key, cur["time"], cur["close"])
                 cur = {"time": bar_ts, "open": price, "high": price,
                        "low": price, "close": price, "volume": vol_delta}
                 self._rt_current[key] = cur
@@ -293,7 +313,6 @@ class IBDataFetcher:
                 if self.bars[key] and self.bars[key][-1]["time"] == bar_ts:
                     self.bars[key][-1] = cur
 
-        # Throttled broadcast — push at most every 250 ms
         now = time.monotonic()
         if now - self._last_tick_broadcast >= self._TICK_BROADCAST_INTERVAL:
             self._last_tick_broadcast = now
@@ -302,40 +321,51 @@ class IBDataFetcher:
                 if cur:
                     self._dispatch(key, cur)
 
+    # ─── Shared helpers ───────────────────────────────────────────────────────
+
+    def add_new_bar_callback(self, callback: Callable[[str, dict], None]):
+        self._new_bar_callbacks.append(callback)
+
+    def _dispatch(self, key: str, bar: dict):
+        for cb in self._new_bar_callbacks:
+            try:
+                cb(key, dict(bar))
+            except Exception as exc:
+                logger.error("Callback error: %s", exc)
+
     def _append_bar(self, key: str, bar: dict):
-        """Append or update the last bar in the in-memory store."""
         bars = self.bars[key]
         if bars and bars[-1]["time"] == bar["time"]:
-            bars[-1] = bar  # update in-progress bar
+            bars[-1] = bar
         else:
             bars.append(bar)
             if len(bars) > config.MAX_BARS_IN_MEMORY:
                 bars.pop(0)
 
     def unsubscribe_realtime(self):
-        """Cancel whichever real-time subscription is active."""
         if not self.ib:
             return
         rt = self._realtime_subscriptions.get("rt")
         if rt is not None:
             try:
                 self.ib.cancelRealTimeBars(rt)
-                logger.info("Cancelled 5-second real-time bar subscription")
             except Exception as e:
                 logger.warning("Error cancelling real-time bars: %s", e)
         mktdata = self._realtime_subscriptions.get("mktdata")
         if mktdata is not None:
             try:
                 self.ib.cancelMktData(mktdata)
-                logger.info("Cancelled market data tick subscription")
             except Exception as e:
                 logger.warning("Error cancelling market data: %s", e)
         self._realtime_subscriptions.clear()
+        logger.info("Real-time subscriptions cancelled")
 
-    # ─── Convenience ─────────────────────────────────────────────────────────
-
-    def get_bars(self, bar_size_key: str, from_ts: Optional[int] = None, to_ts: Optional[int] = None) -> List[dict]:
-        """Return bars optionally filtered by timestamp range (seconds)."""
+    def get_bars(
+        self,
+        bar_size_key: str,
+        from_ts: Optional[int] = None,
+        to_ts: Optional[int]   = None,
+    ) -> List[dict]:
         bars = self.bars.get(bar_size_key, [])
         if from_ts is not None:
             bars = [b for b in bars if b["time"] >= from_ts]
@@ -353,12 +383,9 @@ if __name__ == "__main__":
         fetcher = IBDataFetcher()
         await fetcher.connect()
         await fetcher.load_history()
-
-        print(f"\n5min bars (last 5):")
         for b in fetcher.get_bars("5min")[-5:]:
             dt = datetime.fromtimestamp(b["time"], tz=timezone.utc)
             print(f"  {dt}  O={b['open']}  H={b['high']}  L={b['low']}  C={b['close']}  V={b['volume']}")
-
         fetcher.disconnect()
 
     asyncio.run(main())

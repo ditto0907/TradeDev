@@ -253,6 +253,50 @@
     #sr-legend-handle:active { cursor: grabbing; }
     #sr-legend-handle .drag-dots { font-size: 12px; letter-spacing: -1px; opacity: 0.5; }
     #sr-legend-body { padding: 5px 10px 6px; }
+
+    /* Clickable S/R legend rows */
+    .leg-row {
+      cursor: pointer;
+      border-radius: 3px;
+      padding: 1px 2px;
+      transition: opacity 0.2s;
+    }
+    .leg-row:hover { background: rgba(255,255,255,0.06); }
+    .leg-row.sr-off { opacity: 0.35; text-decoration: line-through; }
+
+    /* Toast notifications */
+    .toast {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%) translateY(20px);
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 9px 18px;
+      font-size: 13px;
+      color: var(--text);
+      z-index: 99999;
+      opacity: 0;
+      transition: opacity 0.2s, transform 0.2s;
+      pointer-events: none;
+      white-space: nowrap;
+    }
+    .toast.toast-show { opacity: 1; transform: translateX(-50%) translateY(0); }
+    .toast.toast-success { border-color: var(--green); color: var(--green); }
+    .toast.toast-error   { border-color: var(--red);   color: var(--red); }
+
+    /* Cancel button in orders table */
+    .cancel-btn {
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      color: var(--red);
+      font-size: 11px;
+      padding: 2px 8px;
+      cursor: pointer;
+    }
+    .cancel-btn:hover { background: var(--red-bg); }
     .leg-row { display:flex; align-items:center; gap:6px; }
     .leg-line { width:14px; height:2px; border-radius:1px; }
     .leg-box  { width:14px; height:10px; border-radius:2px; }
@@ -782,8 +826,8 @@
     <span class="drag-dots">⠿</span>
   </div>
   <div id="sr-legend-body">
-    <div class="leg-row"><div class="leg-line" style="background:#26a69a"></div>Support</div>
-    <div class="leg-row"><div class="leg-line" style="background:#ef5350"></div>Resistance</div>
+    <div class="leg-row" id="leg-support"    onclick="toggleSR('support')"><div class="leg-line" style="background:#26a69a"></div>Support</div>
+    <div class="leg-row" id="leg-resistance" onclick="toggleSR('resistance')"><div class="leg-line" style="background:#ef5350"></div>Resistance</div>
     <div class="leg-row"><div class="leg-box" style="background:rgba(38,166,154,.18)"></div>Markup</div>
     <div class="leg-row"><div class="leg-box" style="background:rgba(239,83,80,.18)"></div>Markdown</div>
     <div class="leg-row"><div class="leg-box" style="background:rgba(33,150,243,.18)"></div>Accumulation</div>
