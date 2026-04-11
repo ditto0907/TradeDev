@@ -257,7 +257,7 @@ async def get_symbols(symbol: str = Query("MES")):
         "type": "futures", "exchange": "CME", "listed_exchange": "CME",
         "timezone": "America/New_York", "format": "price",
         "pricescale": 4, "minmov": 1,
-        "session": "0000-2359:23456",
+        "session": "1800-1700:1234567",
         "has_intraday": True,
         "supported_resolutions": ["1", "5", "15", "60", "1D"],
         "intraday_multipliers": ["1", "5"],

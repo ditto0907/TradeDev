@@ -58,11 +58,11 @@ class MESDatafeed {
           info.name        = 'MES_RTH';
           info.full_name   = 'CME:MES_RTH';
           info.description = 'Micro E-mini S&P 500 Futures (RTH)';
-          info.session     = '0930-1600:12345';   // 9:30–16:00 ET, Mon–Fri
+          info.session     = '0930-1600:23456';   // 9:30–16:00 ET, Mon–Fri
         } else {
           info.name        = 'MES';
           info.full_name   = 'CME:MES';
-          info.session     = '0000-2359:23456';   // full Globex (Sun–Fri 24 h)
+          info.session     = '1800-1700:1234567';  // full Globex (Sun 18:00–Fri 17:00)
         }
         console.log('[DataFeed] resolveSymbol result:', info.name, 'session:', info.session);
         setTimeout(() => onResolve(info), 0);
