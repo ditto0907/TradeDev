@@ -23,7 +23,6 @@ MES_EXCHANGE = "CME"
 MES_CURRENCY = "USD"
 
 # Historical data fetch window on startup
-HISTORY_DURATION_1MIN = "2 D"   # last 2 days of 1-min bars
 HISTORY_DURATION_5MIN = "5 D"   # last 5 days of 5-min bars
 MAX_BARS_IN_MEMORY = 5000        # cap per bar size
 
@@ -31,7 +30,6 @@ MAX_BARS_IN_MEMORY = 5000        # cap per bar size
 GOOGLE_CREDENTIALS_PATH = BASE_DIR / "credentials" / "service_account.json"
 GOOGLE_SHEET_NAME = "MES_KLine_Data"   # Name of your Google Sheet (must share with service account)
 GOOGLE_SHEET_ID = ""                   # Optional: set spreadsheet ID directly to skip name search
-WORKSHEET_1MIN = "1min"
 WORKSHEET_5MIN = "5min"
 SHEETS_WRITE_INTERVAL_SECONDS = 30    # Buffer real-time bars and flush every N seconds
 

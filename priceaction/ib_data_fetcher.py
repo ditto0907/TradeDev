@@ -1,6 +1,6 @@
 """
 IB Data Fetcher — connects to Interactive Brokers TWS/Gateway via ib_insync,
-fetches MES 1min/5min historical OHLCV bars, and streams real-time updates.
+fetches MES 5min historical OHLCV bars, and streams real-time updates.
 """
 import asyncio
 import logging
@@ -36,21 +36,12 @@ def _bar_to_dict(bar) -> dict:
     }
 
 
-def _ib_duration(gap_sec: int, key: str) -> str:
+def _ib_duration(gap_sec: int) -> str:
     """
     Convert a time gap (seconds) to an IB durationStr string.
-
-    1min bars: capped at 2 days (IB hard limit).
-    5min bars: supports up to 1 year — weeks/year strings allow fetching any
-               historical date range when the chart scrolls past cached data.
+    Supports up to 1 year — weeks/year strings allow fetching any
+    historical date range when the chart scrolls past cached data.
     """
-    if key == "1min":
-        gap_sec = min(gap_sec + 3_600, 86_400 * 2)   # +1h buffer, 2-day cap
-        if gap_sec < 86_400:
-            return f"{max(gap_sec, 3_600)} S"
-        return f"{math.ceil(gap_sec / 86_400)} D"
-
-    # 5-min bars: no artificial day cap — use weeks/year as needed
     gap_sec += 3_600          # +1h buffer to ensure the boundary bar is included
     days = gap_sec / 86_400
     if days < 1:
@@ -75,13 +66,13 @@ class IBDataFetcher:
 
     def __init__(self):
         self.ib: Optional[IB] = None
-        self.bars: Dict[str, List[dict]] = {"1min": [], "5min": []}
+        self.bars: Dict[str, List[dict]] = {"5min": []}
         self._contract = None                        # cached qualified contract
         self._ib_ready: bool = False                 # True only after contract is resolved
         self._realtime_subscriptions: Dict[str, object] = {}
         self._new_bar_callbacks: List[Callable[[str, dict], None]] = []
         # Aggregated in-progress bars (built from ticks / 5s bars)
-        self._rt_current: Dict[str, Optional[dict]] = {"1min": None, "5min": None}
+        self._rt_current: Dict[str, Optional[dict]] = {"5min": None}
         # reqMktData tick state
         self._prev_tick_price: float = float("nan")
         self._prev_tick_size:  float = float("nan")
@@ -154,75 +145,73 @@ class IBDataFetcher:
 
     async def load_history(
         self,
-        since_1min: Optional[int] = None,
         since_5min: Optional[int] = None,
     ):
         """
-        Fetch 1min and 5min bars from IB.
+        Fetch 5min bars from IB.
 
-        If since_Xmin is provided, only fetch bars newer than that timestamp
+        If since_5min is provided, only fetch bars newer than that timestamp
         (for startup incremental sync from DB). Falls back to full default
-        duration if the gap exceeds IB's per-size limit.
+        duration if the gap exceeds IB's limit.
         """
         contract = await self._get_contract()
 
-        for bar_size_str, key, since_ts, default_dur in [
-            ("1 min",  "1min", since_1min, config.HISTORY_DURATION_1MIN),
-            ("5 mins", "5min", since_5min, config.HISTORY_DURATION_5MIN),
-        ]:
-            now = int(time.time())
-            # Max gap for incremental startup sync: 2 days for 1min (IB limit),
-            # 365 days for 5min (1 year — IB supports this per request).
-            max_gap = 86_400 * 2 if key == "1min" else 86_400 * 365
+        key = "5min"
+        bar_size_str = "5 mins"
+        since_ts = since_5min
+        default_dur = config.HISTORY_DURATION_5MIN
 
-            if since_ts and (now - since_ts) <= max_gap:
-                duration_str = _ib_duration(now - since_ts, key)
-                logger.info("Fetching %s bars since %s (duration=%s)",
-                            key, datetime.fromtimestamp(since_ts, tz=timezone.utc).isoformat(),
-                            duration_str)
-            else:
-                duration_str = default_dur
-                since_ts     = None
-                logger.info("Fetching historical %s bars (duration=%s)", key, duration_str)
+        now = int(time.time())
+        max_gap = 86_400 * 365
 
-            logger.info("Requesting %s historical bars from IB (timeout 60 s)…", key)
-            try:
-                raw = await asyncio.wait_for(
-                    self.ib.reqHistoricalDataAsync(
-                        contract,
-                        endDateTime="",
-                        durationStr=duration_str,
-                        barSizeSetting=bar_size_str,
-                        whatToShow="TRADES",
-                        useRTH=False,
-                        formatDate=2,
-                    ),
-                    timeout=60.0,
-                )
-            except asyncio.TimeoutError:
-                logger.error(
-                    "reqHistoricalDataAsync timed out for %s bars — "
-                    "IB pacing limit or no data permission. Skipping.", key
-                )
-                continue
-            new_bars = [_bar_to_dict(b) for b in raw]
+        if since_ts and (now - since_ts) <= max_gap:
+            duration_str = _ib_duration(now - since_ts)
+            logger.info("Fetching %s bars since %s (duration=%s)",
+                        key, datetime.fromtimestamp(since_ts, tz=timezone.utc).isoformat(),
+                        duration_str)
+        else:
+            duration_str = default_dur
+            since_ts     = None
+            logger.info("Fetching historical %s bars (duration=%s)", key, duration_str)
 
-            if since_ts:
-                # Only keep bars strictly newer than what we already have
-                new_bars = [b for b in new_bars if b["time"] > since_ts]
-                # Merge with in-memory (from DB load) without duplicates
-                existing = {b["time"]: b for b in self.bars[key]}
-                for b in new_bars:
-                    existing[b["time"]] = b
-                self.bars[key] = sorted(existing.values(), key=lambda b: b["time"])
-            else:
-                self.bars[key] = new_bars
+        logger.info("Requesting %s historical bars from IB (timeout 60 s)…", key)
+        try:
+            raw = await asyncio.wait_for(
+                self.ib.reqHistoricalDataAsync(
+                    contract,
+                    endDateTime="",
+                    durationStr=duration_str,
+                    barSizeSetting=bar_size_str,
+                    whatToShow="TRADES",
+                    useRTH=False,
+                    formatDate=2,
+                ),
+                timeout=60.0,
+            )
+        except asyncio.TimeoutError:
+            logger.error(
+                "reqHistoricalDataAsync timed out for %s bars — "
+                "IB pacing limit or no data permission. Skipping.", key
+            )
+            return
+        new_bars = [_bar_to_dict(b) for b in raw]
 
-            if len(self.bars[key]) > config.MAX_BARS_IN_MEMORY:
-                self.bars[key] = self.bars[key][-config.MAX_BARS_IN_MEMORY:]
+        if since_ts:
+            # Only keep bars strictly newer than what we already have
+            new_bars = [b for b in new_bars if b["time"] > since_ts]
+            # Merge with in-memory (from DB load) without duplicates
+            existing = {b["time"]: b for b in self.bars[key]}
+            for b in new_bars:
+                existing[b["time"]] = b
+            self.bars[key] = sorted(existing.values(), key=lambda b: b["time"])
+        else:
+            self.bars[key] = new_bars
 
-            logger.info("Loaded %d %s bars total (%d new from IB)",
-                        len(self.bars[key]), key, len(new_bars))
+        if len(self.bars[key]) > config.MAX_BARS_IN_MEMORY:
+            self.bars[key] = self.bars[key][-config.MAX_BARS_IN_MEMORY:]
+
+        logger.info("Loaded %d %s bars total (%d new from IB)",
+                    len(self.bars[key]), key, len(new_bars))
 
     async def fetch_range(self, bar_size_key: str, from_ts: int, to_ts: int) -> List[dict]:
         """
@@ -231,14 +220,14 @@ class IBDataFetcher:
         Returns bars filtered to [from_ts, to_ts].
         """
         contract   = await self._get_contract()
-        interval   = 60 if bar_size_key == "1min" else 300
-        bar_size   = "1 min" if bar_size_key == "1min" else "5 mins"
+        interval   = 300
+        bar_size   = "5 mins"
 
         start_ts   = (from_ts // interval) * interval
         end_ts     = ((to_ts + interval - 1) // interval) * interval
         end_dt     = datetime.fromtimestamp(end_ts, tz=timezone.utc)
         end_str    = end_dt.strftime("%Y%m%d %H:%M:%S UTC")
-        dur_str    = _ib_duration(end_ts - start_ts, bar_size_key)
+        dur_str    = _ib_duration(end_ts - start_ts)
 
         if getattr(contract, 'secType', '').upper() == 'CONTFUT':
             contract = Future(
@@ -311,27 +300,28 @@ class IBDataFetcher:
         rb_close = float(rb.close)
         rb_vol   = float(rb.volume)
 
-        for key, interval in [("1min", 60), ("5min", 300)]:
-            bar_ts = (rt_ts // interval) * interval
-            cur    = self._rt_current[key]
+        key = "5min"
+        interval = 300
+        bar_ts = (rt_ts // interval) * interval
+        cur    = self._rt_current[key]
 
-            if cur is None or bar_ts > cur["time"]:
-                if cur is not None:
-                    self._append_bar(key, cur)
-                    self._dispatch(key, cur)
-                cur = {"time": bar_ts, "open": rb_open, "high": rb_high,
-                       "low": rb_low, "close": rb_close, "volume": rb_vol}
-                self._rt_current[key] = cur
+        if cur is None or bar_ts > cur["time"]:
+            if cur is not None:
                 self._append_bar(key, cur)
-            else:
-                cur["high"]    = max(cur["high"], rb_high)
-                cur["low"]     = min(cur["low"],  rb_low)
-                cur["close"]   = rb_close
-                cur["volume"] += rb_vol
-                if self.bars[key] and self.bars[key][-1]["time"] == bar_ts:
-                    self.bars[key][-1] = cur
+                self._dispatch(key, cur)
+            cur = {"time": bar_ts, "open": rb_open, "high": rb_high,
+                   "low": rb_low, "close": rb_close, "volume": rb_vol}
+            self._rt_current[key] = cur
+            self._append_bar(key, cur)
+        else:
+            cur["high"]    = max(cur["high"], rb_high)
+            cur["low"]     = min(cur["low"],  rb_low)
+            cur["close"]   = rb_close
+            cur["volume"] += rb_vol
+            if self.bars[key] and self.bars[key][-1]["time"] == bar_ts:
+                self.bars[key][-1] = cur
 
-            self._dispatch(key, cur)
+        self._dispatch(key, cur)
 
     # ─── Real-time (reqMktData — tick level) ─────────────────────────────────
 
@@ -353,13 +343,14 @@ class IBDataFetcher:
     def _seed_rt_current(self):
         """Pre-fill _rt_current from last historical bar to avoid startup gap."""
         now_ts = int(time.time())
-        for key, interval in [("1min", 60), ("5min", 300)]:
-            if self.bars[key]:
-                last   = dict(self.bars[key][-1])
-                bar_ts = (now_ts // interval) * interval
-                if last["time"] == bar_ts:
-                    self._rt_current[key] = last
-                    logger.debug("Seeded %s rt_current from history ts=%s", key, last["time"])
+        key = "5min"
+        interval = 300
+        if self.bars[key]:
+            last   = dict(self.bars[key][-1])
+            bar_ts = (now_ts // interval) * interval
+            if last["time"] == bar_ts:
+                self._rt_current[key] = last
+                logger.debug("Seeded %s rt_current from history ts=%s", key, last["time"])
 
     def _on_tick(self, ticker):
         price = ticker.last
@@ -376,33 +367,33 @@ class IBDataFetcher:
             self._prev_tick_size  = size
 
         wall_ts = int(time.time())
-        for key, interval in [("1min", 60), ("5min", 300)]:
-            bar_ts = (wall_ts // interval) * interval
-            cur    = self._rt_current[key]
+        key = "5min"
+        interval = 300
+        bar_ts = (wall_ts // interval) * interval
+        cur    = self._rt_current[key]
 
-            if cur is None or bar_ts > cur["time"]:
-                if cur is not None:
-                    self._append_bar(key, cur)
-                    self._dispatch(key, cur)
-                cur = {"time": bar_ts, "open": price, "high": price,
-                       "low": price, "close": price, "volume": vol_delta}
-                self._rt_current[key] = cur
+        if cur is None or bar_ts > cur["time"]:
+            if cur is not None:
                 self._append_bar(key, cur)
-            else:
-                cur["high"]    = max(cur["high"], price)
-                cur["low"]     = min(cur["low"],  price)
-                cur["close"]   = price
-                cur["volume"] += vol_delta
-                if self.bars[key] and self.bars[key][-1]["time"] == bar_ts:
-                    self.bars[key][-1] = cur
+                self._dispatch(key, cur)
+            cur = {"time": bar_ts, "open": price, "high": price,
+                   "low": price, "close": price, "volume": vol_delta}
+            self._rt_current[key] = cur
+            self._append_bar(key, cur)
+        else:
+            cur["high"]    = max(cur["high"], price)
+            cur["low"]     = min(cur["low"],  price)
+            cur["close"]   = price
+            cur["volume"] += vol_delta
+            if self.bars[key] and self.bars[key][-1]["time"] == bar_ts:
+                self.bars[key][-1] = cur
 
         now = time.monotonic()
         if now - self._last_tick_broadcast >= self._TICK_BROADCAST_INTERVAL:
             self._last_tick_broadcast = now
-            for key in ("1min", "5min"):
-                cur = self._rt_current[key]
-                if cur:
-                    self._dispatch(key, cur)
+            cur = self._rt_current[key]
+            if cur:
+                self._dispatch(key, cur)
 
     # ─── Shared helpers ───────────────────────────────────────────────────────
 

@@ -1,5 +1,5 @@
 """
-Google Sheets Sync — writes MES 1min/5min OHLCV bars to Google Sheets.
+Google Sheets Sync — writes MES 5min OHLCV bars to Google Sheets.
 
 Setup (one-time):
   1. Go to https://console.cloud.google.com and create a project
@@ -13,7 +13,7 @@ Setup (one-time):
 Usage:
     sync = GoogleSheetsSync()
     sync.authenticate()
-    sync.initial_upload(bars_1min, bars_5min)
+    sync.initial_upload(bars_5min)
     sync.append_new_bar("5min", bar_dict)  # call on each new bar
 """
 import asyncio
@@ -40,8 +40,7 @@ class GoogleSheetsSync:
     """
     Manages writing OHLCV bars to a Google Sheet.
 
-    Two worksheets are maintained:
-        - "1min"  — 1-minute bars
+    One worksheet is maintained:
         - "5min"  — 5-minute bars
 
     Real-time bars are buffered and flushed every SHEETS_WRITE_INTERVAL_SECONDS
@@ -52,7 +51,7 @@ class GoogleSheetsSync:
         self._gc = None            # gspread client
         self._sheet = None         # Spreadsheet object
         self._worksheets: Dict[str, object] = {}
-        self._buffer: Dict[str, List[dict]] = {"1min": [], "5min": []}
+        self._buffer: Dict[str, List[dict]] = {"5min": []}
         self._last_flush = 0.0
 
     def authenticate(self) -> bool:
@@ -96,7 +95,7 @@ class GoogleSheetsSync:
     def _ensure_worksheets(self):
         """Create worksheets if they don't exist and set headers."""
         existing = {ws.title: ws for ws in self._sheet.worksheets()}
-        for name in (config.WORKSHEET_1MIN, config.WORKSHEET_5MIN):
+        for name in (config.WORKSHEET_5MIN,):
             if name not in existing:
                 ws = self._sheet.add_worksheet(title=name, rows=10000, cols=6)
                 ws.append_row(HEADERS)
@@ -106,20 +105,20 @@ class GoogleSheetsSync:
             self._worksheets[name] = ws
 
     def _ws(self, bar_size_key: str):
-        """Return the worksheet for a bar size key ('1min' or '5min')."""
-        name = config.WORKSHEET_1MIN if bar_size_key == "1min" else config.WORKSHEET_5MIN
+        """Return the worksheet for bar size key '5min'."""
+        name = config.WORKSHEET_5MIN
         return self._worksheets.get(name)
 
     # ─── Initial Upload ───────────────────────────────────────────────────────
 
-    def initial_upload(self, bars_1min: List[dict], bars_5min: List[dict]):
+    def initial_upload(self, bars_5min: List[dict]):
         """
         Upload all historical bars. Clears existing data and rewrites from scratch.
         Uses batch updates to minimize API calls.
         """
         if not self._gc:
             return
-        for key, bars in [("1min", bars_1min), ("5min", bars_5min)]:
+        for key, bars in [("5min", bars_5min)]:
             ws = self._ws(key)
             if not ws or not bars:
                 continue
@@ -152,7 +151,7 @@ class GoogleSheetsSync:
         """Write all buffered bars to Google Sheets and clear the buffer."""
         if not self._gc:
             return
-        for key in ("1min", "5min"):
+        for key in ("5min",):
             bars = self._buffer[key]
             if not bars:
                 continue

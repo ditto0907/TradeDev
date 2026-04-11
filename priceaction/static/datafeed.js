@@ -180,7 +180,7 @@ class MESDatafeed {
   }
 
   _handleBarUpdate(msg) {
-    const resMap = { '1min': '1', '5min': '5' };
+    const resMap = { '5min': '5' };
     const barRes = resMap[msg.bar_size];
     if (!barRes) return;
 

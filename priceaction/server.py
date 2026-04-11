@@ -50,7 +50,7 @@ _order_mgr:  Optional[IBOrderManager] = None   # set after IB connect
 _ws_clients:          List[WebSocket] = []
 _latest_analysis:     dict = {}
 _last_analysis_bar_ts: int = 0
-_prev_completed_bar:  dict = {"1min": None, "5min": None}  # for DB write on completion
+_prev_completed_bar:  dict = {"5min": None}  # for DB write on completion
 
 
 # ─── WebSocket Broadcast ──────────────────────────────────────────────────────
@@ -110,11 +110,10 @@ async def lifespan(app: FastAPI):
 
     # ── Step 1: init DB and load historical bars from it ─────────────────────
     db.init_db()
-    for key in ("1min", "5min"):
-        stored = db.get_bars(MES_SYM, key)
-        if stored:
-            fetcher.bars[key] = stored[-config.MAX_BARS_IN_MEMORY:]
-            logger.info("Loaded %d %s bars from DB", len(fetcher.bars[key]), key)
+    stored = db.get_bars(MES_SYM, "5min")
+    if stored:
+        fetcher.bars["5min"] = stored[-config.MAX_BARS_IN_MEMORY:]
+        logger.info("Loaded %d 5min bars from DB", len(fetcher.bars["5min"]))
 
     has_db_data = bool(fetcher.bars.get("5min"))
 
@@ -123,15 +122,13 @@ async def lifespan(app: FastAPI):
     try:
         await fetcher.connect()
 
-        since_1min = db.get_latest_ts(MES_SYM, "1min")
         since_5min = db.get_latest_ts(MES_SYM, "5min")
-        await fetcher.load_history(since_1min=since_1min, since_5min=since_5min)
+        await fetcher.load_history(since_5min=since_5min)
 
         # Persist the freshly fetched bars
-        for key in ("1min", "5min"):
-            if fetcher.bars[key]:
-                saved = db.insert_bars(MES_SYM, key, fetcher.bars[key])
-                logger.info("Saved %d %s bars to DB", saved, key)
+        if fetcher.bars["5min"]:
+            saved = db.insert_bars(MES_SYM, "5min", fetcher.bars["5min"])
+            logger.info("Saved %d 5min bars to DB", saved)
 
         ib_ok = True
     except Exception as e:
@@ -139,9 +136,8 @@ async def lifespan(app: FastAPI):
 
     # ── Step 3: synthetic fallback only when NOTHING is available ─────────────
     if not ib_ok and not has_db_data:
-        logger.info("Loading synthetic test data (500 bars each)…")
+        logger.info("Loading synthetic test data (500 bars)…")
         fetcher.bars["5min"] = generate_bars(n=500, bar_minutes=5)
-        fetcher.bars["1min"] = generate_bars(n=500, bar_minutes=1)
 
     # ── Step 4: real-time subscription (independent of step 2 success) ────────
     if ib_ok:
@@ -166,7 +162,7 @@ async def lifespan(app: FastAPI):
 
     # ── Step 5: Google Sheets ─────────────────────────────────────────────────
     if sheets.authenticate():
-        sheets.initial_upload(fetcher.get_bars("1min"), fetcher.get_bars("5min"))
+        sheets.initial_upload(fetcher.get_bars("5min"))
 
     # ── Step 6: initial price-action analysis ─────────────────────────────────
     global _latest_analysis
@@ -179,10 +175,9 @@ async def lifespan(app: FastAPI):
     # ── Shutdown ──────────────────────────────────────────────────────────────
     logger.info("Shutting down…")
     # Flush any in-progress bars to DB
-    for key in ("1min", "5min"):
-        bar = _prev_completed_bar.get(key)
-        if bar:
-            db.insert_bars(MES_SYM, key, [bar])
+    bar = _prev_completed_bar.get("5min")
+    if bar:
+        db.insert_bars(MES_SYM, "5min", [bar])
     sheets.flush_buffer()
     fetcher.unsubscribe_realtime()
     fetcher.disconnect()
@@ -240,7 +235,7 @@ async def index():
 @app.get("/api/config")
 async def get_config():
     return {
-        "supported_resolutions": ["1", "5", "15", "60", "1D"],
+        "supported_resolutions": ["5", "15", "60", "1D"],
         "exchanges": [{"value": "CME", "name": "CME", "desc": "Chicago Mercantile Exchange"}],
         "symbols_types": [{"name": "Futures", "value": "futures"}],
         "supports_marks": False,
@@ -259,8 +254,8 @@ async def get_symbols(symbol: str = Query("MES")):
         "pricescale": 4, "minmov": 1,
         "session": "1800-1700:1234567",
         "has_intraday": True,
-        "supported_resolutions": ["1", "5", "15", "60", "1D"],
-        "intraday_multipliers": ["1", "5"],
+        "supported_resolutions": ["5", "15", "60", "1D"],
+        "intraday_multipliers": ["5"],
         "has_no_volume": False, "volume_precision": 0,
         "data_status": "streaming",
     }
@@ -281,7 +276,7 @@ async def get_history(
     for the requested range (e.g. chart scrolled past cached history), an
     on-demand fetch from IB is attempted and the result is saved to the DB.
     """
-    key  = "1min" if resolution == "1" else "5min"
+    key  = "5min"
     bars = db.get_bars(MES_SYM, key, from_ts=from_ts, to_ts=to_ts)
 
     # Auto-fetch from IB whenever the scroll goes before our earliest stored bar.
