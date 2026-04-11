@@ -1,17 +1,14 @@
 /**
  * Custom TradingView DataFeed adapter.
  *
- * Implements the TradingView JS DataFeed interface to connect the charting
- * library to our FastAPI backend.
+ * REST endpoints:
+ *   GET /api/config      → onReady
+ *   GET /api/symbols     → resolveSymbol  (uses window._rthMode for session)
+ *   GET /api/history     → getBars
+ *   GET /api/time        → getServerTime
  *
- * REST endpoints used:
- *   GET /api/config      → onReady configuration
- *   GET /api/symbols     → resolveSymbol
- *   GET /api/history     → getBars (historical OHLCV)
- *   GET /api/time        → server time
- *
- * WebSocket used:
- *   WS /ws/realtime      → subscribeBars (real-time updates)
+ * WebSocket:
+ *   WS /ws/realtime      → subscribeBars
  */
 
 class MESDatafeed {
@@ -27,16 +24,13 @@ class MESDatafeed {
   onReady(callback) {
     fetch('/api/config')
       .then(r => r.json())
-      .then(cfg => {
-        setTimeout(() => callback(cfg), 0);
-      })
+      .then(cfg => setTimeout(() => callback(cfg), 0))
       .catch(err => console.error('DataFeed onReady error:', err));
   }
 
   // ── searchSymbols ──────────────────────────────────────────────────────────
 
   searchSymbols(userInput, exchange, symbolType, onResult) {
-    // Only MES is available
     onResult([{
       symbol: 'MES',
       full_name: 'CME:MES',
@@ -51,7 +45,18 @@ class MESDatafeed {
   resolveSymbol(symbolName, onResolve, onError) {
     fetch(`/api/symbols?symbol=${encodeURIComponent(symbolName)}`)
       .then(r => r.json())
-      .then(info => setTimeout(() => onResolve(info), 0))
+      .then(info => {
+        // Apply RTH / ETH session override
+        if (window._rthMode) {
+          // RTH: 9:30 AM – 4:00 PM ET, Mon–Fri
+          info.session          = '0930-1600:12345';
+          info.session_holidays = '';
+        } else {
+          // ETH (Globex): virtually 24h Sun–Fri
+          info.session = '0000-2359:23456';
+        }
+        setTimeout(() => onResolve(info), 0);
+      })
       .catch(err => {
         console.error('resolveSymbol error:', err);
         onError('SYMBOL_NOT_FOUND');
@@ -69,7 +74,10 @@ class MESDatafeed {
       .then(r => r.json())
       .then(data => {
         if (data.s === 'no_data') {
-          onResult([], { noData: true });
+          const meta = { noData: true };
+          // Pass nextTime (seconds→ms) so TradingView keeps requesting older bars
+          if (data.nextTime != null) meta.nextTime = data.nextTime * 1000;
+          onResult([], meta);
           return;
         }
         if (data.s !== 'ok') {
@@ -114,24 +122,18 @@ class MESDatafeed {
       .catch(() => callback(Math.floor(Date.now() / 1000)));
   }
 
+  // ── Analysis callback ──────────────────────────────────────────────────────
+
+  setAnalysisCallback(cb) { this._onAnalysis = cb; }
+
   // ── WebSocket Management ───────────────────────────────────────────────────
 
-  /**
-   * Register a callback to receive analysis updates (S/R levels, market cycle).
-   * Called by app.js to wire up annotations.
-   */
-  setAnalysisCallback(cb) {
-    this._onAnalysis = cb;
-  }
-
   _ensureWebSocket() {
-    if (this._ws && (this._ws.readyState === WebSocket.OPEN || this._ws.readyState === WebSocket.CONNECTING)) {
-      return;
-    }
+    if (this._ws && (this._ws.readyState === WebSocket.OPEN ||
+                     this._ws.readyState === WebSocket.CONNECTING)) return;
 
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    const wsUrl = `${proto}://${location.host}/ws/realtime`;
-    this._ws = new WebSocket(wsUrl);
+    this._ws = new WebSocket(`${proto}://${location.host}/ws/realtime`);
 
     this._ws.onopen = () => {
       console.log('DataFeed WebSocket connected');
@@ -147,7 +149,6 @@ class MESDatafeed {
       } else if (msg.type === 'analysis') {
         if (this._onAnalysis) this._onAnalysis(msg.data);
       } else if (msg.type === 'snapshot') {
-        // Initial snapshot: just trigger analysis overlay
         if (this._onAnalysis && msg.analysis) this._onAnalysis(msg.analysis);
       }
     };
@@ -158,32 +159,25 @@ class MESDatafeed {
       setTimeout(() => this._ensureWebSocket(), 3000);
     };
 
-    this._ws.onerror = (err) => {
-      console.error('DataFeed WebSocket error:', err);
-    };
+    this._ws.onerror = (err) => console.error('DataFeed WebSocket error:', err);
   }
 
   _handleBarUpdate(msg) {
-    // Map bar_size key to TradingView resolution string
     const resMap = { '1min': '1', '5min': '5' };
     const barResolution = resMap[msg.bar_size];
     if (!barResolution) return;
 
-    const bar = msg.bar;
     const tvBar = {
-      time:   bar.time * 1000,    // seconds → milliseconds
-      open:   bar.open,
-      high:   bar.high,
-      low:    bar.low,
-      close:  bar.close,
-      volume: bar.volume,
+      time:   msg.bar.time * 1000,
+      open:   msg.bar.open,
+      high:   msg.bar.high,
+      low:    msg.bar.low,
+      close:  msg.bar.close,
+      volume: msg.bar.volume,
     };
 
-    // Notify all matching subscriptions
     for (const sub of Object.values(this._subscriptions)) {
-      if (sub.resolution === barResolution) {
-        sub.onTick(tvBar);
-      }
+      if (sub.resolution === barResolution) sub.onTick(tvBar);
     }
   }
 }

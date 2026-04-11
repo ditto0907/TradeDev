@@ -25,6 +25,7 @@ from ib_data_fetcher import IBDataFetcher
 from google_sheets_sync import GoogleSheetsSync
 from price_action_analyzer import PriceActionAnalyzer
 from order_manager import IBOrderManager
+from trade_log_parser import load_all_trades
 from test_data import generate_bars
 
 logging.basicConfig(level=logging.INFO,
@@ -307,7 +308,12 @@ async def get_history(
         bars = bars[-countback:]
 
     if not bars:
-        return {"s": "no_data"}
+        # Provide nextTime so TradingView keeps requesting older data
+        next_ts = db.get_latest_ts_before(MES_SYM, key, from_ts)
+        resp: dict = {"s": "no_data"}
+        if next_ts is not None:
+            resp["nextTime"] = next_ts
+        return resp
 
     return {
         "s": "ok",
@@ -331,6 +337,16 @@ async def get_analysis():
         "support_levels": [], "resistance_levels": [],
         "market_cycle": "unknown", "cycle_ranges": [],
     }
+
+
+@app.get("/api/trades")
+async def get_trades():
+    """Return parsed historical trades from log files in data/."""
+    try:
+        return load_all_trades()
+    except Exception as e:
+        logger.error("Trade log load error: %s", e)
+        return []
 
 
 # ─── Order Endpoints ──────────────────────────────────────────────────────────

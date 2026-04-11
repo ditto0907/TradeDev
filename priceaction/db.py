@@ -118,6 +118,16 @@ def get_earliest_ts(symbol: str, timeframe: str) -> Optional[int]:
     return row[0]
 
 
+def get_latest_ts_before(symbol: str, timeframe: str, before_ts: int) -> Optional[int]:
+    """Return the largest bar timestamp strictly before before_ts, or None."""
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT MAX(ts) FROM bars WHERE symbol=? AND timeframe=? AND ts<?",
+            (symbol, timeframe, before_ts),
+        ).fetchone()
+    return row[0]
+
+
 def count_bars(symbol: str, timeframe: str) -> int:
     with _conn() as conn:
         return conn.execute(

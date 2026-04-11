@@ -26,14 +26,25 @@ let _volumeStudyId = null;
 let _lastBar       = null;
 let _openPrice     = null;
 let _orderSide     = 'buy';
-let _lastAnalysis  = null;   // last received analysis object
+let _lastAnalysis  = null;
 
-// S/R shape tracking (separate arrays so we can toggle each independently)
+// S/R shape tracking
 let _supportShapes    = [];
 let _resistanceShapes = [];
 let _cycleShapes      = [];
 let _showSupport      = true;
 let _showResistance   = true;
+
+// Trade markers
+let _tradeShapes  = [];
+let _showTrades   = true;
+let _tradesLoaded = false;
+
+// RTH / ETH
+window._rthMode = false;
+
+// Right-click order price — updated via crossHairMoved
+window._chartCursorPrice = null;
 
 // ── DOMContentLoaded ──────────────────────────────────────────────────────────
 
@@ -86,14 +97,32 @@ function initChart() {
       'paneProperties.horzGridProperties.color': '#1e222d',
       'scalesProperties.textColor':              '#787b86',
     },
+
+    // ── Right-click context menu for quick order placement ─────────────────
+    context_menu: {
+      items_processor: (defaultItems, actionsFactory) => {
+        return _buildContextMenuItems(defaultItems, actionsFactory);
+      },
+    },
   });
 
   _widget.onChartReady(() => {
     setWsStatus('live', 'Live');
+    const chart = _widget.activeChart();
+
+    // Track crosshair price for right-click orders
+    try {
+      chart.crossHairMoved(({ price }) => {
+        if (price != null && !isNaN(price) && price > 0) {
+          window._chartCursorPrice = price;
+        }
+      });
+    } catch (e) {
+      console.warn('crossHairMoved subscribe error:', e);
+    }
 
     // Volume sub-pane
     if (!_volumeStudyId) {
-      const chart = _widget.activeChart();
       const p = chart.createStudy('Volume', false, false, [], {
         'volume.color.0':    'rgba(239,83,80,0.55)',
         'volume.color.1':    'rgba(38,166,154,0.55)',
@@ -110,6 +139,7 @@ function initChart() {
       else afterCreate(p);
     }
 
+    // Load S/R analysis
     fetch('/api/analysis')
       .then(r => r.json())
       .then(analysis => {
@@ -119,9 +149,242 @@ function initChart() {
         updateSRPanel(analysis);
       })
       .catch(e => console.warn('Analysis fetch error:', e));
+
+    // Load trade markers
+    if (_showTrades) initTradeMarkers();
   });
 
   connectPriceFeed(datafeed);
+}
+
+// ── Right-click Context Menu ───────────────────────────────────────────────────
+
+function _buildContextMenuItems(defaultItems, actionsFactory) {
+  const price = window._chartCursorPrice;
+  if (price == null || isNaN(price)) return defaultItems;
+
+  const lastPrice = _lastBar ? _lastBar.close : price;
+  const isAbove   = price >= lastPrice;
+  const pStr      = price.toFixed(2);
+  const qty       = parseInt(document.getElementById('order-qty')?.value) || 1;
+
+  const extra = [];
+  try {
+    extra.push(actionsFactory.createSeparator());
+
+    // Conditional orders based on position relative to last price
+    if (isAbove) {
+      extra.push(actionsFactory.createAction({
+        text: `Buy Stop  @ ${pStr}  (${qty} ct)`,
+        click: () => placeQuickOrder('BUY', 'stop', null, price),
+      }));
+      extra.push(actionsFactory.createAction({
+        text: `Sell Limit @ ${pStr}  (${qty} ct)`,
+        click: () => placeQuickOrder('SELL', 'limit', price, null),
+      }));
+    } else {
+      extra.push(actionsFactory.createAction({
+        text: `Buy Limit  @ ${pStr}  (${qty} ct)`,
+        click: () => placeQuickOrder('BUY', 'limit', price, null),
+      }));
+      extra.push(actionsFactory.createAction({
+        text: `Sell Stop  @ ${pStr}  (${qty} ct)`,
+        click: () => placeQuickOrder('SELL', 'stop', null, price),
+      }));
+    }
+
+    extra.push(actionsFactory.createSeparator());
+
+    // Market orders always available
+    extra.push(actionsFactory.createAction({
+      text: `Market Buy  (${qty} ct)`,
+      click: () => placeQuickOrder('BUY', 'market', null, null),
+    }));
+    extra.push(actionsFactory.createAction({
+      text: `Market Sell  (${qty} ct)`,
+      click: () => placeQuickOrder('SELL', 'market', null, null),
+    }));
+
+    extra.push(actionsFactory.createSeparator());
+  } catch (e) {
+    console.warn('Context menu build error:', e);
+    return defaultItems;
+  }
+
+  return extra.concat(Array.from(defaultItems));
+}
+
+async function placeQuickOrder(action, orderType, limitPrice, stopPrice) {
+  const qty = parseInt(document.getElementById('order-qty')?.value) || 1;
+  const tif = document.getElementById('order-tif')?.value || 'day';
+
+  const body = {
+    action,
+    quantity:    qty,
+    order_type:  orderType,
+    limit_price: limitPrice,
+    stop_price:  stopPrice,
+    tif,
+  };
+
+  try {
+    const res  = await fetch('/api/order', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (data.success) {
+      const typeLabel = orderType === 'market' ? 'MKT'
+                      : orderType === 'limit'  ? `LMT ${limitPrice?.toFixed(2)}`
+                      : orderType === 'stop'   ? `STP ${stopPrice?.toFixed(2)}`
+                      : `STP LMT`;
+      showToast(`#${data.order_id}  ${action} ${qty} MES ${typeLabel}`, 'success');
+      addWorkingOrderRow(data);
+    } else {
+      showToast(`Order failed: ${data.error}`, 'error');
+    }
+  } catch (e) {
+    showToast(`Order error: ${e.message}`, 'error');
+  }
+}
+
+// ── RTH / ETH Toggle ──────────────────────────────────────────────────────────
+
+function toggleRTH() {
+  window._rthMode = !window._rthMode;
+  const btn = document.getElementById('rth-btn');
+  if (btn) {
+    btn.textContent = window._rthMode ? 'RTH' : 'ETH';
+    btn.classList.toggle('rth-active', window._rthMode);
+  }
+  // Re-resolve symbol so TradingView reloads with the new session hours
+  if (_widget) {
+    try {
+      _widget.activeChart().setSymbol('MES');
+    } catch (e) {
+      console.warn('setSymbol RTH/ETH error:', e);
+    }
+  }
+}
+
+// ── Trade Markers ─────────────────────────────────────────────────────────────
+
+async function initTradeMarkers() {
+  try {
+    const res    = await fetch('/api/trades');
+    const trades = await res.json();
+    _tradesLoaded = true;
+    drawTradeMarkers(trades);
+  } catch (e) {
+    console.warn('Trade markers load error:', e);
+  }
+}
+
+function drawTradeMarkers(trades) {
+  if (!_widget) return;
+  let chart;
+  try { chart = _widget.activeChart(); } catch { return; }
+
+  // Clear existing
+  _tradeShapes.forEach(id => { try { chart.removeEntity(id); } catch {} });
+  _tradeShapes = [];
+
+  if (!_showTrades || !trades.length) return;
+
+  trades.forEach(trade => {
+    try {
+      const isLong     = trade.direction === 'long';
+      const entryColor = isLong ? '#26a69a' : '#ef5350';
+      const exitColor  = (trade.pnl != null && trade.pnl >= 0) ? '#26a69a' : '#ef5350';
+
+      // ── Entry arrow ─────────────────────────────────────────────────────
+      const entryLabel = `${isLong ? 'L' : 'S'}${trade.qty}`;
+      const entryId = chart.createShape(
+        { time: trade.entry_time, price: trade.entry_price },
+        {
+          shape:           isLong ? 'arrow_up' : 'arrow_down',
+          lock:            true,
+          disableSelection: false,
+          overrides: {
+            color:    entryColor,
+            text:     entryLabel,
+            fontsize: 10,
+          },
+        }
+      );
+      if (entryId) _tradeShapes.push(entryId);
+
+      // ── Exit arrow ──────────────────────────────────────────────────────
+      if (trade.exit_time != null && trade.exit_price != null) {
+        const pnlStr   = trade.pnl != null
+          ? `${trade.pnl >= 0 ? '+' : ''}${trade.pnl.toFixed(0)}`
+          : 'X';
+        const exitId = chart.createShape(
+          { time: trade.exit_time, price: trade.exit_price },
+          {
+            shape:           isLong ? 'arrow_down' : 'arrow_up',
+            lock:            true,
+            disableSelection: false,
+            overrides: {
+              color:    exitColor,
+              text:     pnlStr,
+              fontsize: 10,
+            },
+          }
+        );
+        if (exitId) _tradeShapes.push(exitId);
+
+        // ── Background rectangle for trade duration ──────────────────────
+        const rectBg     = isLong ? 'rgba(38,166,154,0.07)' : 'rgba(239,83,80,0.07)';
+        const rectBorder = isLong ? 'rgba(38,166,154,0.30)' : 'rgba(239,83,80,0.30)';
+        const priceHi    = Math.max(trade.entry_price, trade.exit_price) + MES_TICK * 4;
+        const priceLo    = Math.min(trade.entry_price, trade.exit_price) - MES_TICK * 4;
+
+        const rectId = chart.createMultipointShape(
+          [
+            { time: trade.entry_time, price: priceLo },
+            { time: trade.exit_time,  price: priceHi },
+          ],
+          {
+            shape:           'rect',
+            lock:            true,
+            disableSelection: true,
+            overrides: {
+              backgroundColor: rectBg,
+              borderColor:     rectBorder,
+              borderWidth:     1,
+            },
+          }
+        );
+        if (rectId) _tradeShapes.push(rectId);
+      }
+    } catch (e) {
+      console.debug('Trade marker draw error:', e);
+    }
+  });
+}
+
+function toggleTrades() {
+  _showTrades = !_showTrades;
+  document.getElementById('leg-trades')?.classList.toggle('sr-off', !_showTrades);
+
+  if (!_showTrades) {
+    if (_widget) {
+      try {
+        const chart = _widget.activeChart();
+        _tradeShapes.forEach(id => { try { chart.removeEntity(id); } catch {} });
+      } catch {}
+    }
+    _tradeShapes = [];
+  } else {
+    if (!_tradesLoaded) {
+      initTradeMarkers();
+    } else {
+      // Re-fetch and redraw
+      initTradeMarkers();
+    }
+  }
 }
 
 // ── WebSocket price feed ───────────────────────────────────────────────────────
@@ -225,7 +488,7 @@ function updateCycleBadge(cycle) {
   el.className   = cycle && cycle !== 'unknown' ? cycle : '';
 }
 
-// ── S/R Panel (right side) ────────────────────────────────────────────────────
+// ── S/R Panel ─────────────────────────────────────────────────────────────────
 
 function updateSRPanel(analysis) {
   const container = document.getElementById('sr-levels-list');
@@ -256,7 +519,6 @@ function updateAnnotations(analysis) {
   let chart;
   try { chart = _widget.activeChart(); } catch { return; }
 
-  // Always redraw cycle backgrounds
   _cycleShapes.forEach(id => { try { chart.removeEntity(id); } catch {} });
   _cycleShapes = [];
   (analysis.cycle_ranges || []).slice(-8).forEach(range => {
@@ -273,16 +535,17 @@ function updateAnnotations(analysis) {
     } catch {}
   });
 
-  // Redraw S/R only when currently visible
   if (_showSupport) {
     _supportShapes.forEach(id => { try { chart.removeEntity(id); } catch {} });
     _supportShapes = [];
-    (analysis.support_levels || []).forEach(l => drawHLine(chart, l.price, '#26a69a', Math.min(l.touches, 3), _supportShapes));
+    (analysis.support_levels || []).forEach(l =>
+      drawHLine(chart, l.price, '#26a69a', Math.min(l.touches, 3), _supportShapes));
   }
   if (_showResistance) {
     _resistanceShapes.forEach(id => { try { chart.removeEntity(id); } catch {} });
     _resistanceShapes = [];
-    (analysis.resistance_levels || []).forEach(l => drawHLine(chart, l.price, '#ef5350', Math.min(l.touches, 3), _resistanceShapes));
+    (analysis.resistance_levels || []).forEach(l =>
+      drawHLine(chart, l.price, '#ef5350', Math.min(l.touches, 3), _resistanceShapes));
   }
 }
 
@@ -405,11 +668,11 @@ function updateSummary() {
 }
 
 async function placeOrder() {
-  const qty       = parseInt(document.getElementById('order-qty')?.value) || 1;
-  const type      = document.getElementById('order-type')?.value || 'market';
-  const tif       = document.getElementById('order-tif')?.value  || 'day';
-  const limitPx   = parseFloat(document.getElementById('order-price')?.value) || null;
-  const stopPx    = parseFloat(document.getElementById('order-stop')?.value)  || null;
+  const qty     = parseInt(document.getElementById('order-qty')?.value) || 1;
+  const type    = document.getElementById('order-type')?.value || 'market';
+  const tif     = document.getElementById('order-tif')?.value  || 'day';
+  const limitPx = parseFloat(document.getElementById('order-price')?.value) || null;
+  const stopPx  = parseFloat(document.getElementById('order-stop')?.value)  || null;
 
   const body = {
     action:      _orderSide.toUpperCase(),
@@ -430,11 +693,9 @@ async function placeOrder() {
       body:    JSON.stringify(body),
     });
     const data = await res.json();
-
     if (data.success) {
       showToast(`Order #${data.order_id} submitted: ${body.action} ${qty} MES`, 'success');
       addWorkingOrderRow(data);
-      // Switch to Working Orders tab
       document.querySelector('.btab[data-pane="orders"]')?.click();
     } else {
       showToast(`Order failed: ${data.error}`, 'error');
@@ -454,16 +715,12 @@ async function placeOrder() {
 function addWorkingOrderRow(order) {
   const tbody = document.getElementById('orders-tbody');
   if (!tbody) return;
-
-  // Remove placeholder row
   const empty = tbody.querySelector('tr td[colspan]');
   if (empty) empty.closest('tr').remove();
-
   const priceStr = order.lmt_price ? order.lmt_price.toFixed(2)
                  : order.stp_price ? `STP ${order.stp_price.toFixed(2)}`
                  : 'MKT';
   const sideClass = order.action === 'BUY' ? 'up' : 'down';
-
   const tr = document.createElement('tr');
   tr.id = `order-row-${order.order_id}`;
   tr.innerHTML = `
@@ -485,14 +742,12 @@ function updateWorkingOrderRow(order) {
     statusEl.textContent = order.status;
     if (order.status === 'Filled') {
       statusEl.style.color = 'var(--green)';
-      // Remove cancel button once filled
       const btn = statusEl.closest('tr')?.querySelector('.cancel-btn');
       if (btn) btn.remove();
     } else if (['Cancelled', 'Inactive'].includes(order.status)) {
       statusEl.style.color = 'var(--text-faint)';
     }
   } else {
-    // New order we don't know about yet (e.g. placed externally)
     addWorkingOrderRow(order);
   }
 }
@@ -595,7 +850,6 @@ function showToast(message, type = 'info') {
   toast.className = `toast toast-${type}`;
   toast.textContent = message;
   document.body.appendChild(toast);
-  // Animate in
   requestAnimationFrame(() => toast.classList.add('toast-show'));
   setTimeout(() => {
     toast.classList.remove('toast-show');
@@ -608,7 +862,7 @@ function showToast(message, type = 'info') {
 function setWsStatus(state, text) {
   const dot   = document.getElementById('ws-dot');
   const label = document.getElementById('ws-text');
-  if (dot)   dot.className   = `status-dot ${state}`;
+  if (dot)   dot.className    = `status-dot ${state}`;
   if (label) label.textContent = text;
 }
 

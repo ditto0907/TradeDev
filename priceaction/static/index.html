@@ -145,6 +145,23 @@
     .status-dot.live { background: var(--green); box-shadow: 0 0 4px var(--green); }
     .status-dot.error { background: var(--red); }
 
+    /* RTH / ETH toggle */
+    #rth-btn {
+      padding: 3px 10px;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+      background: var(--panel-hover);
+      color: var(--text-dim);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.6px;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s, border-color 0.15s;
+      white-space: nowrap;
+    }
+    #rth-btn:hover { background: #2a2e3d; color: var(--text); }
+    #rth-btn.rth-active { background: #0d1e30; color: #4fc3f7; border-color: #4fc3f7; }
+
     /* ── Main Layout ───────────────────────────────────────────────────────── */
     #main {
       display: grid;
@@ -592,6 +609,9 @@
   <span id="cycle-badge">—</span>
 
   <div class="topbar-right">
+    <!-- RTH / ETH session toggle -->
+    <button id="rth-btn" onclick="toggleRTH()" title="Toggle Regular/Extended Trading Hours">ETH</button>
+    <div class="topbar-sep"></div>
     <div id="ws-status">
       <div class="status-dot" id="ws-dot"></div>
       <span id="ws-text">Connecting…</span>
@@ -832,6 +852,14 @@
     <div class="leg-row"><div class="leg-box" style="background:rgba(239,83,80,.18)"></div>Markdown</div>
     <div class="leg-row"><div class="leg-box" style="background:rgba(33,150,243,.18)"></div>Accumulation</div>
     <div class="leg-row"><div class="leg-box" style="background:rgba(255,152,0,.18)"></div>Distribution</div>
+    <div style="border-top:1px solid var(--border);margin:4px 0"></div>
+    <div class="leg-row" id="leg-trades" onclick="toggleTrades()">
+      <div style="display:flex;gap:3px;align-items:center">
+        <div style="width:7px;height:7px;border-radius:50%;background:#26a69a"></div>
+        <div style="width:7px;height:7px;border-radius:50%;background:#ef5350"></div>
+      </div>
+      Trade Logs
+    </div>
   </div>
 </div>
 
