@@ -47,6 +47,7 @@ let _showResistance   = false;
 let _tradeShapes  = [];
 let _showTrades   = true;
 let _tradesLoaded = false;
+let _uploadedTrades = null;  // trades from CSV upload (overrides file-based)
 
 // RTH / ETH
 window._rthMode = true;
@@ -956,6 +957,7 @@ function toggleRTH() {
       console.log('[RTH/ETH] → new symbol:', sym);
       _widget.setSymbol(sym, currentRes, () => {
         console.log('[RTH/ETH] symbol change completed to', sym);
+        if (_showTrades) initTradeMarkers();
       });
     } catch (e) {
       console.warn('[RTH/ETH] setSymbol error:', e);
@@ -969,13 +971,67 @@ function toggleRTH() {
 
 async function initTradeMarkers() {
   try {
-    const res    = await fetch('/api/trades');
-    const trades = await res.json();
+    let trades;
+    if (_uploadedTrades) {
+      trades = _uploadedTrades;
+    } else {
+      const res = await fetch('/api/trades');
+      trades = await res.json();
+    }
     _tradesLoaded = true;
     drawTradeMarkers(trades);
+    const countEl = document.getElementById('trade-count');
+    if (countEl) countEl.textContent = trades.length ? `${trades.length}` : '';
   } catch (e) {
     console.warn('Trade markers load error:', e);
   }
+}
+
+async function handleTradeCSVUpload(input) {
+  const file = input.files?.[0];
+  if (!file) return;
+  try {
+    const formData = new FormData();
+    formData.append('file', file);
+    const res = await fetch('/api/trades/upload', { method: 'POST', body: formData });
+    const trades = await res.json();
+    if (!trades.length) {
+      alert('No filled trades found in CSV.');
+      return;
+    }
+    _uploadedTrades = trades;
+    _showTrades = true;
+    document.getElementById('leg-trades')?.classList.remove('sr-off');
+    document.getElementById('trade-clear-btn').style.display = '';
+    drawTradeMarkers(trades);
+    const countEl = document.getElementById('trade-count');
+    if (countEl) countEl.textContent = `${trades.length}`;
+    console.log(`[Trades] Uploaded ${trades.length} trades from ${file.name}`);
+  } catch (e) {
+    console.warn('Trade CSV upload error:', e);
+    alert('Failed to parse CSV file.');
+  }
+  input.value = '';  // reset so same file can be re-uploaded
+}
+
+function clearUploadedTrades() {
+  _uploadedTrades = null;
+  _tradesLoaded = false;
+  // Clear drawn shapes
+  if (_widget) {
+    try {
+      const chart = _widget.activeChart();
+      _tradeShapes.forEach(obj => {
+        try { if (obj && typeof obj.remove === 'function') obj.remove(); } catch {}
+        try { if (typeof obj === 'string' || typeof obj === 'number') chart.removeEntity(obj); } catch {}
+      });
+    } catch {}
+  }
+  _tradeShapes = [];
+  document.getElementById('trade-clear-btn').style.display = 'none';
+  const countEl = document.getElementById('trade-count');
+  if (countEl) countEl.textContent = '';
+  console.log('[Trades] Cleared uploaded trades');
 }
 
 function drawTradeMarkers(trades) {
@@ -983,8 +1039,11 @@ function drawTradeMarkers(trades) {
   let chart;
   try { chart = _widget.activeChart(); } catch { return; }
 
-  // Clear existing
-  _tradeShapes.forEach(id => { try { chart.removeEntity(id); } catch {} });
+  // Clear existing — execution shapes use .remove(), entity shapes use removeEntity()
+  _tradeShapes.forEach(obj => {
+    try { if (obj && typeof obj.remove === 'function') obj.remove(); } catch {}
+    try { if (typeof obj === 'string' || typeof obj === 'number') chart.removeEntity(obj); } catch {}
+  });
   _tradeShapes = [];
 
   if (!_showTrades || !trades.length) return;
@@ -992,69 +1051,60 @@ function drawTradeMarkers(trades) {
   trades.forEach(trade => {
     try {
       const isLong     = trade.direction === 'long';
+      const entryDir   = isLong ? 'buy' : 'sell';
       const entryColor = isLong ? '#26a69a' : '#ef5350';
-      const exitColor  = (trade.pnl != null && trade.pnl >= 0) ? '#26a69a' : '#ef5350';
 
-      // ── Entry arrow ─────────────────────────────────────────────────────
-      const entryLabel = `${isLong ? 'L' : 'S'}${trade.qty}`;
-      const entryId = chart.createShape(
-        { time: trade.entry_time, price: trade.entry_price },
-        {
-          shape:           isLong ? 'arrow_up' : 'arrow_down',
-          lock:            true,
-          disableSelection: false,
-          overrides: {
-            color:    entryColor,
-            text:     entryLabel,
-            fontsize: 10,
-          },
-        }
-      );
-      if (entryId) _tradeShapes.push(entryId);
+      // ── Entry execution mark ────────────────────────────────────────────
+      const entryExec = chart.createExecutionShape()
+        .setTime(trade.entry_time)
+        .setPrice(trade.entry_price)
+        .setDirection(entryDir)
+        .setText(`${entryDir === 'buy' ? 'B' : 'S'}${trade.qty}@${trade.entry_price.toFixed(2)}`)
+        .setArrowColor(entryColor)
+        .setTextColor(entryColor)
+        .setArrowHeight(14)
+        .setFont('bold 11px Arial');
+      _tradeShapes.push(entryExec);
 
-      // ── Exit arrow ──────────────────────────────────────────────────────
+      // ── Exit execution mark ─────────────────────────────────────────────
       if (trade.exit_time != null && trade.exit_price != null) {
-        const pnlStr   = trade.pnl != null
-          ? `${trade.pnl >= 0 ? '+' : ''}${trade.pnl.toFixed(0)}`
-          : 'X';
-        const exitId = chart.createShape(
-          { time: trade.exit_time, price: trade.exit_price },
-          {
-            shape:           isLong ? 'arrow_down' : 'arrow_up',
-            lock:            true,
-            disableSelection: false,
-            overrides: {
-              color:    exitColor,
-              text:     pnlStr,
-              fontsize: 10,
-            },
-          }
-        );
-        if (exitId) _tradeShapes.push(exitId);
+        const exitDir   = isLong ? 'sell' : 'buy';
+        const exitColor = isLong ? '#ef5350' : '#26a69a';
+        const pnlStr    = trade.pnl != null
+          ? ` (${trade.pnl >= 0 ? '+' : ''}$${trade.pnl.toFixed(0)})`
+          : '';
 
-        // ── Background rectangle for trade duration ──────────────────────
-        const rectBg     = isLong ? 'rgba(38,166,154,0.07)' : 'rgba(239,83,80,0.07)';
-        const rectBorder = isLong ? 'rgba(38,166,154,0.30)' : 'rgba(239,83,80,0.30)';
-        const priceHi    = Math.max(trade.entry_price, trade.exit_price) + MES_TICK * 4;
-        const priceLo    = Math.min(trade.entry_price, trade.exit_price) - MES_TICK * 4;
+        const exitExec = chart.createExecutionShape()
+          .setTime(trade.exit_time)
+          .setPrice(trade.exit_price)
+          .setDirection(exitDir)
+          .setText(`${exitDir === 'buy' ? 'B' : 'S'}${trade.qty}@${trade.exit_price.toFixed(2)}${pnlStr}`)
+          .setArrowColor(exitColor)
+          .setTextColor(exitColor)
+          .setArrowHeight(14)
+          .setFont('bold 11px Arial');
+        _tradeShapes.push(exitExec);
 
-        const rectId = chart.createMultipointShape(
+        // ── Connecting trend line between entry and exit ──────────────────
+        const lineColor = isLong ? 'rgba(38,166,154,0.50)' : 'rgba(239,83,80,0.50)';
+        const lineId = chart.createMultipointShape(
           [
-            { time: trade.entry_time, price: priceLo },
-            { time: trade.exit_time,  price: priceHi },
+            { time: trade.entry_time,  price: trade.entry_price },
+            { time: trade.exit_time,   price: trade.exit_price },
           ],
           {
-            shape:           'rect',
-            lock:            true,
+            shape:            'trend_line',
+            lock:             true,
             disableSelection: true,
             overrides: {
-              backgroundColor: rectBg,
-              borderColor:     rectBorder,
-              borderWidth:     1,
+              linecolor:  lineColor,
+              linewidth:  2,
+              linestyle:  2,        // dashed
+              showLabel:  false,
             },
           }
         );
-        if (rectId) _tradeShapes.push(rectId);
+        if (lineId) _tradeShapes.push(lineId);
       }
     } catch (e) {
       console.debug('Trade marker draw error:', e);
@@ -1070,7 +1120,10 @@ function toggleTrades() {
     if (_widget) {
       try {
         const chart = _widget.activeChart();
-        _tradeShapes.forEach(id => { try { chart.removeEntity(id); } catch {} });
+        _tradeShapes.forEach(obj => {
+          try { if (obj && typeof obj.remove === 'function') obj.remove(); } catch {}
+          try { if (typeof obj === 'string' || typeof obj === 'number') chart.removeEntity(obj); } catch {}
+        });
       } catch {}
     }
     _tradeShapes = [];

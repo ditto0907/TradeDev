@@ -13,7 +13,7 @@ import time
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, Request
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Query, Request, UploadFile
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, FileResponse, Response
 from pydantic import BaseModel
@@ -25,7 +25,7 @@ from ib_data_fetcher import IBDataFetcher, _bar_to_dict
 from google_sheets_sync import GoogleSheetsSync
 from price_action_analyzer import PriceActionAnalyzer
 from order_manager import IBOrderManager
-from trade_log_parser import load_all_trades
+from trade_log_parser import load_all_trades, parse_csv_content
 from test_data import generate_bars
 
 logging.basicConfig(level=logging.INFO,
@@ -480,6 +480,19 @@ async def get_trades():
         return load_all_trades()
     except Exception as e:
         logger.error("Trade log load error: %s", e)
+        return []
+
+
+@app.post("/api/trades/upload")
+async def upload_trades(file: UploadFile):
+    """Parse an uploaded CSV file and return trades."""
+    try:
+        content = await file.read()
+        text = content.decode("utf-8-sig", errors="replace")
+        trades = parse_csv_content(text)
+        return trades
+    except Exception as e:
+        logger.error("Trade upload parse error: %s", e)
         return []
 
 

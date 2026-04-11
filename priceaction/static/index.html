@@ -1064,13 +1064,21 @@
     <div class="leg-row"><div class="leg-box" style="background:rgba(33,150,243,.18)"></div>Accumulation</div>
     <div class="leg-row"><div class="leg-box" style="background:rgba(255,152,0,.18)"></div>Distribution</div>
     <div style="border-top:1px solid var(--border);margin:4px 0"></div>
-    <div class="leg-row" id="leg-trades" onclick="toggleTrades()">
-      <div style="display:flex;gap:3px;align-items:center">
-        <div style="width:7px;height:7px;border-radius:50%;background:#26a69a"></div>
-        <div style="width:7px;height:7px;border-radius:50%;background:#ef5350"></div>
+    <div class="leg-row" id="leg-trades" style="justify-content:space-between">
+      <div style="display:flex;align-items:center;gap:6px;cursor:pointer" onclick="toggleTrades()">
+        <div style="display:flex;gap:3px;align-items:center">
+          <div style="width:7px;height:7px;border-radius:50%;background:#26a69a"></div>
+          <div style="width:7px;height:7px;border-radius:50%;background:#ef5350"></div>
+        </div>
+        Trade Logs
       </div>
-      Trade Logs
+      <div style="display:flex;align-items:center;gap:4px">
+        <span id="trade-count" style="font-size:10px;opacity:0.5"></span>
+        <div onclick="document.getElementById('csv-upload').click();event.stopPropagation()" style="cursor:pointer;font-size:13px;opacity:0.6;padding:0 2px" title="Upload CSV">⬆</div>
+        <div id="trade-clear-btn" onclick="clearUploadedTrades();event.stopPropagation()" style="cursor:pointer;font-size:13px;opacity:0.6;padding:0 2px;display:none" title="Clear trades">✕</div>
+      </div>
     </div>
+    <input type="file" id="csv-upload" accept=".csv" style="display:none" onchange="handleTradeCSVUpload(this)">
   </div>
 </div>
 
