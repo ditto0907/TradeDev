@@ -36,6 +36,29 @@ def _bar_to_dict(bar) -> dict:
     }
 
 
+# ─── Resolution Mapping ──────────────────────────────────────────────────────
+#
+# TradingView resolution → (DB key, IB barSizeSetting, interval_seconds)
+
+RESOLUTION_MAP = {
+    "5":   ("5min",  "5 mins",  300),
+    "15":  ("15min", "15 mins", 900),
+    "60":  ("60min", "1 hour",  3600),
+    "1D":  ("1D",    "1 day",   86400),
+}
+
+def resolution_to_key(resolution: str) -> str:
+    """Map TradingView resolution string to DB timeframe key."""
+    return RESOLUTION_MAP.get(resolution, RESOLUTION_MAP["5"])[0]
+
+def _key_to_ib(key: str) -> tuple:
+    """Return (ib_bar_size_str, interval_seconds) for a DB key."""
+    for _res, (k, bar_size, interval) in RESOLUTION_MAP.items():
+        if k == key:
+            return bar_size, interval
+    return "5 mins", 300
+
+
 def _ib_duration(gap_sec: int) -> str:
     """
     Convert a time gap (seconds) to an IB durationStr string.
@@ -51,7 +74,7 @@ def _ib_duration(gap_sec: int) -> str:
     weeks = days / 7
     if weeks <= 52:
         return f"{math.ceil(weeks)} W"
-    return "1 Y"              # IB max per request for 5-min bars
+    return "1 Y"
 
 
 # ─── IBDataFetcher ────────────────────────────────────────────────────────────
@@ -220,8 +243,7 @@ class IBDataFetcher:
         Returns bars filtered to [from_ts, to_ts].
         """
         contract   = await self._get_contract()
-        interval   = 300
-        bar_size   = "5 mins"
+        bar_size, interval = _key_to_ib(bar_size_key)
 
         start_ts   = (from_ts // interval) * interval
         end_ts     = ((to_ts + interval - 1) // interval) * interval

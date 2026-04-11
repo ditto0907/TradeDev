@@ -255,7 +255,7 @@ async def get_symbols(symbol: str = Query("MES")):
         "session": "1800-1700:1234567",
         "has_intraday": True,
         "supported_resolutions": ["5", "15", "60", "1D"],
-        "intraday_multipliers": ["5"],
+        "intraday_multipliers": ["5", "15", "60"],
         "has_no_volume": False, "volume_precision": 0,
         "data_status": "streaming",
     }
@@ -276,7 +276,8 @@ async def get_history(
     for the requested range (e.g. chart scrolled past cached history), an
     on-demand fetch from IB is attempted and the result is saved to the DB.
     """
-    key  = "5min"
+    from ib_data_fetcher import resolution_to_key
+    key  = resolution_to_key(resolution)
     bars = db.get_bars(MES_SYM, key, from_ts=from_ts, to_ts=to_ts)
 
     # Auto-fetch from IB whenever the scroll goes before our earliest stored bar.
