@@ -231,24 +231,29 @@ class IBDataFetcher:
         Returns bars filtered to [from_ts, to_ts].
         """
         contract   = await self._get_contract()
+        interval   = 60 if bar_size_key == "1min" else 300
         bar_size   = "1 min" if bar_size_key == "1min" else "5 mins"
-        end_dt     = datetime.fromtimestamp(to_ts, tz=timezone.utc)
+
+        start_ts   = (from_ts // interval) * interval
+        end_ts     = ((to_ts + interval - 1) // interval) * interval
+        end_dt     = datetime.fromtimestamp(end_ts, tz=timezone.utc)
         end_str    = end_dt.strftime("%Y%m%d %H:%M:%S UTC")
-        dur_str    = _ib_duration(to_ts - from_ts, bar_size_key)
+        dur_str    = _ib_duration(end_ts - start_ts, bar_size_key)
+
+        if getattr(contract, 'secType', '').upper() == 'CONTFUT':
+            contract = Future(
+                symbol=contract.symbol,
+                exchange=contract.exchange,
+                currency=contract.currency,
+                lastTradeDateOrContractMonth=contract.lastTradeDateOrContractMonth,
+                localSymbol=getattr(contract, 'localSymbol', None),
+            )
 
         logger.info("On-demand fetch: %s  %s → %s  (%s)",
                     bar_size_key,
-                    datetime.fromtimestamp(from_ts, tz=timezone.utc).isoformat(),
-                    datetime.fromtimestamp(to_ts,   tz=timezone.utc).isoformat(),
+                    datetime.fromtimestamp(start_ts, tz=timezone.utc).isoformat(),
+                    datetime.fromtimestamp(end_ts,   tz=timezone.utc).isoformat(),
                     dur_str)
-
-        if isinstance(contract, ContFuture):
-            contract = Future(
-                symbol=contract.symbol,
-                lastTradeDateOrContractMonth=contract.lastTradeDateOrContractMonth,
-                exchange=contract.exchange,
-                currency=contract.currency,
-            )
 
         try:
             raw = await asyncio.wait_for(
@@ -266,9 +271,17 @@ class IBDataFetcher:
         except asyncio.TimeoutError:
             logger.error("On-demand fetch timed out for %s bars", bar_size_key)
             return []
+
         bars = [b for b in (_bar_to_dict(r) for r in raw)
                 if b["time"] >= from_ts and b["time"] <= to_ts]
         bars.sort(key=lambda b: b["time"])
+        if not bars:
+            logger.debug(
+                "On-demand IB raw bars=%d start=%s end=%s",
+                len(raw),
+                raw[0].date if raw else None,
+                raw[-1].date if raw else None,
+            )
         return bars
 
     # ─── Real-time (reqRealTimeBars — 5-second bars) ─────────────────────────
