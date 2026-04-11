@@ -32,8 +32,8 @@ let _lastAnalysis  = null;
 let _supportShapes    = [];
 let _resistanceShapes = [];
 let _cycleShapes      = [];
-let _showSupport      = true;
-let _showResistance   = true;
+let _showSupport      = false;
+let _showResistance   = false;
 
 // Trade markers
 let _tradeShapes  = [];
@@ -98,6 +98,84 @@ function initChart() {
       'scalesProperties.textColor':              '#787b86',
     },
 
+    // ── S-Bar Count custom indicator (ported from Pine Script) ───────────
+    custom_indicators_getter: function (PineJS) {
+      return Promise.resolve([
+        {
+          name: 'S-Bar Count',
+          metainfo: {
+            _metainfoVersion: 51,
+            id: 'SBarCount@tv-basicstudies-1',
+            description: 'S-Bar Count',
+            shortDescription: 'S-Bar Count',
+            is_price_study: false,
+            isCustomIndicator: true,
+            format: { type: 'price', precision: 0 },
+            plots: [{ id: 'plot_0', type: 'line' }],
+            defaults: {
+              styles: {
+                plot_0: {
+                  linestyle: 0,
+                  visible: true,
+                  linewidth: 1,
+                  plottype: 5,       // columns
+                  trackPrice: false,
+                  color: 'rgba(20, 0, 0, 0.30)',
+                  transparency: 0,
+                }
+              },
+              inputs: { displayEvery: 3 }
+            },
+            styles: {
+              plot_0: { title: 'Bar #', histogramBase: 0 }
+            },
+            inputs: [
+              { id: 'displayEvery', name: 'Display every X bars', type: 'integer', defval: 3 },
+            ],
+          },
+          constructor: function () {
+            this.init = function (context, inputCallback) {
+              this._context = context;
+              this._input = inputCallback;
+            };
+            this.main = function (context, inputCallback) {
+              this._context = context;
+              this._input = inputCallback;
+
+              var displayEvery = inputCallback(0);
+
+              // Detect new day: dayofweek changes or first bar
+              var dow = PineJS.Std.dayofweek(context);
+              if (!this._prevDow) this._prevDow = context.new_var(NaN);
+              var prevDow = this._prevDow.get(0);
+              this._prevDow.set(dow);
+
+              if (!this._barCount) this._barCount = context.new_var(0);
+              var count = this._barCount.get(0);
+
+              var isDaily = PineJS.Std.isdwm(context);
+              if (isDaily) {
+                // Daily: use day of month as count
+                count = PineJS.Std.dayofmonth(context);
+              } else if (isNaN(prevDow) || dow !== prevDow) {
+                // New day: reset
+                count = 1;
+              } else {
+                count = count + 1;
+              }
+              this._barCount.set(count);
+
+              // Show at bar 1, then every displayEvery bars
+              if (count === 1 || count % displayEvery === 0) {
+                return [count];
+              }
+              return [NaN];
+            };
+          }
+        }
+      ]);
+    },
+
     // ── Right-click context menu for quick order placement ─────────────────
     context_menu: {
       items_processor: (defaultItems, actionsFactory) => {
@@ -138,6 +216,9 @@ function initChart() {
       if (p && typeof p.then === 'function') p.then(afterCreate).catch(() => {});
       else afterCreate(p);
     }
+
+    // Bar Count sub-pane (disabled by default — uncomment to enable)
+    // chart.createStudy('S-Bar Count', false, false).catch(() => {});
 
     // Load S/R analysis
     fetch('/api/analysis')

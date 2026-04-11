@@ -298,8 +298,6 @@ async def get_history(
                 fetched = await fetcher.fetch_range(key, from_ts, fetch_end)
                 if fetched:
                     db.insert_bars(MES_SYM, key, fetched)
-                    for b in fetched:
-                        fetcher._append_bar(key, b)
                     bars = db.get_bars(MES_SYM, key, from_ts=from_ts, to_ts=to_ts)
                     logger.info("Auto-fetched %d %s bars for scroll request", len(fetched), key)
                 else:
