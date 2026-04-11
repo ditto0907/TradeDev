@@ -315,8 +315,12 @@ function initChart() {
       console.warn('crossHairMoved subscribe error:', e);
     }
 
-    // Volume sub-pane
-    if (!_volumeStudyId) {
+    // Volume sub-pane — skip if already loaded from saved layout
+    const existingStudies = chart.getAllStudies();
+    const existingVolume = existingStudies.find(s => s.name === 'Volume');
+    if (existingVolume) {
+      _volumeStudyId = existingVolume.id;
+    } else if (!_volumeStudyId) {
       const p = chart.createStudy('Volume', false, false, [], {
         'volume.color.0':    'rgba(239,83,80,0.55)',
         'volume.color.1':    'rgba(38,166,154,0.55)',
