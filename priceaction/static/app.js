@@ -18,10 +18,14 @@ const CYCLE_LABELS = {
 const MES_TICK   = 0.25;
 const MES_TICK_$ = 1.25;
 const MES_MARGIN = 1650;
+const MES_MULTIPLIER = 5;  // Contract multiplier ($5 per point)
 
 // Default bracket offsets (in points)
 const DEFAULT_TP_OFFSET = 5.0;   // take-profit 5 pts from entry
 const DEFAULT_SL_OFFSET = 3.0;   // stop-loss 3 pts from entry
+
+// Position polling interval
+const POSITION_POLL_MS = 5000;
 
 // ── State ──────────────────────────────────────────────────────────────────────
 
@@ -326,8 +330,18 @@ function showBracketConfirm(action, orderType, limitPrice, stopPrice, qty) {
     confirmClass: side,
     confirmText:  `${action} Bracket`,
     onConfirm:    () => {
-      const tp = snapToTick(parseFloat(document.getElementById('bracket-tp')?.value) || tpDefault);
-      const sl = snapToTick(parseFloat(document.getElementById('bracket-sl')?.value) || slDefault);
+      const tpRaw = parseFloat(document.getElementById('bracket-tp')?.value);
+      const slRaw = parseFloat(document.getElementById('bracket-sl')?.value);
+      if (isNaN(tpRaw) || tpRaw <= 0) {
+        showToast('Invalid take-profit price', 'error');
+        return;
+      }
+      if (isNaN(slRaw) || slRaw <= 0) {
+        showToast('Invalid stop-loss price', 'error');
+        return;
+      }
+      const tp = snapToTick(tpRaw);
+      const sl = snapToTick(slRaw);
       placeBracketOrder(action, orderType, limitPrice, stopPrice, tp, sl);
     },
   });
@@ -584,7 +598,7 @@ function clearAllOrderLines() {
 
 function initPositionPolling() {
   fetchPosition();
-  setInterval(fetchPosition, 5000);
+  setInterval(fetchPosition, POSITION_POLL_MS);
 }
 
 async function fetchPosition() {
@@ -605,11 +619,11 @@ function updatePositionPanel() {
   }
 
   const lastPrice = _lastBar ? _lastBar.close : 0;
-  const avgPrice  = _currentPosition.avg_cost / 5;  // MES multiplier = 5
+  const avgPrice  = _currentPosition.avg_cost / MES_MULTIPLIER;
   const qty       = Math.abs(_currentPosition.position);
-  const unrealPnl = lastPrice > 0 ? (lastPrice - avgPrice) * _currentPosition.position * 5 : 0;
+  const unrealPnl = lastPrice > 0 ? (lastPrice - avgPrice) * _currentPosition.position * MES_MULTIPLIER : 0;
   const pnlClass  = unrealPnl >= 0 ? 'up' : 'down';
-  const value     = lastPrice > 0 ? (lastPrice * 5 * qty) : 0;
+  const value     = lastPrice > 0 ? (lastPrice * MES_MULTIPLIER * qty) : 0;
 
   tbody.innerHTML = `
     <tr>
@@ -1056,7 +1070,7 @@ function updateSummary() {
   } else {
     price = parseFloat(document.getElementById('order-price')?.value);
   }
-  const contractValue = (price && !isNaN(price)) ? (price * 5 * qty).toFixed(0) : '—';
+  const contractValue = (price && !isNaN(price)) ? (price * MES_MULTIPLIER * qty).toFixed(0) : '—';
   setText('sum-value',  contractValue !== '—' ? `$${parseInt(contractValue).toLocaleString()}` : '—');
   setText('sum-margin', `$${(MES_MARGIN * qty).toLocaleString()}`);
 }

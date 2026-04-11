@@ -412,9 +412,12 @@ async def place_bracket_order(req: BracketOrderRequest):
             tif=req.tif,
         )
         return {"success": True, "orders": results}
+    except ValueError as e:
+        logger.error("place_bracket_order validation error: %s", e)
+        return JSONResponse({"success": False, "error": str(e)}, status_code=400)
     except Exception as e:
         logger.error("place_bracket_order error: %s", e)
-        return JSONResponse({"success": False, "error": str(e)}, status_code=400)
+        return JSONResponse({"success": False, "error": "Order submission failed"}, status_code=400)
 
 
 @app.get("/api/orders")
@@ -449,9 +452,12 @@ async def flatten_position():
         if result is None:
             return {"success": True, "message": "No open position"}
         return {"success": True, **result}
+    except ValueError as e:
+        logger.error("flatten validation error: %s", e)
+        return JSONResponse({"success": False, "error": str(e)}, status_code=400)
     except Exception as e:
         logger.error("flatten error: %s", e)
-        return JSONResponse({"success": False, "error": str(e)}, status_code=400)
+        return JSONResponse({"success": False, "error": "Flatten failed"}, status_code=400)
 
 
 @app.get("/api/position")

@@ -99,7 +99,7 @@ class IBOrderManager:
         results = [entry]
 
         exit_action = "SELL" if action.upper() == "BUY" else "BUY"
-        oca_group   = f"bracket_{uuid.uuid4().hex[:8]}"
+        oca_group   = f"oca_bracket_{uuid.uuid4().hex[:8]}"
 
         # Take-profit (limit order on exit side)
         if tp_price is not None:
