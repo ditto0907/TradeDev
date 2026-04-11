@@ -1,14 +1,13 @@
 /**
  * Custom TradingView DataFeed adapter.
  *
- * REST endpoints:
- *   GET /api/config      → onReady
- *   GET /api/symbols     → resolveSymbol  (uses window._rthMode for session)
- *   GET /api/history     → getBars
- *   GET /api/time        → getServerTime
+ * Symbol name convention:
+ *   'MES'     → ETH session (0000-2359, Sun–Fri) — default
+ *   'MES_RTH' → RTH session (0930-1600 ET, Mon–Fri)
  *
- * WebSocket:
- *   WS /ws/realtime      → subscribeBars
+ * Both symbols query the same backend history endpoint with symbol=MES.
+ * Using distinct names forces TradingView to call resolveSymbol again
+ * on each RTH/ETH toggle (same name → TV skips re-resolution).
  */
 
 class MESDatafeed {
@@ -16,7 +15,7 @@ class MESDatafeed {
     this._ws = null;
     this._wsReady = false;
     this._subscriptions = {};   // listenerGuid → { resolution, onTick }
-    this._onAnalysis = null;    // callback for analysis updates
+    this._onAnalysis = null;
   }
 
   // ── onReady ────────────────────────────────────────────────────────────────
@@ -41,19 +40,28 @@ class MESDatafeed {
   }
 
   // ── resolveSymbol ──────────────────────────────────────────────────────────
+  //
+  // 'MES'     → ETH (full Globex session)
+  // 'MES_RTH' → RTH only (9:30–16:00 ET Mon–Fri)
+  //
+  // Both fetch their metadata from /api/symbols?symbol=MES; we override
+  // the session and name fields so TV treats them as independent symbols.
 
   resolveSymbol(symbolName, onResolve, onError) {
-    fetch(`/api/symbols?symbol=${encodeURIComponent(symbolName)}`)
+    const isRTH = symbolName === 'MES_RTH';
+
+    fetch('/api/symbols?symbol=MES')
       .then(r => r.json())
       .then(info => {
-        // Apply RTH / ETH session override
-        if (window._rthMode) {
-          // RTH: 9:30 AM – 4:00 PM ET, Mon–Fri
-          info.session          = '0930-1600:12345';
-          info.session_holidays = '';
+        if (isRTH) {
+          info.name        = 'MES_RTH';
+          info.full_name   = 'CME:MES_RTH';
+          info.description = 'Micro E-mini S&P 500 Futures (RTH)';
+          info.session     = '0930-1600:12345';   // 9:30–16:00 ET, Mon–Fri
         } else {
-          // ETH (Globex): virtually 24h Sun–Fri
-          info.session = '0000-2359:23456';
+          info.name        = 'MES';
+          info.full_name   = 'CME:MES';
+          info.session     = '0000-2359:23456';   // full Globex (Sun–Fri 24 h)
         }
         setTimeout(() => onResolve(info), 0);
       })
@@ -64,10 +72,15 @@ class MESDatafeed {
   }
 
   // ── getBars ────────────────────────────────────────────────────────────────
+  //
+  // Always query the backend with symbol=MES regardless of whether the chart
+  // is in RTH ('MES_RTH') or ETH ('MES') mode.
 
   getBars(symbolInfo, resolution, periodParams, onResult, onError) {
     const { from, to, countBack } = periodParams;
-    let url = `/api/history?symbol=${symbolInfo.name}&resolution=${resolution}&from=${from}&to=${to}`;
+    // Strip _RTH suffix — backend only knows 'MES'
+    const backendSymbol = 'MES';
+    let url = `/api/history?symbol=${backendSymbol}&resolution=${resolution}&from=${from}&to=${to}`;
     if (countBack) url += `&countback=${countBack}`;
 
     fetch(url)
@@ -75,8 +88,8 @@ class MESDatafeed {
       .then(data => {
         if (data.s === 'no_data') {
           const meta = { noData: true };
-          // nextTime is in SECONDS (same unit as periodParams.from/to).
-          // Do NOT convert to ms — bar timestamps use ms, but nextTime does not.
+          // nextTime is in SECONDS — same unit as periodParams.from/to.
+          // Do NOT multiply by 1000; bar timestamps use ms but nextTime does not.
           if (data.nextTime != null) meta.nextTime = data.nextTime;
           onResult([], meta);
           return;
@@ -86,7 +99,7 @@ class MESDatafeed {
           return;
         }
         const bars = data.t.map((t, i) => ({
-          time:   t * 1000,           // TradingView uses milliseconds
+          time:   t * 1000,   // seconds → milliseconds for TradingView
           open:   data.o[i],
           high:   data.h[i],
           low:    data.l[i],
@@ -127,7 +140,7 @@ class MESDatafeed {
 
   setAnalysisCallback(cb) { this._onAnalysis = cb; }
 
-  // ── WebSocket Management ───────────────────────────────────────────────────
+  // ── WebSocket ──────────────────────────────────────────────────────────────
 
   _ensureWebSocket() {
     if (this._ws && (this._ws.readyState === WebSocket.OPEN ||
@@ -160,13 +173,13 @@ class MESDatafeed {
       setTimeout(() => this._ensureWebSocket(), 3000);
     };
 
-    this._ws.onerror = (err) => console.error('DataFeed WebSocket error:', err);
+    this._ws.onerror = err => console.error('DataFeed WebSocket error:', err);
   }
 
   _handleBarUpdate(msg) {
     const resMap = { '1min': '1', '5min': '5' };
-    const barResolution = resMap[msg.bar_size];
-    if (!barResolution) return;
+    const barRes = resMap[msg.bar_size];
+    if (!barRes) return;
 
     const tvBar = {
       time:   msg.bar.time * 1000,
@@ -176,9 +189,8 @@ class MESDatafeed {
       close:  msg.bar.close,
       volume: msg.bar.volume,
     };
-
     for (const sub of Object.values(this._subscriptions)) {
-      if (sub.resolution === barResolution) sub.onTick(tvBar);
+      if (sub.resolution === barRes) sub.onTick(tvBar);
     }
   }
 }

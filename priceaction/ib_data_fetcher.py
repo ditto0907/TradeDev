@@ -62,6 +62,7 @@ class IBDataFetcher:
         self.ib: Optional[IB] = None
         self.bars: Dict[str, List[dict]] = {"1min": [], "5min": []}
         self._contract = None                        # cached qualified contract
+        self._ib_ready: bool = False                 # True only after contract is resolved
         self._realtime_subscriptions: Dict[str, object] = {}
         self._new_bar_callbacks: List[Callable[[str, dict], None]] = []
         # Aggregated in-progress bars (built from ticks / 5s bars)
@@ -126,7 +127,8 @@ class IBDataFetcher:
         if not result:
             raise ValueError("IB returned no contract for MES ContFuture — check symbol/exchange config.")
         [qualified] = result
-        self._contract = qualified
+        self._contract  = qualified
+        self._ib_ready  = True           # IB is now fully usable for data requests
         logger.info("Qualified contract: %s  expiry=%s  localSymbol=%s",
                     qualified.symbol,
                     qualified.lastTradeDateOrContractMonth,

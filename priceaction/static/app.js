@@ -258,10 +258,13 @@ function toggleRTH() {
     btn.textContent = window._rthMode ? 'RTH' : 'ETH';
     btn.classList.toggle('rth-active', window._rthMode);
   }
-  // Re-resolve symbol so TradingView reloads with the new session hours
   if (_widget) {
     try {
-      _widget.activeChart().setSymbol('MES');
+      // Use TWO distinct symbol names so TradingView is forced to call
+      // resolveSymbol again. Calling setSymbol with the *same* name
+      // ('MES') when already on 'MES' is a no-op in TV's caching layer.
+      const sym = window._rthMode ? 'MES_RTH' : 'MES';
+      _widget.activeChart().setSymbol(sym);
     } catch (e) {
       console.warn('setSymbol RTH/ETH error:', e);
     }

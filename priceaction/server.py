@@ -285,22 +285,33 @@ async def get_history(
     bars = db.get_bars(MES_SYM, key, from_ts=from_ts, to_ts=to_ts)
 
     # Auto-fetch from IB whenever the scroll goes before our earliest stored bar.
-    # NOTE: must check this even when `bars` is non-empty — e.g. if we have
-    # Apr 7–11 in DB and the request covers Apr 5–7, bars contains Apr 7 data
-    # but we're still missing the earlier portion.
+    # Guard: only attempt when _ib_ready is True (contract resolved).
+    # Without this guard, a timed-out qualifyContractsAsync would cause every
+    # scroll request to hang for 30 s before returning empty.
     earliest_db  = db.get_earliest_ts(MES_SYM, key)
     needs_older  = (earliest_db is None or from_ts < earliest_db)
-    if needs_older and fetcher.ib and fetcher.ib.isConnected():
-        try:
-            fetched = await fetcher.fetch_range(key, from_ts, to_ts)
-            if fetched:
-                db.insert_bars(MES_SYM, key, fetched)
-                for b in fetched:
-                    fetcher._append_bar(key, b)
-                bars = db.get_bars(MES_SYM, key, from_ts=from_ts, to_ts=to_ts)
-                logger.info("Auto-fetched %d %s bars for scroll request", len(fetched), key)
-        except Exception as e:
-            logger.warning("On-demand IB fetch failed: %s", e)
+    if needs_older:
+        if fetcher._ib_ready:
+            logger.info(
+                "Scroll past DB boundary: auto-fetching %s bars from IB "
+                "(from=%s earliest_db=%s)", key, from_ts, earliest_db
+            )
+            try:
+                fetched = await fetcher.fetch_range(key, from_ts, to_ts)
+                if fetched:
+                    db.insert_bars(MES_SYM, key, fetched)
+                    for b in fetched:
+                        fetcher._append_bar(key, b)
+                    bars = db.get_bars(MES_SYM, key, from_ts=from_ts, to_ts=to_ts)
+                    logger.info("Auto-fetched %d %s bars for scroll request", len(fetched), key)
+                else:
+                    logger.info("IB returned 0 bars for %s range %s→%s", key, from_ts, to_ts)
+            except Exception as e:
+                logger.warning("On-demand IB fetch failed: %s", e)
+        else:
+            logger.debug(
+                "Scroll past DB boundary for %s but IB not ready — skipping auto-fetch", key
+            )
 
     # Final fallback: in-memory cache (covers current session bars not yet in DB)
     if not bars:
