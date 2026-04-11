@@ -38,14 +38,29 @@ def _bar_to_dict(bar) -> dict:
 
 def _ib_duration(gap_sec: int, key: str) -> str:
     """
-    Convert a time gap (seconds) to an IB durationStr string, capped at
-    IB's per-bar-size limits (2 days for 1min, 7 days for 5min).
+    Convert a time gap (seconds) to an IB durationStr string.
+
+    1min bars: capped at 2 days (IB hard limit).
+    5min bars: supports up to 1 year — weeks/year strings allow fetching any
+               historical date range when the chart scrolls past cached data.
     """
-    cap = 86_400 * 2 if key == "1min" else 86_400 * 7
-    gap_sec = min(gap_sec + 3_600, cap)   # +1h buffer, then cap
-    if gap_sec < 86_400:
-        return f"{max(gap_sec, 3_600)} S"
-    return f"{math.ceil(gap_sec / 86_400)} D"
+    if key == "1min":
+        gap_sec = min(gap_sec + 3_600, 86_400 * 2)   # +1h buffer, 2-day cap
+        if gap_sec < 86_400:
+            return f"{max(gap_sec, 3_600)} S"
+        return f"{math.ceil(gap_sec / 86_400)} D"
+
+    # 5-min bars: no artificial day cap — use weeks/year as needed
+    gap_sec += 3_600          # +1h buffer to ensure the boundary bar is included
+    days = gap_sec / 86_400
+    if days < 1:
+        return f"{max(int(gap_sec), 3_600)} S"
+    if days <= 7:
+        return f"{math.ceil(days)} D"
+    weeks = days / 7
+    if weeks <= 52:
+        return f"{math.ceil(weeks)} W"
+    return "1 Y"              # IB max per request for 5-min bars
 
 
 # ─── IBDataFetcher ────────────────────────────────────────────────────────────
@@ -156,7 +171,9 @@ class IBDataFetcher:
             ("5 mins", "5min", since_5min, config.HISTORY_DURATION_5MIN),
         ]:
             now = int(time.time())
-            max_gap = 86_400 * 2 if key == "1min" else 86_400 * 7
+            # Max gap for incremental startup sync: 2 days for 1min (IB limit),
+            # 365 days for 5min (1 year — IB supports this per request).
+            max_gap = 86_400 * 2 if key == "1min" else 86_400 * 365
 
             if since_ts and (now - since_ts) <= max_gap:
                 duration_str = _ib_duration(now - since_ts, key)

@@ -23,9 +23,8 @@ MES_EXCHANGE = "CME"
 MES_CURRENCY = "USD"
 
 # Historical data fetch window on startup
-# IB hard limits: 1min → 2 calendar days max, 5min → 7 calendar days max
 HISTORY_DURATION_1MIN = "2 D"   # last 2 days of 1-min bars
-HISTORY_DURATION_5MIN = "7 D"   # last 7 days of 5-min bars (IB maximum)
+HISTORY_DURATION_5MIN = "5 D"   # last 5 days of 5-min bars
 MAX_BARS_IN_MEMORY = 5000        # cap per bar size
 
 # ─── Google Sheets ────────────────────────────────────────────────────────────

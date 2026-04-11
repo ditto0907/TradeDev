@@ -291,7 +291,7 @@ async def get_history(
     earliest_db  = db.get_earliest_ts(MES_SYM, key)
     needs_older  = (earliest_db is None or from_ts < earliest_db)
     if needs_older:
-        if fetcher._ib_ready:
+        if fetcher._ib_ready and fetcher.ib and fetcher.ib.isConnected():
             logger.info(
                 "Scroll past DB boundary: auto-fetching %s bars from IB "
                 "(from=%s earliest_db=%s)", key, from_ts, earliest_db
