@@ -776,7 +776,7 @@
 
   <div class="topbar-right">
     <!-- RTH / ETH session toggle -->
-    <button id="rth-btn" onclick="toggleRTH()" title="Toggle Regular/Extended Trading Hours">ETH</button>
+    <button id="rth-btn" class="rth-active" onclick="toggleRTH()" title="Toggle Regular/Extended Trading Hours">RTH</button>
     <div class="topbar-sep"></div>
     <div id="ws-status">
       <div class="status-dot" id="ws-dot"></div>
@@ -801,27 +801,21 @@
         <span class="watch-price" id="wl-mes-price">—</span>
         <span class="watch-change" id="wl-mes-chg">—</span>
       </div>
-      <div class="watch-item" data-symbol="ES">
-        <span class="watch-symbol">ES</span>
-        <span class="watch-name">E-mini S&amp;P 500</span>
+      <div class="watch-item" data-symbol="MNQ">
+        <span class="watch-symbol">MNQ</span>
+        <span class="watch-name">Micro E-mini Nasdaq</span>
         <span class="watch-price">—</span>
         <span class="watch-change">—</span>
       </div>
-      <div class="watch-item" data-symbol="NQ">
-        <span class="watch-symbol">NQ</span>
-        <span class="watch-name">E-mini Nasdaq-100</span>
+      <div class="watch-item" data-symbol="NK225MC">
+        <span class="watch-symbol">NK225MC</span>
+        <span class="watch-name">Micro Nikkei 225</span>
         <span class="watch-price">—</span>
         <span class="watch-change">—</span>
       </div>
-      <div class="watch-item" data-symbol="RTY">
-        <span class="watch-symbol">RTY</span>
-        <span class="watch-name">E-mini Russell 2000</span>
-        <span class="watch-price">—</span>
-        <span class="watch-change">—</span>
-      </div>
-      <div class="watch-item" data-symbol="YM">
-        <span class="watch-symbol">YM</span>
-        <span class="watch-name">E-mini Dow</span>
+      <div class="watch-item" data-symbol="MGC">
+        <span class="watch-symbol">MGC</span>
+        <span class="watch-name">Micro Gold</span>
         <span class="watch-price">—</span>
         <span class="watch-change">—</span>
       </div>

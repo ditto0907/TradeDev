@@ -49,7 +49,7 @@ let _showTrades   = true;
 let _tradesLoaded = false;
 
 // RTH / ETH
-window._rthMode = false;
+window._rthMode = true;
 
 // Right-click order price — updated via crossHairMoved
 window._chartCursorPrice = null;
@@ -87,7 +87,7 @@ function initChart() {
   _widget = new TradingView.widget({
     container:    'tv-chart',
     datafeed:     datafeed,
-    symbol:       'MES',
+    symbol:       'MES_RTH',
     interval:     '5',
     library_path: '/charting_library/',
     locale:       'en',
