@@ -264,7 +264,11 @@ function toggleRTH() {
       // resolveSymbol again. Calling setSymbol with the *same* name
       // ('MES') when already on 'MES' is a no-op in TV's caching layer.
       const sym = window._rthMode ? 'MES_RTH' : 'MES';
-      _widget.activeChart().setSymbol(sym);
+      if (typeof _widget.setSymbol === 'function') {
+        _widget.setSymbol(sym);
+      } else {
+        _widget.activeChart().setSymbol(sym);
+      }
     } catch (e) {
       console.warn('setSymbol RTH/ETH error:', e);
     }
