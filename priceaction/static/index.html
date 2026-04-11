@@ -42,19 +42,19 @@
 
     /* ── Top Bar ───────────────────────────────────────────────────────────── */
     #topbar {
-      height: var(--topbar-h);
+      height: 36px;
       background: var(--panel);
       border-bottom: 1px solid var(--border);
       display: flex;
       align-items: center;
       padding: 0 12px;
-      gap: 16px;
+      gap: 10px;
       flex-shrink: 0;
       z-index: 100;
     }
 
     .logo {
-      font-size: 14px;
+      font-size: 13px;
       font-weight: 700;
       color: var(--text);
       letter-spacing: 0.5px;
@@ -62,112 +62,33 @@
     }
     .logo span { color: var(--blue); }
 
-    .topbar-sep {
-      width: 1px;
-      height: 24px;
-      background: var(--border);
-      flex-shrink: 0;
-    }
-
-    .symbol-info {
-      display: flex;
-      align-items: baseline;
-      gap: 8px;
-    }
-    .symbol-name {
-      font-size: 15px;
-      font-weight: 600;
-      color: #e0e3eb;
-    }
-    .symbol-desc {
-      font-size: 11px;
-      color: var(--text-dim);
-    }
-    #last-price {
-      font-size: 18px;
-      font-weight: 600;
-      color: var(--text);
-      min-width: 80px;
-    }
-    #price-change {
-      font-size: 12px;
-      font-weight: 500;
-      padding: 2px 6px;
-      border-radius: 3px;
-      background: var(--panel-hover);
-    }
-    #price-change.up   { color: var(--green); background: var(--green-bg); }
-    #price-change.down { color: var(--red);   background: var(--red-bg); }
-
-    .ohlc-row {
-      display: flex;
-      gap: 14px;
-      font-size: 11px;
-      color: var(--text-dim);
-    }
-    .ohlc-row span b { color: var(--text); font-weight: 500; }
-
-    /* Cycle badge in topbar */
-    #cycle-badge {
-      padding: 3px 10px;
-      border-radius: 4px;
-      font-size: 11px;
-      font-weight: 700;
-      letter-spacing: 0.6px;
-      text-transform: uppercase;
-      background: var(--panel-hover);
-      color: var(--text-dim);
-      white-space: nowrap;
-    }
-    #cycle-badge.markup       { background: #0d2420; color: var(--green); }
-    #cycle-badge.markdown     { background: #2c1414; color: var(--red); }
-    #cycle-badge.accumulation { background: #0d1e30; color: #4fc3f7; }
-    #cycle-badge.distribution { background: #2e2010; color: var(--orange); }
-
     .topbar-right {
       margin-left: auto;
       display: flex;
       align-items: center;
-      gap: 12px;
+      gap: 8px;
     }
     #ws-status {
       display: flex;
       align-items: center;
-      gap: 5px;
+      gap: 6px;
       font-size: 11px;
       color: var(--text-dim);
     }
     .status-dot {
-      width: 7px; height: 7px;
+      width: 8px; height: 8px;
       border-radius: 50%;
       background: var(--text-faint);
     }
-    .status-dot.live { background: var(--green); box-shadow: 0 0 4px var(--green); }
+    .status-dot.live { background: var(--green); box-shadow: 0 0 6px var(--green); }
     .status-dot.error { background: var(--red); }
-
-    /* RTH / ETH toggle */
-    #rth-btn {
-      padding: 3px 10px;
-      border-radius: 4px;
-      border: 1px solid var(--border);
-      background: var(--panel-hover);
-      color: var(--text-dim);
-      font-size: 11px;
-      font-weight: 700;
-      letter-spacing: 0.6px;
-      cursor: pointer;
-      transition: background 0.15s, color 0.15s, border-color 0.15s;
-      white-space: nowrap;
-    }
-    #rth-btn:hover { background: #2a2e3d; color: var(--text); }
-    #rth-btn.rth-active { background: #0d1e30; color: #4fc3f7; border-color: #4fc3f7; }
 
     /* ── Main Layout ───────────────────────────────────────────────────────── */
     #main {
       display: grid;
       grid-template-columns: var(--left-w) 1fr var(--right-w);
       grid-template-rows: 1fr var(--bottom-h);
-      height: calc(100vh - var(--topbar-h));
+      height: calc(100vh - 36px);
     }
 
     /* ── Left Panel — Watchlist ─────────────────────────────────────────────── */
@@ -247,7 +168,7 @@
     /* SR legend overlay — fixed so TradingView's iframe can't block it */
     #sr-legend {
       position: fixed;
-      top: 60px; left: 210px;   /* just below topbar, right of watchlist */
+      top: 46px; left: 210px;   /* just below topbar, right of watchlist */
       z-index: 9000;
       background: rgba(19,23,34,0.88);
       border: 1px solid var(--border);
@@ -752,33 +673,7 @@
 <!-- ── TOP BAR ─────────────────────────────────────────────────────────────── -->
 <div id="topbar">
   <div class="logo">TRADE<span>DEV</span></div>
-  <div class="topbar-sep"></div>
-
-  <div class="symbol-info">
-    <span class="symbol-name">MES</span>
-    <span class="symbol-desc">Micro E-mini S&amp;P 500 · CME</span>
-  </div>
-
-  <span id="last-price">—</span>
-  <span id="price-change">—</span>
-
-  <div class="topbar-sep"></div>
-
-  <div class="ohlc-row">
-    <span>O <b id="tb-open">—</b></span>
-    <span>H <b id="tb-high">—</b></span>
-    <span>L <b id="tb-low">—</b></span>
-    <span>C <b id="tb-close">—</b></span>
-    <span>V <b id="tb-vol">—</b></span>
-  </div>
-
-  <div class="topbar-sep"></div>
-  <span id="cycle-badge">—</span>
-
   <div class="topbar-right">
-    <!-- RTH / ETH session toggle -->
-    <button id="rth-btn" class="rth-active" onclick="toggleRTH()" title="Toggle Regular/Extended Trading Hours">RTH</button>
-    <div class="topbar-sep"></div>
     <div id="ws-status">
       <div class="status-dot" id="ws-dot"></div>
       <span id="ws-text">Connecting…</span>

@@ -49,11 +49,9 @@ let _showTrades   = true;
 let _tradesLoaded = false;
 let _uploadedTrades = null;  // trades from CSV upload (overrides file-based)
 
-// RTH / ETH
-window._rthMode = true;
-
 // Right-click order price — updated via crossHairMoved
 window._chartCursorPrice = null;
+
 
 // Order line tracking — orderId → shape id on chart
 let _orderLineShapes = {};
@@ -187,7 +185,7 @@ function initChart() {
   _widget = new TradingView.widget({
     container:    'tv-chart',
     datafeed:     datafeed,
-    symbol:       'MES_RTH',
+    symbol:       'MES',
     interval:     '5',
     library_path: '/charting_library/',
     locale:       'en',
@@ -201,6 +199,8 @@ function initChart() {
       'use_localstorage_for_settings',
       'move_logo_to_main_pane',
       'header_saveload',
+      'show_exchange_logos',
+      'pre_post_market_sessions',
     ],
     disabled_features: [
       'header_symbol_search',
@@ -939,34 +939,6 @@ function updatePositionPanel() {
   `;
 }
 
-// ── RTH / ETH Toggle ──────────────────────────────────────────────────────────
-
-function toggleRTH() {
-  window._rthMode = !window._rthMode;
-  const btn = document.getElementById('rth-btn');
-  if (btn) {
-    btn.textContent = window._rthMode ? 'RTH' : 'ETH';
-    btn.classList.toggle('rth-active', window._rthMode);
-  }
-  console.log('[RTH/ETH] toggled → rthMode =', window._rthMode);
-  if (_widget) {
-    try {
-      const sym = window._rthMode ? `${_currentSymbol}_RTH` : _currentSymbol;
-      const chart = _widget.activeChart();
-      const currentRes = chart.resolution();
-      console.log('[RTH/ETH] → new symbol:', sym);
-      _widget.setSymbol(sym, currentRes, () => {
-        console.log('[RTH/ETH] symbol change completed to', sym);
-        if (_showTrades) initTradeMarkers();
-      });
-    } catch (e) {
-      console.warn('[RTH/ETH] setSymbol error:', e);
-    }
-  } else {
-    console.warn('[RTH/ETH] _widget is null, cannot toggle');
-  }
-}
-
 // ── Trade Markers ─────────────────────────────────────────────────────────────
 
 async function initTradeMarkers() {
@@ -1177,25 +1149,12 @@ function handlePriceMessage(event) {
   }
 }
 
-// ── Topbar OHLC ───────────────────────────────────────────────────────────────
+// ── Topbar OHLC (disabled - topbar simplified) ───────────────────────────────
 
 function updateTopbarOHLC(bar) {
-  const fmt = v => v != null ? v.toFixed(2) : '—';
-  setText('tb-open',  fmt(bar.open));
-  setText('tb-high',  fmt(bar.high));
-  setText('tb-low',   fmt(bar.low));
-  setText('tb-close', fmt(bar.close));
-  setText('tb-vol',   bar.volume != null ? bar.volume.toLocaleString() : '—');
-  setText('last-price', fmt(bar.close));
-
+  // Topbar no longer displays symbol-specific data
+  // Keeping function for compatibility but removing DOM updates
   if (_openPrice == null) _openPrice = bar.open;
-  const chg    = bar.close - _openPrice;
-  const chgPct = _openPrice > 0 ? (chg / _openPrice * 100) : 0;
-  const chgEl  = document.getElementById('price-change');
-  if (chgEl) {
-    chgEl.textContent = `${chg >= 0 ? '+' : ''}${chg.toFixed(2)} (${chgPct >= 0 ? '+' : ''}${chgPct.toFixed(2)}%)`;
-    chgEl.className   = chg >= 0 ? 'up' : 'down';
-  }
 }
 
 // ── Watchlist ─────────────────────────────────────────────────────────────────
@@ -1208,13 +1167,12 @@ function initWatchlistClick() {
       // Update active state
       document.querySelectorAll('.watch-item').forEach(i => i.classList.remove('active'));
       item.classList.add('active');
-      // Switch chart symbol
+      // Switch chart symbol (no longer use _RTH suffix)
       _currentSymbol = sym;
-      const chartSym = window._rthMode ? `${sym}_RTH` : sym;
       try {
         const res = _widget.activeChart().resolution();
-        _widget.setSymbol(chartSym, res, () => {
-          console.log('[Watchlist] switched to', chartSym);
+        _widget.setSymbol(sym, res, () => {
+          console.log('[Watchlist] switched to', sym);
           // Reload S/R analysis for new symbol
           fetch(`/api/analysis?symbol=${sym}`)
             .then(r => r.json())
@@ -1302,13 +1260,11 @@ function updateBidAsk(lastPrice) {
   }
 }
 
-// ── Cycle Badge ───────────────────────────────────────────────────────────────
+// ── Cycle Badge (disabled - topbar simplified) ───────────────────────────────
 
 function updateCycleBadge(cycle) {
-  const el = document.getElementById('cycle-badge');
-  if (!el) return;
-  el.textContent = CYCLE_LABELS[cycle] || cycle || '—';
-  el.className   = cycle && cycle !== 'unknown' ? cycle : '';
+  // Cycle badge removed from topbar
+  // Keeping function for compatibility
 }
 
 // ── S/R Panel ─────────────────────────────────────────────────────────────────
@@ -1583,8 +1539,8 @@ function updateSummary() {
   const type = document.getElementById('order-type')?.value;
   let price  = null;
   if (type === 'market') {
-    const lastEl = document.getElementById('last-price');
-    price = lastEl ? parseFloat(lastEl.textContent) : null;
+    // Use last bar close price instead of topbar element
+    price = _lastBar ? _lastBar.close : null;
   } else {
     price = parseFloat(document.getElementById('order-price')?.value);
   }

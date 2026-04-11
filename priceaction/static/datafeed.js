@@ -1,13 +1,8 @@
 /**
  * Custom TradingView DataFeed adapter.
  *
- * Symbol name convention:
- *   'MES'     → ETH session (0000-2359, Sun–Fri) — default
- *   'MES_RTH' → RTH session (0930-1600 ET, Mon–Fri)
- *
- * Both symbols query the same backend history endpoint with symbol=MES.
- * Using distinct names forces TradingView to call resolveSymbol again
- * on each RTH/ETH toggle (same name → TV skips re-resolution).
+ * Symbol uses TradingView's built-in extended hours feature.
+ * The chart will show extended hours toggle in the toolbar.
  */
 
 class MESDatafeed {
@@ -41,29 +36,34 @@ class MESDatafeed {
 
   // ── resolveSymbol ──────────────────────────────────────────────────────────
   //
-  // Supports: MES, MNQ, NK225MC, MGC (and _RTH variants)
-  // Each fetches metadata from /api/symbols?symbol=<base>; we override
-  // the session and name fields so TV treats them as independent symbols.
+  // Supports: MES, MNQ, NK225MC, MGC
+  // Fetches metadata from /api/symbols with has_extended_hours=true.
+  // TradingView's built-in extended hours toggle handles session filtering.
 
-  resolveSymbol(symbolName, onResolve, onError) {
-    const isRTH = symbolName.endsWith('_RTH');
-    const baseSym = isRTH ? symbolName.replace('_RTH', '') : symbolName;
-    console.log('[DataFeed] resolveSymbol called:', symbolName, ' base:', baseSym, ' isRTH:', isRTH);
+  resolveSymbol(symbolName, onResolve, onError, extension) {
+    console.log('[DataFeed] resolveSymbol called:', symbolName, 'extension:', extension);
 
     fetch(`/api/symbols?symbol=${encodeURIComponent(symbolName)}`)
       .then(r => r.json())
       .then(info => {
-        // Server returns correct session based on _RTH suffix;
-        // just ensure name/full_name reflect the variant.
-        if (isRTH) {
-          info.name        = `${baseSym}_RTH`;
-          info.full_name   = `${info.exchange || 'CME'}:${baseSym}_RTH`;
-          info.description = `${info.description || baseSym} (RTH)`;
+        // When TradingView's subsession selector triggers a session change,
+        // extension.session indicates the new subsession id ("regular" or "extended").
+        // Per TradingView docs, BOTH session and subsession_id must be updated
+        // to match the selected subsession.
+        if (extension && extension.session) {
+          info.subsession_id = extension.session;
+          const match = (info.subsessions || []).find(s => s.id === extension.session);
+          if (match) {
+            info.session = match.session;
+          }
         } else {
-          info.name        = baseSym;
-          info.full_name   = `${info.exchange || 'CME'}:${baseSym}`;
+          // Default: match session to the default subsession_id
+          const match = (info.subsessions || []).find(s => s.id === info.subsession_id);
+          if (match) {
+            info.session = match.session;
+          }
         }
-        console.log('[DataFeed] resolveSymbol result:', info.name, 'session:', info.session, 'tz:', info.timezone);
+        console.log('[DataFeed] resolveSymbol result:', info.name, 'session:', info.session, 'subsession_id:', info.subsession_id);
         setTimeout(() => onResolve(info), 0);
       })
       .catch(err => {
@@ -74,17 +74,12 @@ class MESDatafeed {
 
   // ── getBars ────────────────────────────────────────────────────────────────
   //
-  // Query the backend with the base symbol (strip _RTH suffix).
+  // Query backend for bars. TradingView handles session filtering based on
+  // the extended hours toggle state.
 
   getBars(symbolInfo, resolution, periodParams, onResult, onError) {
     const { from, to, countBack } = periodParams;
-    // Strip _RTH suffix — backend uses base symbol name
-    const backendSymbol = symbolInfo.name.replace('_RTH', '');
-    // Do NOT pass countBack to the backend.  The from/to range already
-    // defines the data window.  Passing countBack causes the server to
-    // trim ETH bars first; TradingView then session-filters the result,
-    // leaving far fewer bars than expected when in RTH mode.
-    let url = `/api/history?symbol=${encodeURIComponent(backendSymbol)}&resolution=${resolution}&from=${from}&to=${to}`;
+    let url = `/api/history?symbol=${encodeURIComponent(symbolInfo.name)}&resolution=${resolution}&from=${from}&to=${to}`;
     console.log('[DataFeed] getBars:', symbolInfo.name, 'res:', resolution, 'from:', from, 'to:', to, 'countBack:', countBack);
 
     fetch(url)

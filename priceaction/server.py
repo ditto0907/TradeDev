@@ -336,18 +336,23 @@ async def get_symbols(symbol: str = Query("MES")):
             "ib_symbol": "MGC", "ib_exchange": "COMEX",
         },
     }
-    base = symbol.replace("_RTH", "").upper()
+    base = symbol.upper()
     meta = _SYMBOL_META.get(base, _SYMBOL_META["MES"])
-    is_rth = "_RTH" in symbol.upper()
     return {
         **meta,
         "type": "futures", "format": "price",
-        "session": meta["session_rth"] if is_rth else meta["session_eth"],
+        "session": meta["session_rth"],     # must match default subsession_id
         "has_intraday": True,
         "supported_resolutions": ["5", "15", "60", "1D"],
         "intraday_multipliers": ["5", "15", "60"],
         "has_no_volume": False, "volume_precision": 0,
         "data_status": "streaming",
+        # TradingView native subsession selector (bottom status bar)
+        "subsession_id": "regular",
+        "subsessions": [
+            {"id": "regular",  "description": "Regular Trading Hours", "session": meta["session_rth"]},
+            {"id": "extended", "description": "Extended Hours",        "session": meta["session_eth"]},
+        ],
     }
 
 
