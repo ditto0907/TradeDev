@@ -251,7 +251,7 @@ async def get_symbols(symbol: str = Query("MES")):
         "description": "Micro E-mini S&P 500 Futures",
         "type": "futures", "exchange": "CME", "listed_exchange": "CME",
         "timezone": "America/New_York", "format": "price",
-        "pricescale": 4, "minmov": 1,
+        "pricescale": 100, "minmov": 25,
         "session": "1800-1700:1234567",
         "has_intraday": True,
         "supported_resolutions": ["5", "15", "60", "1D"],

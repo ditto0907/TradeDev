@@ -82,8 +82,11 @@ class MESDatafeed {
     const { from, to, countBack } = periodParams;
     // Strip _RTH suffix — backend only knows 'MES'
     const backendSymbol = 'MES';
+    // Do NOT pass countBack to the backend.  The from/to range already
+    // defines the data window.  Passing countBack causes the server to
+    // trim ETH bars first; TradingView then session-filters the result,
+    // leaving far fewer bars than expected when in RTH mode.
     let url = `/api/history?symbol=${backendSymbol}&resolution=${resolution}&from=${from}&to=${to}`;
-    if (countBack) url += `&countback=${countBack}`;
     console.log('[DataFeed] getBars:', symbolInfo.name, 'res:', resolution, 'from:', from, 'to:', to, 'countBack:', countBack);
 
     fetch(url)
