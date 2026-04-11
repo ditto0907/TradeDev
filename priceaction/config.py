@@ -26,6 +26,14 @@ MES_CURRENCY = "USD"
 HISTORY_DURATION_5MIN = "5 D"   # last 5 days of 5-min bars
 MAX_BARS_IN_MEMORY = 5000        # cap per bar size
 
+# Extra symbols to prefetch on startup (if DB has no data)
+# ib_symbol: IB contract symbol, symbol: our display/DB key
+EXTRA_SYMBOLS = [
+    {"symbol": "MNQ",     "ib_symbol": "MNQ", "exchange": "CME",   "currency": "USD"},
+    {"symbol": "NK225MC", "ib_symbol": "N225MC", "exchange": "OSE.JPN", "currency": "JPY"},
+    {"symbol": "MGC",     "ib_symbol": "MGC", "exchange": "COMEX", "currency": "USD"},
+]
+
 # ─── Google Sheets ────────────────────────────────────────────────────────────
 GOOGLE_CREDENTIALS_PATH = BASE_DIR / "credentials" / "service_account.json"
 GOOGLE_SHEET_NAME = "MES_KLine_Data"   # Name of your Google Sheet (must share with service account)

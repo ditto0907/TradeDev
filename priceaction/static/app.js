@@ -57,6 +57,9 @@ window._chartCursorPrice = null;
 // Order line tracking — orderId → shape id on chart
 let _orderLineShapes = {};
 
+// Current active symbol (base name without _RTH suffix)
+let _currentSymbol = 'MES';
+
 // Position state
 let _currentPosition = { symbol: 'MES', position: 0, avg_cost: 0, side: 'FLAT' };
 
@@ -70,7 +73,103 @@ document.addEventListener('DOMContentLoaded', () => {
   initBracketConfig();
   initSRLegendDrag();
   initPositionPolling();
+  initWatchlistClick();
+  fetchWatchlistPrices();
+  fetchWatchlistContractInfo();
+  // Refresh watchlist prices every 60s
+  setInterval(fetchWatchlistPrices, 60000);
 });
+
+// ── Save/Load Adapter (TradingView chart layout persistence) ──────────────────
+
+function createSaveLoadAdapter() {
+  return {
+    async getAllCharts() {
+      const res = await fetch('/api/charts');
+      return await res.json();
+    },
+    async removeChart(id) {
+      await fetch(`/api/charts/${id}`, { method: 'DELETE' });
+    },
+    async saveChart(chartData) {
+      const res = await fetch('/api/charts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: chartData.id,
+          name: chartData.name,
+          symbol: chartData.symbol,
+          resolution: chartData.resolution,
+          content: chartData.content,
+          timestamp: Math.floor(Date.now() / 1000),
+        }),
+      });
+      const data = await res.json();
+      return data.id;
+    },
+    async getChartContent(chartId) {
+      const res = await fetch(`/api/charts/${chartId}`);
+      const data = await res.json();
+      return data.content;
+    },
+    async getAllStudyTemplates() {
+      const res = await fetch('/api/study_templates');
+      return await res.json();
+    },
+    async removeStudyTemplate(info) {
+      await fetch(`/api/study_templates/${encodeURIComponent(info.name)}`, { method: 'DELETE' });
+    },
+    async saveStudyTemplate(data) {
+      await fetch('/api/study_templates', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: data.name, content: data.content }),
+      });
+    },
+    async getStudyTemplateContent(info) {
+      const res = await fetch(`/api/study_templates/${encodeURIComponent(info.name)}`);
+      const data = await res.json();
+      return data.content;
+    },
+    async getDrawingTemplates(toolName) {
+      const res = await fetch(`/api/drawing_templates/${encodeURIComponent(toolName)}`);
+      return await res.json();
+    },
+    async loadDrawingTemplate(toolName, templateName) {
+      const res = await fetch(`/api/drawing_templates/${encodeURIComponent(toolName)}/${encodeURIComponent(templateName)}`);
+      const data = await res.json();
+      return data.content;
+    },
+    async removeDrawingTemplate(toolName, templateName) {
+      await fetch(`/api/drawing_templates/${encodeURIComponent(toolName)}/${encodeURIComponent(templateName)}`, { method: 'DELETE' });
+    },
+    async saveDrawingTemplate(toolName, templateName, content) {
+      await fetch('/api/drawing_templates', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tool_name: toolName, template_name: templateName, content }),
+      });
+    },
+    async getAllChartTemplates() {
+      const res = await fetch('/api/chart_templates');
+      return await res.json();
+    },
+    async saveChartTemplate(templateName, content) {
+      await fetch('/api/chart_templates', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: templateName, content }),
+      });
+    },
+    async removeChartTemplate(templateName) {
+      await fetch(`/api/chart_templates/${encodeURIComponent(templateName)}`, { method: 'DELETE' });
+    },
+    async getChartTemplateContent(templateName) {
+      const res = await fetch(`/api/chart_templates/${encodeURIComponent(templateName)}`);
+      return await res.json();
+    },
+  };
+}
 
 // ── Chart Init ────────────────────────────────────────────────────────────────
 
@@ -95,9 +194,12 @@ function initChart() {
     theme:        'dark',
     toolbar_bg:   '#1e222d',
     loading_screen: { backgroundColor: '#131722', foregroundColor: '#2962ff' },
+    load_last_chart: true,
+    save_load_adapter: createSaveLoadAdapter(),
     enabled_features: [
       'use_localstorage_for_settings',
       'move_logo_to_main_pane',
+      'header_saveload',
     ],
     disabled_features: [
       'header_symbol_search',
@@ -235,7 +337,7 @@ function initChart() {
     // chart.createStudy('S-Bar Count', false, false).catch(() => {});
 
     // Load S/R analysis
-    fetch('/api/analysis')
+    fetch(`/api/analysis?symbol=${_currentSymbol || 'MES'}`)
       .then(r => r.json())
       .then(analysis => {
         _lastAnalysis = analysis;
@@ -844,25 +946,15 @@ function toggleRTH() {
   console.log('[RTH/ETH] toggled → rthMode =', window._rthMode);
   if (_widget) {
     try {
-      const sym = window._rthMode ? 'MES_RTH' : 'MES';
+      const sym = window._rthMode ? `${_currentSymbol}_RTH` : _currentSymbol;
       const chart = _widget.activeChart();
-      const currentSym = chart.symbol();
       const currentRes = chart.resolution();
-      console.log('[RTH/ETH] current symbol:', currentSym, ' resolution:', currentRes, ' → new symbol:', sym);
-      // widget-level setSymbol requires (symbol, interval, callback)
+      console.log('[RTH/ETH] → new symbol:', sym);
       _widget.setSymbol(sym, currentRes, () => {
         console.log('[RTH/ETH] symbol change completed to', sym);
       });
     } catch (e) {
       console.warn('[RTH/ETH] setSymbol error:', e);
-      // Fallback: chart-level API
-      try {
-        const sym = window._rthMode ? 'MES_RTH' : 'MES';
-        console.log('[RTH/ETH] fallback: activeChart().setSymbol(', sym, ')');
-        _widget.activeChart().setSymbol(sym);
-      } catch (e2) {
-        console.error('[RTH/ETH] fallback also failed:', e2);
-      }
     }
   } else {
     console.warn('[RTH/ETH] _widget is null, cannot toggle');
@@ -1051,6 +1143,39 @@ function updateTopbarOHLC(bar) {
 
 // ── Watchlist ─────────────────────────────────────────────────────────────────
 
+function initWatchlistClick() {
+  document.querySelectorAll('.watch-item').forEach(item => {
+    item.addEventListener('click', () => {
+      const sym = item.dataset.symbol;
+      if (!sym || !_widget) return;
+      // Update active state
+      document.querySelectorAll('.watch-item').forEach(i => i.classList.remove('active'));
+      item.classList.add('active');
+      // Switch chart symbol
+      _currentSymbol = sym;
+      const chartSym = window._rthMode ? `${sym}_RTH` : sym;
+      try {
+        const res = _widget.activeChart().resolution();
+        _widget.setSymbol(chartSym, res, () => {
+          console.log('[Watchlist] switched to', chartSym);
+          // Reload S/R analysis for new symbol
+          fetch(`/api/analysis?symbol=${sym}`)
+            .then(r => r.json())
+            .then(analysis => {
+              _lastAnalysis = analysis;
+              updateAnnotations(analysis);
+              updateCycleBadge(analysis.market_cycle);
+              updateSRPanel(analysis);
+            })
+            .catch(e => console.warn('Analysis fetch error:', e));
+        });
+      } catch (e) {
+        console.warn('[Watchlist] setSymbol error:', e);
+      }
+    });
+  });
+}
+
 function updateWatchlistMES(price) {
   const priceEl = document.getElementById('wl-mes-price');
   const chgEl   = document.getElementById('wl-mes-chg');
@@ -1060,6 +1185,46 @@ function updateWatchlistMES(price) {
     const chgPct = (chg / _openPrice * 100).toFixed(2);
     chgEl.textContent = `${chg >= 0 ? '+' : ''}${chgPct}%`;
     chgEl.className   = `watch-change ${chg >= 0 ? 'up' : 'down'}`;
+  }
+}
+
+async function fetchWatchlistPrices() {
+  try {
+    const res = await fetch('/api/watchlist_prices');
+    const data = await res.json();
+    for (const [sym, info] of Object.entries(data)) {
+      if (sym === 'MES') continue; // MES updated via WebSocket
+      const key = sym.toLowerCase();
+      const priceEl = document.getElementById(`wl-${key}-price`);
+      const chgEl   = document.getElementById(`wl-${key}-chg`);
+      if (priceEl) priceEl.textContent = info.close != null ? info.close.toFixed(2) : '—';
+      if (chgEl && info.change_pct != null) {
+        chgEl.textContent = `${info.change_pct >= 0 ? '+' : ''}${info.change_pct.toFixed(2)}%`;
+        chgEl.className   = `watch-change ${info.change_pct >= 0 ? 'up' : 'down'}`;
+      }
+    }
+  } catch (e) {
+    console.warn('fetchWatchlistPrices error:', e);
+  }
+}
+
+async function fetchWatchlistContractInfo() {
+  const symbols = ['MES', 'MNQ', 'NK225MC', 'MGC'];
+  for (const sym of symbols) {
+    try {
+      const res = await fetch(`/api/symbols?symbol=${sym}`);
+      const info = await res.json();
+      const key = sym.toLowerCase();
+      const exchEl = document.getElementById(`wl-${key}-exch`);
+      if (exchEl) {
+        const ibSym = info.ib_symbol || sym;
+        const exch  = info.exchange || info.listed_exchange || '';
+        // Show: "CME · MESM6" style but we only have the root symbol, use ib_symbol
+        exchEl.textContent = ibSym !== sym ? `${exch} · ${ibSym}` : exch;
+      }
+    } catch (e) {
+      console.warn('fetchWatchlistContractInfo error for', sym, e);
+    }
   }
 }
 
@@ -1437,7 +1602,7 @@ function addWorkingOrderRow(order) {
   const tr = document.createElement('tr');
   tr.id = `order-row-${order.order_id}`;
   tr.innerHTML = `
-    <td>${new Date().toLocaleTimeString()}</td>
+    <td>${order.time ? new Date(order.time).toLocaleTimeString() : new Date().toLocaleTimeString()}</td>
     <td>MES</td>
     <td class="${sideClass}">${order.action}</td>
     <td>${order.order_type}</td>
@@ -1489,7 +1654,7 @@ function addFilledOrderRow(order) {
   const sideClass = order.action === 'BUY' ? 'up' : 'down';
   const tr = document.createElement('tr');
   tr.innerHTML = `
-    <td>${new Date().toLocaleTimeString()}</td>
+    <td>${order.time ? new Date(order.time).toLocaleTimeString() : new Date().toLocaleTimeString()}</td>
     <td>MES</td>
     <td class="${sideClass}">${order.action}</td>
     <td>${order.order_type}</td>
@@ -1529,7 +1694,7 @@ function addOrderHistoryRow(order) {
   const tr = document.createElement('tr');
   tr.id = `ohist-row-${order.order_id}`;
   tr.innerHTML = `
-    <td>${new Date().toLocaleTimeString()}</td>
+    <td>${order.time ? new Date(order.time).toLocaleTimeString() : new Date().toLocaleTimeString()}</td>
     <td>MES</td>
     <td class="${sideClass}">${order.action}</td>
     <td>${order.order_type}</td>

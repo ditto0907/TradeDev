@@ -216,7 +216,7 @@
     .watch-item {
       display: grid;
       grid-template-columns: 1fr auto;
-      grid-template-rows: auto auto;
+      grid-template-rows: auto auto auto;
       gap: 1px 4px;
       padding: 8px 12px;
       cursor: pointer;
@@ -228,6 +228,7 @@
 
     .watch-symbol  { font-size: 13px; font-weight: 600; color: var(--text); grid-column:1; grid-row:1; }
     .watch-name    { font-size: 10px; color: var(--text-dim); grid-column:1; grid-row:2; }
+    .watch-exch    { font-size: 9px; color: var(--text-faint, #555); grid-column:1; grid-row:3; }
     .watch-price   { font-size: 13px; font-weight: 500; text-align:right; grid-column:2; grid-row:1; }
     .watch-change  { font-size: 10px; text-align:right; grid-column:2; grid-row:2; }
     .watch-change.up   { color: var(--green); }
@@ -798,26 +799,30 @@
       <div class="watch-item active" data-symbol="MES">
         <span class="watch-symbol">MES</span>
         <span class="watch-name">Micro E-mini S&amp;P</span>
+        <span class="watch-exch" id="wl-mes-exch">CME</span>
         <span class="watch-price" id="wl-mes-price">—</span>
         <span class="watch-change" id="wl-mes-chg">—</span>
       </div>
       <div class="watch-item" data-symbol="MNQ">
         <span class="watch-symbol">MNQ</span>
         <span class="watch-name">Micro E-mini Nasdaq</span>
-        <span class="watch-price">—</span>
-        <span class="watch-change">—</span>
+        <span class="watch-exch" id="wl-mnq-exch">CME</span>
+        <span class="watch-price" id="wl-mnq-price">—</span>
+        <span class="watch-change" id="wl-mnq-chg">—</span>
       </div>
       <div class="watch-item" data-symbol="NK225MC">
         <span class="watch-symbol">NK225MC</span>
         <span class="watch-name">Micro Nikkei 225</span>
-        <span class="watch-price">—</span>
-        <span class="watch-change">—</span>
+        <span class="watch-exch" id="wl-nk225mc-exch">OSE</span>
+        <span class="watch-price" id="wl-nk225mc-price">—</span>
+        <span class="watch-change" id="wl-nk225mc-chg">—</span>
       </div>
       <div class="watch-item" data-symbol="MGC">
         <span class="watch-symbol">MGC</span>
         <span class="watch-name">Micro Gold</span>
-        <span class="watch-price">—</span>
-        <span class="watch-change">—</span>
+        <span class="watch-exch" id="wl-mgc-exch">COMEX</span>
+        <span class="watch-price" id="wl-mgc-price">—</span>
+        <span class="watch-change" id="wl-mgc-chg">—</span>
       </div>
     </div>
   </div>

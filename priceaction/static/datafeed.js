@@ -41,30 +41,29 @@ class MESDatafeed {
 
   // ── resolveSymbol ──────────────────────────────────────────────────────────
   //
-  // 'MES'     → ETH (full Globex session)
-  // 'MES_RTH' → RTH only (9:30–16:00 ET Mon–Fri)
-  //
-  // Both fetch their metadata from /api/symbols?symbol=MES; we override
+  // Supports: MES, MNQ, NK225MC, MGC (and _RTH variants)
+  // Each fetches metadata from /api/symbols?symbol=<base>; we override
   // the session and name fields so TV treats them as independent symbols.
 
   resolveSymbol(symbolName, onResolve, onError) {
-    const isRTH = symbolName === 'MES_RTH';
-    console.log('[DataFeed] resolveSymbol called:', symbolName, ' isRTH:', isRTH);
+    const isRTH = symbolName.endsWith('_RTH');
+    const baseSym = isRTH ? symbolName.replace('_RTH', '') : symbolName;
+    console.log('[DataFeed] resolveSymbol called:', symbolName, ' base:', baseSym, ' isRTH:', isRTH);
 
-    fetch('/api/symbols?symbol=MES')
+    fetch(`/api/symbols?symbol=${encodeURIComponent(symbolName)}`)
       .then(r => r.json())
       .then(info => {
+        // Server returns correct session based on _RTH suffix;
+        // just ensure name/full_name reflect the variant.
         if (isRTH) {
-          info.name        = 'MES_RTH';
-          info.full_name   = 'CME:MES_RTH';
-          info.description = 'Micro E-mini S&P 500 Futures (RTH)';
-          info.session     = '0930-1600:23456';   // 9:30–16:00 ET, Mon–Fri
+          info.name        = `${baseSym}_RTH`;
+          info.full_name   = `${info.exchange || 'CME'}:${baseSym}_RTH`;
+          info.description = `${info.description || baseSym} (RTH)`;
         } else {
-          info.name        = 'MES';
-          info.full_name   = 'CME:MES';
-          info.session     = '1800-1700:1234567';  // full Globex (Sun 18:00–Fri 17:00)
+          info.name        = baseSym;
+          info.full_name   = `${info.exchange || 'CME'}:${baseSym}`;
         }
-        console.log('[DataFeed] resolveSymbol result:', info.name, 'session:', info.session);
+        console.log('[DataFeed] resolveSymbol result:', info.name, 'session:', info.session, 'tz:', info.timezone);
         setTimeout(() => onResolve(info), 0);
       })
       .catch(err => {
@@ -75,18 +74,17 @@ class MESDatafeed {
 
   // ── getBars ────────────────────────────────────────────────────────────────
   //
-  // Always query the backend with symbol=MES regardless of whether the chart
-  // is in RTH ('MES_RTH') or ETH ('MES') mode.
+  // Query the backend with the base symbol (strip _RTH suffix).
 
   getBars(symbolInfo, resolution, periodParams, onResult, onError) {
     const { from, to, countBack } = periodParams;
-    // Strip _RTH suffix — backend only knows 'MES'
-    const backendSymbol = 'MES';
+    // Strip _RTH suffix — backend uses base symbol name
+    const backendSymbol = symbolInfo.name.replace('_RTH', '');
     // Do NOT pass countBack to the backend.  The from/to range already
     // defines the data window.  Passing countBack causes the server to
     // trim ETH bars first; TradingView then session-filters the result,
     // leaving far fewer bars than expected when in RTH mode.
-    let url = `/api/history?symbol=${backendSymbol}&resolution=${resolution}&from=${from}&to=${to}`;
+    let url = `/api/history?symbol=${encodeURIComponent(backendSymbol)}&resolution=${resolution}&from=${from}&to=${to}`;
     console.log('[DataFeed] getBars:', symbolInfo.name, 'res:', resolution, 'from:', from, 'to:', to, 'countBack:', countBack);
 
     fetch(url)

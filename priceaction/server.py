@@ -21,7 +21,7 @@ from contextlib import asynccontextmanager
 
 import config
 import db
-from ib_data_fetcher import IBDataFetcher
+from ib_data_fetcher import IBDataFetcher, _bar_to_dict
 from google_sheets_sync import GoogleSheetsSync
 from price_action_analyzer import PriceActionAnalyzer
 from order_manager import IBOrderManager
@@ -133,6 +133,48 @@ async def lifespan(app: FastAPI):
         ib_ok = True
     except Exception as e:
         logger.error("IB connect/history error: %s", e)
+
+    # ── Step 2b: prefetch extra symbols if DB is empty ───────────────────────
+    if ib_ok and fetcher.ib and fetcher.ib.isConnected():
+        from ib_insync import ContFuture
+        for sym_cfg in config.EXTRA_SYMBOLS:
+            sym_name = sym_cfg["symbol"]
+            existing = db.get_bars(sym_name, "5min")
+            if existing:
+                logger.info("DB already has %d bars for %s — skip fetch", len(existing), sym_name)
+                continue
+            try:
+                contract = ContFuture(
+                    symbol=sym_cfg.get("ib_symbol", sym_name),
+                    exchange=sym_cfg["exchange"],
+                    currency=sym_cfg["currency"],
+                )
+                qualified = await asyncio.wait_for(
+                    fetcher.ib.qualifyContractsAsync(contract), timeout=30.0,
+                )
+                if not qualified:
+                    logger.warning("IB returned no contract for %s — skipping", sym_name)
+                    continue
+                raw = await asyncio.wait_for(
+                    fetcher.ib.reqHistoricalDataAsync(
+                        qualified[0],
+                        endDateTime="",
+                        durationStr=config.HISTORY_DURATION_5MIN,
+                        barSizeSetting="5 mins",
+                        whatToShow="TRADES",
+                        useRTH=False,
+                        formatDate=2,
+                    ),
+                    timeout=60.0,
+                )
+                bars = [_bar_to_dict(b) for b in raw]
+                if bars:
+                    saved = db.insert_bars(sym_name, "5min", bars)
+                    logger.info("Prefetched %d 5min bars for %s", saved, sym_name)
+                else:
+                    logger.info("IB returned 0 bars for %s", sym_name)
+            except Exception as e:
+                logger.warning("Prefetch %s failed: %s", sym_name, e)
 
     # ── Step 3: synthetic fallback only when NOTHING is available ─────────────
     if not ib_ok and not has_db_data:
@@ -252,13 +294,55 @@ async def get_config():
 
 @app.get("/api/symbols")
 async def get_symbols(symbol: str = Query("MES")):
+    _SYMBOL_META = {
+        "MES": {
+            "name": "MES", "full_name": "CME:MES",
+            "description": "Micro E-mini S&P 500 Futures",
+            "exchange": "CME", "listed_exchange": "CME",
+            "pricescale": 100, "minmov": 25,
+            "timezone": "America/New_York",
+            "session_eth": "1800-1700:1234567",
+            "session_rth": "0930-1600:23456",
+            "ib_symbol": "MES", "ib_exchange": "CME",
+        },
+        "MNQ": {
+            "name": "MNQ", "full_name": "CME:MNQ",
+            "description": "Micro E-mini Nasdaq-100 Futures",
+            "exchange": "CME", "listed_exchange": "CME",
+            "pricescale": 100, "minmov": 25,
+            "timezone": "America/New_York",
+            "session_eth": "1800-1700:1234567",
+            "session_rth": "0930-1600:23456",
+            "ib_symbol": "MNQ", "ib_exchange": "CME",
+        },
+        "NK225MC": {
+            "name": "NK225MC", "full_name": "OSE:NK225MC",
+            "description": "Micro Nikkei 225 Futures",
+            "exchange": "OSE", "listed_exchange": "OSE",
+            "pricescale": 1, "minmov": 5,
+            "timezone": "Asia/Tokyo",
+            "session_eth": "0845-1545,1700-0600:23456",
+            "session_rth": "0845-1545:23456",
+            "ib_symbol": "N225MC", "ib_exchange": "OSE.JPN",
+        },
+        "MGC": {
+            "name": "MGC", "full_name": "COMEX:MGC",
+            "description": "Micro Gold Futures",
+            "exchange": "COMEX", "listed_exchange": "COMEX",
+            "pricescale": 10, "minmov": 1,
+            "timezone": "America/New_York",
+            "session_eth": "1800-1700:1234567",
+            "session_rth": "0930-1700:23456",
+            "ib_symbol": "MGC", "ib_exchange": "COMEX",
+        },
+    }
+    base = symbol.replace("_RTH", "").upper()
+    meta = _SYMBOL_META.get(base, _SYMBOL_META["MES"])
+    is_rth = "_RTH" in symbol.upper()
     return {
-        "name": "MES", "full_name": "CME:MES",
-        "description": "Micro E-mini S&P 500 Futures",
-        "type": "futures", "exchange": "CME", "listed_exchange": "CME",
-        "timezone": "America/New_York", "format": "price",
-        "pricescale": 100, "minmov": 25,
-        "session": "1800-1700:1234567",
+        **meta,
+        "type": "futures", "format": "price",
+        "session": meta["session_rth"] if is_rth else meta["session_eth"],
         "has_intraday": True,
         "supported_resolutions": ["5", "15", "60", "1D"],
         "intraday_multipliers": ["5", "15", "60"],
@@ -284,15 +368,16 @@ async def get_history(
     """
     from ib_data_fetcher import resolution_to_key
     key  = resolution_to_key(resolution)
-    bars = db.get_bars(MES_SYM, key, from_ts=from_ts, to_ts=to_ts)
+    sym  = symbol.replace("_RTH", "").upper()
+    bars = db.get_bars(sym, key, from_ts=from_ts, to_ts=to_ts)
 
     # Auto-fetch from IB whenever the scroll goes before our earliest stored bar.
     # Guard: only attempt when _ib_ready is True (contract resolved).
     # Without this guard, a timed-out qualifyContractsAsync would cause every
     # scroll request to hang for 30 s before returning empty.
-    earliest_db  = db.get_earliest_ts(MES_SYM, key)
+    earliest_db  = db.get_earliest_ts(sym, key)
     needs_older  = (earliest_db is None or from_ts < earliest_db)
-    if needs_older:
+    if needs_older and sym == MES_SYM:
         if fetcher._ib_ready and fetcher.ib and fetcher.ib.isConnected():
             # Use earliest_db as the end point so we fetch data BEFORE what we have
             fetch_end = earliest_db if earliest_db else to_ts
@@ -303,8 +388,8 @@ async def get_history(
             try:
                 fetched = await fetcher.fetch_range(key, from_ts, fetch_end)
                 if fetched:
-                    db.insert_bars(MES_SYM, key, fetched)
-                    bars = db.get_bars(MES_SYM, key, from_ts=from_ts, to_ts=to_ts)
+                    db.insert_bars(sym, key, fetched)
+                    bars = db.get_bars(sym, key, from_ts=from_ts, to_ts=to_ts)
                     logger.info("Auto-fetched %d %s bars for scroll request", len(fetched), key)
                 else:
                     logger.info("IB returned 0 bars for %s range %s→%s", key, from_ts, fetch_end)
@@ -315,8 +400,8 @@ async def get_history(
                 "Scroll past DB boundary for %s but IB not ready — skipping auto-fetch", key
             )
 
-    # Final fallback: in-memory cache (covers current session bars not yet in DB)
-    if not bars:
+    # Final fallback: in-memory cache (only valid for the primary symbol MES)
+    if not bars and sym == MES_SYM:
         bars = fetcher.get_bars(key, from_ts=from_ts, to_ts=to_ts)
 
     if countback and len(bars) > countback:
@@ -324,7 +409,7 @@ async def get_history(
 
     if not bars:
         # Provide nextTime so TradingView keeps requesting older data
-        next_ts = db.get_latest_ts_before(MES_SYM, key, from_ts)
+        next_ts = db.get_latest_ts_before(sym, key, from_ts)
         resp: dict = {"s": "no_data"}
         if next_ts is not None:
             resp["nextTime"] = next_ts
@@ -341,17 +426,51 @@ async def get_history(
     }
 
 
+@app.get("/api/watchlist_prices")
+async def get_watchlist_prices():
+    """Return latest close price and daily change for all watchlist symbols."""
+    symbols = ["MES", "MNQ", "NK225MC", "MGC"]
+    result = {}
+    for sym in symbols:
+        bars = db.get_bars(sym, "5min")
+        if not bars:
+            result[sym] = {"close": None, "change_pct": None}
+            continue
+        close = bars[-1]["close"]
+        # Find the open of the earliest bar today (or first available bar)
+        # Simple approach: use the open of the first bar
+        open_price = bars[0]["open"]
+        # Try to find the session open (most recent 18:00 ET boundary)
+        import time as _time
+        now = int(_time.time())
+        # Look for bars from last 24h for a recent session reference
+        recent = [b for b in bars if b["time"] > now - 86400]
+        if recent:
+            open_price = recent[0]["open"]
+        chg_pct = ((close - open_price) / open_price * 100) if open_price else 0
+        result[sym] = {"close": close, "change_pct": round(chg_pct, 2)}
+    return result
+
+
 @app.get("/api/time")
 async def get_time():
     return int(time.time())
 
 
 @app.get("/api/analysis")
-async def get_analysis():
-    return _latest_analysis or {
-        "support_levels": [], "resistance_levels": [],
-        "market_cycle": "unknown", "cycle_ranges": [],
-    }
+async def get_analysis(symbol: str = Query("MES")):
+    sym = symbol.replace("_RTH", "").upper()
+    if sym == MES_SYM:
+        return _latest_analysis or {
+            "support_levels": [], "resistance_levels": [],
+            "market_cycle": "unknown", "cycle_ranges": [],
+        }
+    # On-demand analysis for non-MES symbols
+    bars = db.get_bars(sym, "5min")
+    if not bars:
+        return {"support_levels": [], "resistance_levels": [],
+                "market_cycle": "unknown", "cycle_ranges": []}
+    return analyzer.get_analysis(bars)
 
 
 @app.get("/api/trades")
@@ -490,6 +609,122 @@ async def get_position():
     if _order_mgr is None:
         return {"symbol": "MES", "position": 0, "avg_cost": 0.0, "side": "FLAT"}
     return _order_mgr.get_position()
+
+
+# ─── Chart Layout Save/Load (TradingView save_load_adapter) ──────────────────
+
+@app.get("/api/charts")
+async def list_charts():
+    return db.get_all_charts()
+
+
+@app.post("/api/charts")
+async def save_chart_endpoint(request: Request):
+    data = await request.json()
+    chart_id = db.save_chart(
+        chart_id=data.get("id"),
+        name=data["name"],
+        symbol=data.get("symbol", ""),
+        resolution=data.get("resolution", ""),
+        content=data.get("content", ""),
+        timestamp=data.get("timestamp", int(time.time())),
+    )
+    return {"id": chart_id}
+
+
+@app.get("/api/charts/{chart_id}")
+async def get_chart(chart_id: int):
+    content = db.get_chart_content(chart_id)
+    if content is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return {"content": content}
+
+
+@app.delete("/api/charts/{chart_id}")
+async def delete_chart(chart_id: int):
+    db.remove_chart(chart_id)
+    return {"ok": True}
+
+
+# ── Study templates
+@app.get("/api/study_templates")
+async def list_study_templates():
+    return db.get_all_study_templates()
+
+
+@app.post("/api/study_templates")
+async def save_study_template_endpoint(request: Request):
+    data = await request.json()
+    db.save_study_template(data["name"], data.get("content", ""))
+    return {"ok": True}
+
+
+@app.get("/api/study_templates/{name}")
+async def get_study_template(name: str):
+    content = db.get_study_template_content(name)
+    if content is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return {"content": content}
+
+
+@app.delete("/api/study_templates/{name}")
+async def delete_study_template(name: str):
+    db.remove_study_template(name)
+    return {"ok": True}
+
+
+# ── Drawing templates
+@app.get("/api/drawing_templates/{tool_name}")
+async def list_drawing_templates(tool_name: str):
+    return db.get_drawing_templates(tool_name)
+
+
+@app.post("/api/drawing_templates")
+async def save_drawing_template_endpoint(request: Request):
+    data = await request.json()
+    db.save_drawing_template(data["tool_name"], data["template_name"], data.get("content", ""))
+    return {"ok": True}
+
+
+@app.get("/api/drawing_templates/{tool_name}/{template_name}")
+async def get_drawing_template(tool_name: str, template_name: str):
+    content = db.load_drawing_template(tool_name, template_name)
+    if content is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return {"content": content}
+
+
+@app.delete("/api/drawing_templates/{tool_name}/{template_name}")
+async def delete_drawing_template(tool_name: str, template_name: str):
+    db.remove_drawing_template(tool_name, template_name)
+    return {"ok": True}
+
+
+# ── Chart templates
+@app.get("/api/chart_templates")
+async def list_chart_templates():
+    return db.get_all_chart_templates()
+
+
+@app.post("/api/chart_templates")
+async def save_chart_template_endpoint(request: Request):
+    data = await request.json()
+    db.save_chart_template(data["name"], json.dumps(data.get("content", {})))
+    return {"ok": True}
+
+
+@app.get("/api/chart_templates/{name}")
+async def get_chart_template(name: str):
+    content = db.get_chart_template_content(name)
+    if content is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return json.loads(content)
+
+
+@app.delete("/api/chart_templates/{name}")
+async def delete_chart_template(name: str):
+    db.remove_chart_template(name)
+    return {"ok": True}
 
 
 # ─── WebSocket ────────────────────────────────────────────────────────────────

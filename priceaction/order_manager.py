@@ -279,6 +279,10 @@ class IBOrderManager:
             if v is None or v == 0 or v > 1e200:
                 return None
             return v
+        # Extract creation time from trade log (first entry)
+        time_str = None
+        if trade.log:
+            time_str = trade.log[0].time.isoformat()
         return {
             "order_id":   o.orderId,
             "action":     o.action,
@@ -291,4 +295,5 @@ class IBOrderManager:
             "filled":     s.filled,
             "remaining":  s.remaining,
             "avg_fill":   _price(s.avgFillPrice),
+            "time":       time_str,
         }
