@@ -284,21 +284,23 @@ async def get_history(
     key  = "1min" if resolution == "1" else "5min"
     bars = db.get_bars(MES_SYM, key, from_ts=from_ts, to_ts=to_ts)
 
-    # Auto-fetch from IB when the chart scrolls into uncached territory
-    if (not bars or (countback and len(bars) < countback)):
-        earliest_db = db.get_earliest_ts(MES_SYM, key)
-        if (earliest_db is None or from_ts < earliest_db) and fetcher.ib and fetcher.ib.isConnected():
-            try:
-                fetched = await fetcher.fetch_range(key, from_ts, to_ts)
-                if fetched:
-                    db.insert_bars(MES_SYM, key, fetched)
-                    # Also merge into in-memory store
-                    for b in fetched:
-                        fetcher._append_bar(key, b)
-                    bars = db.get_bars(MES_SYM, key, from_ts=from_ts, to_ts=to_ts)
-                    logger.info("Auto-fetched %d %s bars for scroll request", len(fetched), key)
-            except Exception as e:
-                logger.warning("On-demand IB fetch failed: %s", e)
+    # Auto-fetch from IB whenever the scroll goes before our earliest stored bar.
+    # NOTE: must check this even when `bars` is non-empty — e.g. if we have
+    # Apr 7–11 in DB and the request covers Apr 5–7, bars contains Apr 7 data
+    # but we're still missing the earlier portion.
+    earliest_db  = db.get_earliest_ts(MES_SYM, key)
+    needs_older  = (earliest_db is None or from_ts < earliest_db)
+    if needs_older and fetcher.ib and fetcher.ib.isConnected():
+        try:
+            fetched = await fetcher.fetch_range(key, from_ts, to_ts)
+            if fetched:
+                db.insert_bars(MES_SYM, key, fetched)
+                for b in fetched:
+                    fetcher._append_bar(key, b)
+                bars = db.get_bars(MES_SYM, key, from_ts=from_ts, to_ts=to_ts)
+                logger.info("Auto-fetched %d %s bars for scroll request", len(fetched), key)
+        except Exception as e:
+            logger.warning("On-demand IB fetch failed: %s", e)
 
     # Final fallback: in-memory cache (covers current session bars not yet in DB)
     if not bars:

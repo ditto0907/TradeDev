@@ -75,8 +75,9 @@ class MESDatafeed {
       .then(data => {
         if (data.s === 'no_data') {
           const meta = { noData: true };
-          // Pass nextTime (seconds→ms) so TradingView keeps requesting older bars
-          if (data.nextTime != null) meta.nextTime = data.nextTime * 1000;
+          // nextTime is in SECONDS (same unit as periodParams.from/to).
+          // Do NOT convert to ms — bar timestamps use ms, but nextTime does not.
+          if (data.nextTime != null) meta.nextTime = data.nextTime;
           onResult([], meta);
           return;
         }
