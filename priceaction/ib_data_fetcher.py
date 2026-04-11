@@ -83,6 +83,11 @@ class IBDataFetcher:
                     config.IB_HOST, config.IB_PORT, clientId=config.IB_CLIENT_ID
                 )
                 logger.info("Connected to IB TWS at %s:%s", config.IB_HOST, config.IB_PORT)
+                # Brief settle: TWS reports 'Synchronization complete' before all
+                # internal subscriptions are ready; skipping this causes
+                # qualifyContractsAsync to silently hang on reqContractDetails.
+                logger.info("Waiting 2 s for TWS to finish initializing…")
+                await asyncio.sleep(2)
                 return
             except Exception as e:
                 logger.warning("IB connect attempt %d failed: %s", attempt, e)
@@ -101,15 +106,28 @@ class IBDataFetcher:
         """Return a qualified MES continuous front-month contract (cached)."""
         if self._contract is not None:
             return self._contract
-        logger.info("Qualifying MES contract…")
+        logger.info("Qualifying MES contract (reqContractDetails)…")
         contract = ContFuture(
             symbol=config.MES_SYMBOL,
             exchange=config.MES_EXCHANGE,
             currency=config.MES_CURRENCY,
         )
-        [qualified] = await self.ib.qualifyContractsAsync(contract)
+        try:
+            result = await asyncio.wait_for(
+                self.ib.qualifyContractsAsync(contract),
+                timeout=30.0,
+            )
+        except asyncio.TimeoutError:
+            raise TimeoutError(
+                "qualifyContractsAsync timed out after 30 s — "
+                "TWS may not have market data permissions or is still loading. "
+                "Check that MES futures data is subscribed in TWS."
+            )
+        if not result:
+            raise ValueError("IB returned no contract for MES ContFuture — check symbol/exchange config.")
+        [qualified] = result
         self._contract = qualified
-        logger.info("Qualified contract: %s %s %s",
+        logger.info("Qualified contract: %s  expiry=%s  localSymbol=%s",
                     qualified.symbol,
                     qualified.lastTradeDateOrContractMonth,
                     qualified.localSymbol)
@@ -148,15 +166,26 @@ class IBDataFetcher:
                 since_ts     = None
                 logger.info("Fetching historical %s bars (duration=%s)", key, duration_str)
 
-            raw = await self.ib.reqHistoricalDataAsync(
-                contract,
-                endDateTime="",
-                durationStr=duration_str,
-                barSizeSetting=bar_size_str,
-                whatToShow="TRADES",
-                useRTH=False,
-                formatDate=2,
-            )
+            logger.info("Requesting %s historical bars from IB (timeout 60 s)…", key)
+            try:
+                raw = await asyncio.wait_for(
+                    self.ib.reqHistoricalDataAsync(
+                        contract,
+                        endDateTime="",
+                        durationStr=duration_str,
+                        barSizeSetting=bar_size_str,
+                        whatToShow="TRADES",
+                        useRTH=False,
+                        formatDate=2,
+                    ),
+                    timeout=60.0,
+                )
+            except asyncio.TimeoutError:
+                logger.error(
+                    "reqHistoricalDataAsync timed out for %s bars — "
+                    "IB pacing limit or no data permission. Skipping.", key
+                )
+                continue
             new_bars = [_bar_to_dict(b) for b in raw]
 
             if since_ts:
@@ -194,15 +223,22 @@ class IBDataFetcher:
                     datetime.fromtimestamp(to_ts,   tz=timezone.utc).isoformat(),
                     dur_str)
 
-        raw  = await self.ib.reqHistoricalDataAsync(
-            contract,
-            endDateTime=end_str,
-            durationStr=dur_str,
-            barSizeSetting=bar_size,
-            whatToShow="TRADES",
-            useRTH=False,
-            formatDate=2,
-        )
+        try:
+            raw = await asyncio.wait_for(
+                self.ib.reqHistoricalDataAsync(
+                    contract,
+                    endDateTime=end_str,
+                    durationStr=dur_str,
+                    barSizeSetting=bar_size,
+                    whatToShow="TRADES",
+                    useRTH=False,
+                    formatDate=2,
+                ),
+                timeout=60.0,
+            )
+        except asyncio.TimeoutError:
+            logger.error("On-demand fetch timed out for %s bars", bar_size_key)
+            return []
         return [b for b in (_bar_to_dict(r) for r in raw) if b["time"] >= from_ts]
 
     # ─── Real-time (reqRealTimeBars — 5-second bars) ─────────────────────────
