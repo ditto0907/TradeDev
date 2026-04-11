@@ -77,6 +77,35 @@ def _ib_duration(gap_sec: int) -> str:
     return "1 Y"
 
 
+# ─── Contract Rollover ───────────────────────────────────────────────────────
+#
+# MES quarterly expirations: Mar(H), Jun(M), Sep(U), Dec(Z).
+# Rollover typically happens ~8 business days before expiry (3rd Friday of
+# the contract month).  We approximate rollover as day 10 of the contract month.
+
+_MES_QUARTERLY = [3, 6, 9, 12]
+
+
+def _contract_month_for_ts(ts: int) -> str:
+    """Return YYYYMM for the MES contract likely front-month at timestamp *ts*."""
+    dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+    y, m, d = dt.year, dt.month, dt.day
+    for qm in _MES_QUARTERLY:
+        if m < qm or (m == qm and d <= 10):
+            return f"{y}{qm:02d}"
+    return f"{y + 1}03"
+
+
+def _prev_contract_month(yyyymm: str) -> str:
+    """Return the YYYYMM of the previous quarterly MES contract."""
+    y = int(yyyymm[:4])
+    m = int(yyyymm[4:])
+    idx = _MES_QUARTERLY.index(m)
+    if idx == 0:
+        return f"{y - 1}{_MES_QUARTERLY[-1]:02d}"
+    return f"{y}{_MES_QUARTERLY[idx - 1]:02d}"
+
+
 # ─── IBDataFetcher ────────────────────────────────────────────────────────────
 
 class IBDataFetcher:
@@ -90,7 +119,8 @@ class IBDataFetcher:
     def __init__(self):
         self.ib: Optional[IB] = None
         self.bars: Dict[str, List[dict]] = {"5min": []}
-        self._contract = None                        # cached qualified contract
+        self._contract = None                        # cached qualified ContFuture
+        self._contract_cache: Dict[str, object] = {}   # YYYYMM → qualified Future
         self._ib_ready: bool = False                 # True only after contract is resolved
         self._realtime_subscriptions: Dict[str, object] = {}
         self._new_bar_callbacks: List[Callable[[str, dict], None]] = []
@@ -162,6 +192,39 @@ class IBDataFetcher:
                     qualified.symbol,
                     qualified.lastTradeDateOrContractMonth,
                     qualified.localSymbol)
+        return qualified
+
+    async def _get_future_for_month(self, yyyymm: str):
+        """
+        Return a qualified Future contract for a specific expiry month.
+        Results are cached so repeated scrolls don't re-qualify.
+        """
+        if yyyymm in self._contract_cache:
+            return self._contract_cache[yyyymm]
+        logger.info("Qualifying Future contract for MES %s…", yyyymm)
+        contract = Future(
+            symbol=config.MES_SYMBOL,
+            exchange=config.MES_EXCHANGE,
+            currency=config.MES_CURRENCY,
+            lastTradeDateOrContractMonth=yyyymm,
+        )
+        contract.includeExpired = True
+        try:
+            result = await asyncio.wait_for(
+                self.ib.qualifyContractsAsync(contract),
+                timeout=30.0,
+            )
+        except asyncio.TimeoutError:
+            raise TimeoutError(f"qualifyContractsAsync timed out for MES {yyyymm}")
+        if not result:
+            raise ValueError(f"IB returned no contract for MES Future {yyyymm}")
+        qualified = result[0]
+        self._contract_cache[yyyymm] = qualified
+        logger.info("Qualified Future: %s  expiry=%s  localSymbol=%s  conId=%s",
+                    qualified.symbol,
+                    qualified.lastTradeDateOrContractMonth,
+                    qualified.localSymbol,
+                    qualified.conId)
         return qualified
 
     # ─── Historical Data ─────────────────────────────────────────────────────
@@ -240,9 +303,12 @@ class IBDataFetcher:
         """
         Fetch a specific historical time range from IB on demand.
         Used by the server when the chart scrolls to an uncached region.
+
+        Automatically selects the correct Future contract for the date range.
+        If the target contract returns no data (e.g. scrolled past its trading
+        start), falls back to the previous quarterly contract.
         Returns bars filtered to [from_ts, to_ts].
         """
-        contract   = await self._get_contract()
         bar_size, interval = _key_to_ib(bar_size_key)
 
         start_ts   = (from_ts // interval) * interval
@@ -251,53 +317,57 @@ class IBDataFetcher:
         end_str    = end_dt.strftime("%Y%m%d %H:%M:%S UTC")
         dur_str    = _ib_duration(end_ts - start_ts)
 
-        if getattr(contract, 'secType', '').upper() == 'CONTFUT':
-            contract = Future(
-                conId=contract.conId,
-                symbol=contract.symbol,
-                exchange=contract.exchange,
-                currency=contract.currency,
-                lastTradeDateOrContractMonth=contract.lastTradeDateOrContractMonth,
-                localSymbol=getattr(contract, 'localSymbol', ''),
-                multiplier=getattr(contract, 'multiplier', ''),
-                tradingClass=getattr(contract, 'tradingClass', ''),
-            )
-            logger.info("Converted ContFuture → Future for on-demand fetch: %s", contract)
+        # Determine which contract covers the end of the requested range,
+        # with the previous quarter as fallback.
+        target_month = _contract_month_for_ts(end_ts)
+        months_to_try = [target_month, _prev_contract_month(target_month)]
 
-        logger.info("On-demand fetch: %s  %s → %s  (%s)",
-                    bar_size_key,
-                    datetime.fromtimestamp(start_ts, tz=timezone.utc).isoformat(),
-                    datetime.fromtimestamp(end_ts,   tz=timezone.utc).isoformat(),
-                    dur_str)
+        for month in months_to_try:
+            try:
+                contract = await self._get_future_for_month(month)
+            except Exception as e:
+                logger.warning("Cannot qualify MES %s: %s", month, e)
+                continue
 
-        try:
-            raw = await asyncio.wait_for(
-                self.ib.reqHistoricalDataAsync(
-                    contract,
-                    endDateTime=end_str,
-                    durationStr=dur_str,
-                    barSizeSetting=bar_size,
-                    whatToShow="TRADES",
-                    useRTH=False,
-                    formatDate=2,
-                ),
-                timeout=60.0,
-            )
-        except asyncio.TimeoutError:
-            logger.error("On-demand fetch timed out for %s bars", bar_size_key)
-            return []
+            logger.info("On-demand fetch: %s  %s → %s  (%s)  contract=%s",
+                        bar_size_key,
+                        datetime.fromtimestamp(start_ts, tz=timezone.utc).isoformat(),
+                        datetime.fromtimestamp(end_ts,   tz=timezone.utc).isoformat(),
+                        dur_str, contract.localSymbol)
 
-        bars = [b for b in (_bar_to_dict(r) for r in raw)
-                if b["time"] >= from_ts and b["time"] <= to_ts]
-        bars.sort(key=lambda b: b["time"])
-        if not bars:
-            logger.debug(
-                "On-demand IB raw bars=%d start=%s end=%s",
-                len(raw),
-                raw[0].date if raw else None,
-                raw[-1].date if raw else None,
-            )
-        return bars
+            try:
+                raw = await asyncio.wait_for(
+                    self.ib.reqHistoricalDataAsync(
+                        contract,
+                        endDateTime=end_str,
+                        durationStr=dur_str,
+                        barSizeSetting=bar_size,
+                        whatToShow="TRADES",
+                        useRTH=False,
+                        formatDate=2,
+                    ),
+                    timeout=60.0,
+                )
+            except asyncio.TimeoutError:
+                logger.error("On-demand fetch timed out for %s (contract %s)",
+                            bar_size_key, contract.localSymbol)
+                continue
+
+            bars = [b for b in (_bar_to_dict(r) for r in raw)
+                    if b["time"] >= from_ts and b["time"] <= to_ts]
+            bars.sort(key=lambda b: b["time"])
+
+            if bars:
+                logger.info("On-demand fetch: %d %s bars from %s",
+                            len(bars), bar_size_key, contract.localSymbol)
+                return bars
+
+            logger.info("Contract %s returned 0 bars for %s %s→%s, trying previous",
+                        contract.localSymbol, bar_size_key, from_ts, to_ts)
+
+        logger.info("On-demand fetch: no data from any contract for %s %s→%s",
+                    bar_size_key, from_ts, to_ts)
+        return []
 
     # ─── Real-time (reqRealTimeBars — 5-second bars) ─────────────────────────
 
