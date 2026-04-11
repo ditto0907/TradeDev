@@ -314,6 +314,88 @@
       cursor: pointer;
     }
     .cancel-btn:hover { background: var(--red-bg); }
+
+    /* ── Order Confirmation Dialog ─────────────────────────────────────────── */
+    #order-confirm-overlay {
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0,0,0,0.55);
+      z-index: 100000;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .confirm-dialog {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0;
+      width: 340px;
+      max-width: 90vw;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+    }
+    .confirm-title {
+      padding: 14px 18px;
+      font-size: 14px;
+      font-weight: 600;
+      border-bottom: 1px solid var(--border);
+      color: var(--text);
+    }
+    .confirm-body {
+      padding: 14px 18px;
+    }
+    .confirm-order-details {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .confirm-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 12px;
+      color: var(--text-dim);
+    }
+    .confirm-row strong { color: var(--text); font-weight: 600; }
+    .confirm-row strong.buy  { color: var(--green); }
+    .confirm-row strong.sell { color: var(--red); }
+    .confirm-input {
+      width: 100px;
+      background: var(--input-bg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--text);
+      padding: 3px 6px;
+      font-size: 12px;
+      text-align: right;
+    }
+    .confirm-input:focus { border-color: var(--blue); outline: none; }
+    .confirm-actions {
+      display: flex;
+      gap: 8px;
+      padding: 12px 18px;
+      border-top: 1px solid var(--border);
+      justify-content: flex-end;
+    }
+    .confirm-btn {
+      padding: 7px 18px;
+      border: none;
+      border-radius: 5px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .confirm-btn.cancel {
+      background: var(--panel-hover);
+      color: var(--text-dim);
+    }
+    .confirm-btn.cancel:hover { background: var(--border); }
+    .confirm-btn.buy  { background: var(--green); color: #fff; }
+    .confirm-btn.buy:hover  { background: var(--green-hover); }
+    .confirm-btn.sell { background: var(--red);   color: #fff; }
+    .confirm-btn.sell:hover { background: var(--red-hover); }
+
     .leg-row { display:flex; align-items:center; gap:6px; }
     .leg-line { width:14px; height:2px; border-radius:1px; }
     .leg-box  { width:14px; height:10px; border-radius:2px; }

@@ -371,6 +371,17 @@ class OrderRequest(BaseModel):
     tif:         str = "DAY"
 
 
+class BracketOrderRequest(BaseModel):
+    action:      str              # "BUY" | "SELL"
+    quantity:    int
+    order_type:  str              # entry order type
+    limit_price: Optional[float] = None
+    stop_price:  Optional[float] = None
+    tp_price:    Optional[float] = None   # take-profit limit
+    sl_price:    Optional[float] = None   # stop-loss stop
+    tif:         str = "DAY"
+
+
 @app.post("/api/order")
 async def place_order(req: OrderRequest):
     if _order_mgr is None:
@@ -388,6 +399,24 @@ async def place_order(req: OrderRequest):
         return JSONResponse({"success": False, "error": str(e)}, status_code=400)
 
 
+@app.post("/api/order/bracket")
+async def place_bracket_order(req: BracketOrderRequest):
+    if _order_mgr is None:
+        return JSONResponse({"success": False, "error": "IB not connected"}, status_code=503)
+    try:
+        results = _order_mgr.place_bracket_order(
+            action=req.action, quantity=req.quantity,
+            order_type=req.order_type,
+            limit_price=req.limit_price, stop_price=req.stop_price,
+            tp_price=req.tp_price, sl_price=req.sl_price,
+            tif=req.tif,
+        )
+        return {"success": True, "orders": results}
+    except Exception as e:
+        logger.error("place_bracket_order error: %s", e)
+        return JSONResponse({"success": False, "error": str(e)}, status_code=400)
+
+
 @app.get("/api/orders")
 async def get_orders(all: bool = Query(False)):
     if _order_mgr is None:
@@ -401,6 +430,35 @@ async def cancel_order(order_id: int):
         return JSONResponse({"success": False, "error": "IB not connected"}, status_code=503)
     ok = _order_mgr.cancel_order(order_id)
     return {"success": ok}
+
+
+@app.delete("/api/orders")
+async def cancel_all_orders():
+    if _order_mgr is None:
+        return JSONResponse({"success": False, "error": "IB not connected"}, status_code=503)
+    count = _order_mgr.cancel_all_orders()
+    return {"success": True, "cancelled": count}
+
+
+@app.post("/api/flatten")
+async def flatten_position():
+    if _order_mgr is None:
+        return JSONResponse({"success": False, "error": "IB not connected"}, status_code=503)
+    try:
+        result = _order_mgr.flatten_position()
+        if result is None:
+            return {"success": True, "message": "No open position"}
+        return {"success": True, **result}
+    except Exception as e:
+        logger.error("flatten error: %s", e)
+        return JSONResponse({"success": False, "error": str(e)}, status_code=400)
+
+
+@app.get("/api/position")
+async def get_position():
+    if _order_mgr is None:
+        return {"symbol": "MES", "position": 0, "avg_cost": 0.0, "side": "FLAT"}
+    return _order_mgr.get_position()
 
 
 # ─── WebSocket ────────────────────────────────────────────────────────────────

@@ -19,6 +19,10 @@ const MES_TICK   = 0.25;
 const MES_TICK_$ = 1.25;
 const MES_MARGIN = 1650;
 
+// Default bracket offsets (in points)
+const DEFAULT_TP_OFFSET = 5.0;   // take-profit 5 pts from entry
+const DEFAULT_SL_OFFSET = 3.0;   // stop-loss 3 pts from entry
+
 // ── State ──────────────────────────────────────────────────────────────────────
 
 let _widget        = null;
@@ -46,6 +50,12 @@ window._rthMode = false;
 // Right-click order price — updated via crossHairMoved
 window._chartCursorPrice = null;
 
+// Order line tracking — orderId → shape id on chart
+let _orderLineShapes = {};
+
+// Position state
+let _currentPosition = { symbol: 'MES', position: 0, avg_cost: 0, side: 'FLAT' };
+
 // ── DOMContentLoaded ──────────────────────────────────────────────────────────
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -54,6 +64,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initBottomResize();
   initOrderForm();
   initSRLegendDrag();
+  initPositionPolling();
 });
 
 // ── Chart Init ────────────────────────────────────────────────────────────────
@@ -159,10 +170,18 @@ function initChart() {
 
 // ── Right-click Context Menu ───────────────────────────────────────────────────
 
-function _buildContextMenuItems(defaultItems, actionsFactory) {
-  const price = window._chartCursorPrice;
-  if (price == null || isNaN(price)) return defaultItems;
+/**
+ * Snap a price to the nearest MES tick (0.25).
+ */
+function snapToTick(price) {
+  return Math.round(price / MES_TICK) * MES_TICK;
+}
 
+function _buildContextMenuItems(defaultItems, actionsFactory) {
+  const rawPrice = window._chartCursorPrice;
+  if (rawPrice == null || isNaN(rawPrice)) return defaultItems;
+
+  const price     = snapToTick(rawPrice);
   const lastPrice = _lastBar ? _lastBar.close : price;
   const isAbove   = price >= lastPrice;
   const pStr      = price.toFixed(2);
@@ -172,37 +191,80 @@ function _buildContextMenuItems(defaultItems, actionsFactory) {
   try {
     extra.push(actionsFactory.createSeparator());
 
-    // Conditional orders based on position relative to last price
+    // ── Conditional orders based on position relative to last price ──────
     if (isAbove) {
       extra.push(actionsFactory.createAction({
         text: `Buy Stop  @ ${pStr}  (${qty} ct)`,
-        click: () => placeQuickOrder('BUY', 'stop', null, price),
+        click: () => showOrderConfirm('BUY', 'stop', null, price, qty),
       }));
       extra.push(actionsFactory.createAction({
         text: `Sell Limit @ ${pStr}  (${qty} ct)`,
-        click: () => placeQuickOrder('SELL', 'limit', price, null),
+        click: () => showOrderConfirm('SELL', 'limit', price, null, qty),
       }));
     } else {
       extra.push(actionsFactory.createAction({
         text: `Buy Limit  @ ${pStr}  (${qty} ct)`,
-        click: () => placeQuickOrder('BUY', 'limit', price, null),
+        click: () => showOrderConfirm('BUY', 'limit', price, null, qty),
       }));
       extra.push(actionsFactory.createAction({
         text: `Sell Stop  @ ${pStr}  (${qty} ct)`,
-        click: () => placeQuickOrder('SELL', 'stop', null, price),
+        click: () => showOrderConfirm('SELL', 'stop', null, price, qty),
       }));
     }
 
     extra.push(actionsFactory.createSeparator());
 
-    // Market orders always available
+    // ── Bracket orders (entry + TP + SL) ────────────────────────────────
+    if (isAbove) {
+      extra.push(actionsFactory.createAction({
+        text: `Bracket Buy Stop  @ ${pStr}  (TP+SL)`,
+        click: () => showBracketConfirm('BUY', 'stop', null, price, qty),
+      }));
+    } else {
+      extra.push(actionsFactory.createAction({
+        text: `Bracket Buy Limit @ ${pStr}  (TP+SL)`,
+        click: () => showBracketConfirm('BUY', 'limit', price, null, qty),
+      }));
+    }
+    if (!isAbove) {
+      extra.push(actionsFactory.createAction({
+        text: `Bracket Sell Stop  @ ${pStr}  (TP+SL)`,
+        click: () => showBracketConfirm('SELL', 'stop', null, price, qty),
+      }));
+    } else {
+      extra.push(actionsFactory.createAction({
+        text: `Bracket Sell Limit @ ${pStr}  (TP+SL)`,
+        click: () => showBracketConfirm('SELL', 'limit', price, null, qty),
+      }));
+    }
+
+    extra.push(actionsFactory.createSeparator());
+
+    // ── Market orders always available ──────────────────────────────────
     extra.push(actionsFactory.createAction({
       text: `Market Buy  (${qty} ct)`,
-      click: () => placeQuickOrder('BUY', 'market', null, null),
+      click: () => showOrderConfirm('BUY', 'market', null, null, qty),
     }));
     extra.push(actionsFactory.createAction({
       text: `Market Sell  (${qty} ct)`,
-      click: () => placeQuickOrder('SELL', 'market', null, null),
+      click: () => showOrderConfirm('SELL', 'market', null, null, qty),
+    }));
+
+    extra.push(actionsFactory.createSeparator());
+
+    // ── Position management ─────────────────────────────────────────────
+    if (_currentPosition.position !== 0) {
+      const posLabel = `${_currentPosition.side} ${Math.abs(_currentPosition.position)}`;
+      extra.push(actionsFactory.createAction({
+        text: `⚡ Flatten Position (${posLabel})`,
+        click: () => showFlattenConfirm(),
+      }));
+    }
+
+    // ── Cancel all ──────────────────────────────────────────────────────
+    extra.push(actionsFactory.createAction({
+      text: '✕ Cancel All Orders',
+      click: () => showCancelAllConfirm(),
     }));
 
     extra.push(actionsFactory.createSeparator());
@@ -214,9 +276,142 @@ function _buildContextMenuItems(defaultItems, actionsFactory) {
   return extra.concat(Array.from(defaultItems));
 }
 
+// ── Order Confirmation Dialog ─────────────────────────────────────────────────
+
+function showOrderConfirm(action, orderType, limitPrice, stopPrice, qty) {
+  const price     = limitPrice || stopPrice;
+  const typeLabel = orderType === 'market' ? 'MARKET'
+                  : orderType === 'limit'  ? `LIMIT @ ${price?.toFixed(2)}`
+                  : orderType === 'stop'   ? `STOP @ ${price?.toFixed(2)}`
+                  : 'STP LMT';
+  const side      = action === 'BUY' ? 'buy' : 'sell';
+
+  showConfirmDialog({
+    title: `Confirm ${action} Order`,
+    body:  `<div class="confirm-order-details">
+              <div class="confirm-row"><span>Action</span><strong class="${side}">${action}</strong></div>
+              <div class="confirm-row"><span>Type</span><strong>${typeLabel}</strong></div>
+              <div class="confirm-row"><span>Quantity</span><strong>${qty} ct</strong></div>
+              <div class="confirm-row"><span>Symbol</span><strong>MES</strong></div>
+            </div>`,
+    confirmClass: side,
+    confirmText:  `${action} ${qty} MES`,
+    onConfirm:    () => placeQuickOrder(action, orderType, limitPrice, stopPrice),
+  });
+}
+
+function showBracketConfirm(action, orderType, limitPrice, stopPrice, qty) {
+  const entryPrice = limitPrice || stopPrice;
+  const isBuy      = action === 'BUY';
+  const tpDefault  = snapToTick(isBuy ? entryPrice + DEFAULT_TP_OFFSET : entryPrice - DEFAULT_TP_OFFSET);
+  const slDefault  = snapToTick(isBuy ? entryPrice - DEFAULT_SL_OFFSET : entryPrice + DEFAULT_SL_OFFSET);
+  const side       = isBuy ? 'buy' : 'sell';
+  const typeLabel  = orderType === 'limit' ? `LIMIT @ ${entryPrice?.toFixed(2)}`
+                   : `STOP @ ${entryPrice?.toFixed(2)}`;
+
+  showConfirmDialog({
+    title: `Confirm Bracket ${action}`,
+    body:  `<div class="confirm-order-details">
+              <div class="confirm-row"><span>Entry</span><strong class="${side}">${action} ${typeLabel}</strong></div>
+              <div class="confirm-row"><span>Quantity</span><strong>${qty} ct</strong></div>
+              <div class="confirm-row">
+                <span>Take Profit</span>
+                <input type="number" id="bracket-tp" class="confirm-input" value="${tpDefault.toFixed(2)}" step="0.25" />
+              </div>
+              <div class="confirm-row">
+                <span>Stop Loss</span>
+                <input type="number" id="bracket-sl" class="confirm-input" value="${slDefault.toFixed(2)}" step="0.25" />
+              </div>
+            </div>`,
+    confirmClass: side,
+    confirmText:  `${action} Bracket`,
+    onConfirm:    () => {
+      const tp = snapToTick(parseFloat(document.getElementById('bracket-tp')?.value) || tpDefault);
+      const sl = snapToTick(parseFloat(document.getElementById('bracket-sl')?.value) || slDefault);
+      placeBracketOrder(action, orderType, limitPrice, stopPrice, tp, sl);
+    },
+  });
+}
+
+function showFlattenConfirm() {
+  const side = _currentPosition.side;
+  const qty  = Math.abs(_currentPosition.position);
+  showConfirmDialog({
+    title: 'Flatten Position',
+    body:  `<div class="confirm-order-details">
+              <div class="confirm-row"><span>Current Position</span><strong>${side} ${qty} MES</strong></div>
+              <div class="confirm-row"><span>Action</span><strong>Market Close All</strong></div>
+            </div>
+            <p style="color:var(--orange);font-size:11px;margin-top:8px">⚠ This will close your entire position at market.</p>`,
+    confirmClass: 'sell',
+    confirmText:  'Flatten Now',
+    onConfirm:    () => flattenPosition(),
+  });
+}
+
+function showCancelAllConfirm() {
+  showConfirmDialog({
+    title: 'Cancel All Orders',
+    body:  `<p style="margin:12px 0">Cancel <strong>all</strong> working orders?</p>`,
+    confirmClass: 'sell',
+    confirmText:  'Cancel All',
+    onConfirm:    () => cancelAllOrders(),
+  });
+}
+
+/**
+ * Generic confirmation dialog.
+ * Options: { title, body (HTML), confirmClass, confirmText, onConfirm }
+ */
+function showConfirmDialog({ title, body, confirmClass, confirmText, onConfirm }) {
+  // Remove any existing dialog
+  document.getElementById('order-confirm-overlay')?.remove();
+
+  const overlay = document.createElement('div');
+  overlay.id = 'order-confirm-overlay';
+  overlay.innerHTML = `
+    <div class="confirm-dialog">
+      <div class="confirm-title">${title}</div>
+      <div class="confirm-body">${body}</div>
+      <div class="confirm-actions">
+        <button class="confirm-btn cancel" id="confirm-cancel">Cancel</button>
+        <button class="confirm-btn ${confirmClass}" id="confirm-ok">${confirmText}</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  // Focus the confirm button
+  const okBtn     = document.getElementById('confirm-ok');
+  const cancelBtn = document.getElementById('confirm-cancel');
+  okBtn.focus();
+
+  const close = () => overlay.remove();
+
+  cancelBtn.addEventListener('click', close);
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) close();
+  });
+  okBtn.addEventListener('click', () => {
+    close();
+    onConfirm();
+  });
+
+  // ESC to dismiss
+  const onKey = (e) => {
+    if (e.key === 'Escape') { close(); document.removeEventListener('keydown', onKey); }
+    if (e.key === 'Enter')  { close(); onConfirm(); document.removeEventListener('keydown', onKey); }
+  };
+  document.addEventListener('keydown', onKey);
+}
+
 async function placeQuickOrder(action, orderType, limitPrice, stopPrice) {
   const qty = parseInt(document.getElementById('order-qty')?.value) || 1;
   const tif = document.getElementById('order-tif')?.value || 'day';
+
+  // Snap prices to tick
+  if (limitPrice != null) limitPrice = snapToTick(limitPrice);
+  if (stopPrice  != null) stopPrice  = snapToTick(stopPrice);
 
   const body = {
     action,
@@ -241,12 +436,193 @@ async function placeQuickOrder(action, orderType, limitPrice, stopPrice) {
                       : `STP LMT`;
       showToast(`#${data.order_id}  ${action} ${qty} MES ${typeLabel}`, 'success');
       addWorkingOrderRow(data);
+      drawOrderLine(data);
     } else {
       showToast(`Order failed: ${data.error}`, 'error');
     }
   } catch (e) {
     showToast(`Order error: ${e.message}`, 'error');
   }
+}
+
+async function placeBracketOrder(action, orderType, limitPrice, stopPrice, tpPrice, slPrice) {
+  const qty = parseInt(document.getElementById('order-qty')?.value) || 1;
+  const tif = document.getElementById('order-tif')?.value || 'day';
+
+  const body = {
+    action,
+    quantity:    qty,
+    order_type:  orderType,
+    limit_price: limitPrice != null ? snapToTick(limitPrice) : null,
+    stop_price:  stopPrice  != null ? snapToTick(stopPrice)  : null,
+    tp_price:    snapToTick(tpPrice),
+    sl_price:    snapToTick(slPrice),
+    tif,
+  };
+
+  try {
+    const res  = await fetch('/api/order/bracket', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (data.success) {
+      const orders = data.orders;
+      showToast(`Bracket: ${orders.length} orders placed`, 'success');
+      orders.forEach(o => {
+        addWorkingOrderRow(o);
+        drawOrderLine(o);
+      });
+      // Switch to orders tab
+      document.querySelector('.btab[data-pane="orders"]')?.click();
+    } else {
+      showToast(`Bracket order failed: ${data.error}`, 'error');
+    }
+  } catch (e) {
+    showToast(`Bracket error: ${e.message}`, 'error');
+  }
+}
+
+async function cancelAllOrders() {
+  try {
+    const res  = await fetch('/api/orders', { method: 'DELETE' });
+    const data = await res.json();
+    if (data.success) {
+      showToast(`Cancelled ${data.cancelled} orders`, 'success');
+      clearAllOrderLines();
+    } else {
+      showToast('Cancel all failed', 'error');
+    }
+  } catch (e) {
+    showToast(`Cancel all error: ${e.message}`, 'error');
+  }
+}
+
+async function flattenPosition() {
+  try {
+    const res  = await fetch('/api/flatten', { method: 'POST' });
+    const data = await res.json();
+    if (data.success) {
+      if (data.order_id) {
+        showToast(`Flatten: ${data.action} ${data.quantity} MES (MKT)`, 'success');
+        addWorkingOrderRow(data);
+      } else {
+        showToast(data.message || 'No position to flatten', 'info');
+      }
+    } else {
+      showToast(`Flatten failed: ${data.error}`, 'error');
+    }
+  } catch (e) {
+    showToast(`Flatten error: ${e.message}`, 'error');
+  }
+}
+
+// ── Visual Order Lines on Chart ───────────────────────────────────────────────
+
+function drawOrderLine(order) {
+  if (!_widget) return;
+  const price = order.lmt_price || order.stp_price;
+  if (!price) return;  // Market orders don't get lines
+
+  let chart;
+  try { chart = _widget.activeChart(); } catch { return; }
+
+  const isBuy   = order.action === 'BUY';
+  const color   = isBuy ? '#26a69a' : '#ef5350';
+  const label   = `#${order.order_id} ${order.action} ${order.quantity} @ ${price.toFixed(2)}`;
+
+  try {
+    const id = chart.createShape(
+      { price, time: 0 },
+      {
+        shape: 'horizontal_line',
+        lock:  true,
+        disableSelection: false,
+        overrides: {
+          linecolor:  color,
+          linewidth:  1,
+          linestyle:  2,   // dashed
+          showPrice:  true,
+          showLabel:  true,
+          text:       label,
+          textcolor:  color,
+          fontsize:   10,
+        },
+      }
+    );
+    if (id) _orderLineShapes[order.order_id] = id;
+  } catch (e) {
+    console.debug('drawOrderLine error:', e);
+  }
+}
+
+function removeOrderLine(orderId) {
+  if (!_widget) return;
+  const shapeId = _orderLineShapes[orderId];
+  if (!shapeId) return;
+
+  try {
+    const chart = _widget.activeChart();
+    chart.removeEntity(shapeId);
+  } catch {}
+  delete _orderLineShapes[orderId];
+}
+
+function clearAllOrderLines() {
+  if (!_widget) return;
+  try {
+    const chart = _widget.activeChart();
+    for (const [oid, sid] of Object.entries(_orderLineShapes)) {
+      try { chart.removeEntity(sid); } catch {}
+    }
+  } catch {}
+  _orderLineShapes = {};
+}
+
+// ── Position Polling ──────────────────────────────────────────────────────────
+
+function initPositionPolling() {
+  fetchPosition();
+  setInterval(fetchPosition, 5000);
+}
+
+async function fetchPosition() {
+  try {
+    const res = await fetch('/api/position');
+    _currentPosition = await res.json();
+    updatePositionPanel();
+  } catch {}
+}
+
+function updatePositionPanel() {
+  const tbody = document.getElementById('pos-tbody');
+  if (!tbody) return;
+
+  if (_currentPosition.position === 0) {
+    tbody.innerHTML = '<tr><td colspan="8"><div class="empty-table">No open positions</div></td></tr>';
+    return;
+  }
+
+  const lastPrice = _lastBar ? _lastBar.close : 0;
+  const avgPrice  = _currentPosition.avg_cost / 5;  // MES multiplier = 5
+  const qty       = Math.abs(_currentPosition.position);
+  const unrealPnl = lastPrice > 0 ? (lastPrice - avgPrice) * _currentPosition.position * 5 : 0;
+  const pnlClass  = unrealPnl >= 0 ? 'up' : 'down';
+  const value     = lastPrice > 0 ? (lastPrice * 5 * qty) : 0;
+
+  tbody.innerHTML = `
+    <tr>
+      <td>MES</td>
+      <td class="${_currentPosition.side === 'LONG' ? 'up' : 'down'}">${_currentPosition.side}</td>
+      <td>${qty}</td>
+      <td>${avgPrice.toFixed(2)}</td>
+      <td>${lastPrice > 0 ? lastPrice.toFixed(2) : '—'}</td>
+      <td class="${pnlClass}">${unrealPnl >= 0 ? '+' : ''}$${unrealPnl.toFixed(2)}</td>
+      <td>—</td>
+      <td>$${value.toLocaleString()}</td>
+    </tr>
+  `;
 }
 
 // ── RTH / ETH Toggle ──────────────────────────────────────────────────────────
@@ -714,6 +1090,7 @@ async function placeOrder() {
     if (data.success) {
       showToast(`Order #${data.order_id} submitted: ${body.action} ${qty} MES`, 'success');
       addWorkingOrderRow(data);
+      drawOrderLine(data);
       document.querySelector('.btab[data-pane="orders"]')?.click();
     } else {
       showToast(`Order failed: ${data.error}`, 'error');
@@ -762,12 +1139,37 @@ function updateWorkingOrderRow(order) {
       statusEl.style.color = 'var(--green)';
       const btn = statusEl.closest('tr')?.querySelector('.cancel-btn');
       if (btn) btn.remove();
-    } else if (['Cancelled', 'Inactive'].includes(order.status)) {
+      removeOrderLine(order.order_id);
+      // Move to fills table
+      addFilledOrderRow(order);
+      // Refresh position
+      fetchPosition();
+    } else if (['Cancelled', 'Inactive', 'ApiCancelled'].includes(order.status)) {
       statusEl.style.color = 'var(--text-faint)';
+      removeOrderLine(order.order_id);
     }
   } else {
     addWorkingOrderRow(order);
   }
+}
+
+function addFilledOrderRow(order) {
+  const tbody = document.getElementById('fills-tbody');
+  if (!tbody) return;
+  const empty = tbody.querySelector('tr td[colspan]');
+  if (empty) empty.closest('tr').remove();
+  const sideClass = order.action === 'BUY' ? 'up' : 'down';
+  const tr = document.createElement('tr');
+  tr.innerHTML = `
+    <td>${new Date().toLocaleTimeString()}</td>
+    <td>MES</td>
+    <td class="${sideClass}">${order.action}</td>
+    <td>${order.order_type}</td>
+    <td>${order.quantity}</td>
+    <td>${order.avg_fill ? order.avg_fill.toFixed(2) : '—'}</td>
+    <td>—</td>
+  `;
+  tbody.prepend(tr);
 }
 
 async function cancelOrder(orderId) {
