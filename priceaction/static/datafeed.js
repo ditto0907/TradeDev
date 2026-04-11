@@ -49,6 +49,7 @@ class MESDatafeed {
 
   resolveSymbol(symbolName, onResolve, onError) {
     const isRTH = symbolName === 'MES_RTH';
+    console.log('[DataFeed] resolveSymbol called:', symbolName, ' isRTH:', isRTH);
 
     fetch('/api/symbols?symbol=MES')
       .then(r => r.json())
@@ -63,10 +64,11 @@ class MESDatafeed {
           info.full_name   = 'CME:MES';
           info.session     = '0000-2359:23456';   // full Globex (Sun–Fri 24 h)
         }
+        console.log('[DataFeed] resolveSymbol result:', info.name, 'session:', info.session);
         setTimeout(() => onResolve(info), 0);
       })
       .catch(err => {
-        console.error('resolveSymbol error:', err);
+        console.error('[DataFeed] resolveSymbol error:', err);
         onError('SYMBOL_NOT_FOUND');
       });
   }
@@ -82,6 +84,7 @@ class MESDatafeed {
     const backendSymbol = 'MES';
     let url = `/api/history?symbol=${backendSymbol}&resolution=${resolution}&from=${from}&to=${to}`;
     if (countBack) url += `&countback=${countBack}`;
+    console.log('[DataFeed] getBars:', symbolInfo.name, 'res:', resolution, 'from:', from, 'to:', to, 'countBack:', countBack);
 
     fetch(url)
       .then(r => r.json())

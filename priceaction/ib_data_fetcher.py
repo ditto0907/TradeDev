@@ -242,12 +242,16 @@ class IBDataFetcher:
 
         if getattr(contract, 'secType', '').upper() == 'CONTFUT':
             contract = Future(
+                conId=contract.conId,
                 symbol=contract.symbol,
                 exchange=contract.exchange,
                 currency=contract.currency,
                 lastTradeDateOrContractMonth=contract.lastTradeDateOrContractMonth,
-                localSymbol=getattr(contract, 'localSymbol', None),
+                localSymbol=getattr(contract, 'localSymbol', ''),
+                multiplier=getattr(contract, 'multiplier', ''),
+                tradingClass=getattr(contract, 'tradingClass', ''),
             )
+            logger.info("Converted ContFuture → Future for on-demand fetch: %s", contract)
 
         logger.info("On-demand fetch: %s  %s → %s  (%s)",
                     bar_size_key,

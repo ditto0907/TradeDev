@@ -289,15 +289,17 @@ async def get_history(
     # Without this guard, a timed-out qualifyContractsAsync would cause every
     # scroll request to hang for 30 s before returning empty.
     earliest_db  = db.get_earliest_ts(MES_SYM, key)
-    needs_older  = (earliest_db is None or from_ts <= earliest_db)
+    needs_older  = (earliest_db is None or from_ts < earliest_db)
     if needs_older:
         if fetcher._ib_ready and fetcher.ib and fetcher.ib.isConnected():
+            # Use earliest_db as the end point so we fetch data BEFORE what we have
+            fetch_end = earliest_db if earliest_db else to_ts
             logger.info(
                 "Scroll past DB boundary: auto-fetching %s bars from IB "
-                "(from=%s earliest_db=%s)", key, from_ts, earliest_db
+                "(from=%s earliest_db=%s fetch_end=%s)", key, from_ts, earliest_db, fetch_end
             )
             try:
-                fetched = await fetcher.fetch_range(key, from_ts, to_ts)
+                fetched = await fetcher.fetch_range(key, from_ts, fetch_end)
                 if fetched:
                     db.insert_bars(MES_SYM, key, fetched)
                     for b in fetched:
@@ -305,7 +307,7 @@ async def get_history(
                     bars = db.get_bars(MES_SYM, key, from_ts=from_ts, to_ts=to_ts)
                     logger.info("Auto-fetched %d %s bars for scroll request", len(fetched), key)
                 else:
-                    logger.info("IB returned 0 bars for %s range %s→%s", key, from_ts, to_ts)
+                    logger.info("IB returned 0 bars for %s range %s→%s", key, from_ts, fetch_end)
             except Exception as e:
                 logger.warning("On-demand IB fetch failed: %s", e)
         else:

@@ -258,20 +258,31 @@ function toggleRTH() {
     btn.textContent = window._rthMode ? 'RTH' : 'ETH';
     btn.classList.toggle('rth-active', window._rthMode);
   }
+  console.log('[RTH/ETH] toggled → rthMode =', window._rthMode);
   if (_widget) {
     try {
-      // Use TWO distinct symbol names so TradingView is forced to call
-      // resolveSymbol again. Calling setSymbol with the *same* name
-      // ('MES') when already on 'MES' is a no-op in TV's caching layer.
       const sym = window._rthMode ? 'MES_RTH' : 'MES';
-      if (typeof _widget.setSymbol === 'function') {
-        _widget.setSymbol(sym);
-      } else {
-        _widget.activeChart().setSymbol(sym);
-      }
+      const chart = _widget.activeChart();
+      const currentSym = chart.symbol();
+      const currentRes = chart.resolution();
+      console.log('[RTH/ETH] current symbol:', currentSym, ' resolution:', currentRes, ' → new symbol:', sym);
+      // widget-level setSymbol requires (symbol, interval, callback)
+      _widget.setSymbol(sym, currentRes, () => {
+        console.log('[RTH/ETH] symbol change completed to', sym);
+      });
     } catch (e) {
-      console.warn('setSymbol RTH/ETH error:', e);
+      console.warn('[RTH/ETH] setSymbol error:', e);
+      // Fallback: chart-level API
+      try {
+        const sym = window._rthMode ? 'MES_RTH' : 'MES';
+        console.log('[RTH/ETH] fallback: activeChart().setSymbol(', sym, ')');
+        _widget.activeChart().setSymbol(sym);
+      } catch (e2) {
+        console.error('[RTH/ETH] fallback also failed:', e2);
+      }
     }
+  } else {
+    console.warn('[RTH/ETH] _widget is null, cannot toggle');
   }
 }
 
