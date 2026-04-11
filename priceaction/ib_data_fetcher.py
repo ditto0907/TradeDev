@@ -258,7 +258,10 @@ class IBDataFetcher:
         except asyncio.TimeoutError:
             logger.error("On-demand fetch timed out for %s bars", bar_size_key)
             return []
-        return [b for b in (_bar_to_dict(r) for r in raw) if b["time"] >= from_ts]
+        bars = [b for b in (_bar_to_dict(r) for r in raw)
+                if b["time"] >= from_ts and b["time"] <= to_ts]
+        bars.sort(key=lambda b: b["time"])
+        return bars
 
     # ─── Real-time (reqRealTimeBars — 5-second bars) ─────────────────────────
 
@@ -392,10 +395,26 @@ class IBDataFetcher:
         bars = self.bars[key]
         if bars and bars[-1]["time"] == bar["time"]:
             bars[-1] = bar
-        else:
+            return
+
+        if not bars or bar["time"] > bars[-1]["time"]:
             bars.append(bar)
-            if len(bars) > config.MAX_BARS_IN_MEMORY:
-                bars.pop(0)
+        else:
+            inserted = False
+            for idx, existing in enumerate(bars):
+                if existing["time"] == bar["time"]:
+                    bars[idx] = bar
+                    inserted = True
+                    break
+                if existing["time"] > bar["time"]:
+                    bars.insert(idx, bar)
+                    inserted = True
+                    break
+            if not inserted:
+                bars.append(bar)
+
+        if len(bars) > config.MAX_BARS_IN_MEMORY:
+            bars.pop(0)
 
     def unsubscribe_realtime(self):
         if not self.ib:

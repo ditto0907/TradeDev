@@ -289,7 +289,7 @@ async def get_history(
     # Without this guard, a timed-out qualifyContractsAsync would cause every
     # scroll request to hang for 30 s before returning empty.
     earliest_db  = db.get_earliest_ts(MES_SYM, key)
-    needs_older  = (earliest_db is None or from_ts < earliest_db)
+    needs_older  = (earliest_db is None or from_ts <= earliest_db)
     if needs_older:
         if fetcher._ib_ready and fetcher.ib and fetcher.ib.isConnected():
             logger.info(
