@@ -542,6 +542,74 @@
     #submit-order.sell { background: var(--red);   color: #fff; }
     #submit-order.sell:hover { background: var(--red-hover); }
 
+    /* Bracket config */
+    #bracket-config {
+      border-top: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    .bracket-config-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 12px 4px;
+    }
+    .bracket-config-title {
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-dim);
+    }
+    .bracket-mode-toggle {
+      display: flex;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      overflow: hidden;
+    }
+    .bracket-mode {
+      padding: 2px 10px;
+      font-size: 10px;
+      font-weight: 600;
+      color: var(--text-dim);
+      background: none;
+      border: none;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+    }
+    .bracket-mode:first-child { border-right: 1px solid var(--border); }
+    .bracket-mode.active { background: var(--blue); color: #fff; }
+    .bracket-mode:hover:not(.active) { background: var(--panel-hover); }
+    .bracket-config-body {
+      padding: 4px 12px 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .bracket-row {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+    .bracket-input-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .bracket-tick-input {
+      width: 80px;
+      text-align: right;
+      padding: 5px 8px;
+      font-size: 13px;
+    }
+    .bracket-unit {
+      font-size: 11px;
+      color: var(--text-dim);
+    }
+    .bracket-hint {
+      font-size: 10px;
+      color: var(--text-faint);
+    }
+
     /* SR levels in right panel */
     #sr-panel {
       border-top: 1px solid var(--border);
@@ -590,6 +658,22 @@
       padding: 0 4px;
       flex-shrink: 0;
     }
+    #bottom-minimize {
+      margin-left: auto;
+      padding: 4px 8px;
+      font-size: 14px;
+      color: var(--text-dim);
+      cursor: pointer;
+      background: none;
+      border: none;
+      line-height: 1;
+      transition: color 0.15s;
+    }
+    #bottom-minimize:hover { color: var(--text); }
+    #main.bottom-minimized { grid-template-rows: 1fr auto; }
+    #main.bottom-minimized #bottom-content { display: none; }
+    #main.bottom-minimized #bottom-resize { display: none; }
+    #main.bottom-minimized #bottom-tabs { border-bottom: none; }
     .btab {
       padding: 9px 14px;
       font-size: 12px;
@@ -654,12 +738,12 @@
 
     /* Resize handle for bottom panel */
     #bottom-resize {
-      height: 4px;
+      height: 6px;
       background: transparent;
       cursor: row-resize;
       flex-shrink: 0;
     }
-    #bottom-resize:hover { background: var(--blue); }
+    #bottom-resize:hover, #bottom-resize:active { background: var(--blue); }
   </style>
 </head>
 <body>
@@ -834,6 +918,35 @@
       </button>
     </div>
 
+    <!-- Bracket Order Config -->
+    <div id="bracket-config">
+      <div class="bracket-config-header">
+        <span class="bracket-config-title">Bracket Defaults</span>
+        <div class="bracket-mode-toggle">
+          <button class="bracket-mode" id="mode-ticks" onclick="setBracketMode('ticks')">Ticks</button>
+          <button class="bracket-mode active" id="mode-dollar" onclick="setBracketMode('dollar')">$</button>
+        </div>
+      </div>
+      <div class="bracket-config-body">
+        <div class="bracket-row">
+          <label class="form-label">Take Profit</label>
+          <div class="bracket-input-row">
+            <input class="form-input bracket-tick-input" type="number" id="bracket-tp-val" value="100" min="1" step="0.01" />
+            <span class="bracket-unit" id="bracket-tp-unit">$</span>
+          </div>
+          <span class="bracket-hint" id="bracket-tp-pts">80 ticks / 20.00 pts</span>
+        </div>
+        <div class="bracket-row">
+          <label class="form-label">Stop Loss</label>
+          <div class="bracket-input-row">
+            <input class="form-input bracket-tick-input" type="number" id="bracket-sl-val" value="100" min="1" step="0.01" />
+            <span class="bracket-unit" id="bracket-sl-unit">$</span>
+          </div>
+          <span class="bracket-hint" id="bracket-sl-pts">80 ticks / 20.00 pts</span>
+        </div>
+      </div>
+    </div>
+
     <!-- S/R quick view -->
     <div id="sr-panel">
       <div class="sr-panel-title">Key Levels</div>
@@ -850,7 +963,9 @@
       <div class="btab active" data-pane="positions">Positions</div>
       <div class="btab"        data-pane="orders">Working Orders</div>
       <div class="btab"        data-pane="fills">Filled Orders</div>
+      <div class="btab"        data-pane="order-history">Order History</div>
       <div class="btab"        data-pane="history">Trade History</div>
+      <button id="bottom-minimize" title="Minimize">▼</button>
     </div>
     <div id="bottom-content">
 
@@ -897,6 +1012,21 @@
           </thead>
           <tbody id="fills-tbody">
             <tr><td colspan="7"><div class="empty-table">No filled orders</div></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Order History -->
+      <div class="btab-pane" id="pane-order-history">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>Time</th><th>Symbol</th><th>Side</th><th>Type</th>
+              <th>Qty</th><th>Price</th><th>Fill Price</th><th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="order-history-tbody">
+            <tr><td colspan="8"><div class="empty-table">No order history</div></td></tr>
           </tbody>
         </table>
       </div>

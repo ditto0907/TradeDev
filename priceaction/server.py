@@ -149,12 +149,18 @@ async def lifespan(app: FastAPI):
             # Create order manager with the qualified contract
             _order_mgr = IBOrderManager(fetcher.ib, fetcher._contract)
 
-            # Wire order-status events → WebSocket broadcast
+            # Wire order-status events → WebSocket broadcast + bracket auto-cancel
             def _on_order_status(trade):
                 asyncio.create_task(broadcast({
                     "type":  "order_update",
                     "order": IBOrderManager._trade_to_dict(trade),
                 }))
+                # Auto-cancel bracket siblings when any member is cancelled
+                status = trade.orderStatus.status
+                if status in ("Cancelled", "ApiCancelled", "Inactive"):
+                    oid = trade.order.orderId
+                    if _order_mgr:
+                        _order_mgr._cancel_bracket_siblings(oid)
             fetcher.ib.orderStatusEvent += _on_order_status
 
         except Exception as e:
@@ -380,6 +386,11 @@ class BracketOrderRequest(BaseModel):
     tif:         str = "DAY"
 
 
+class ModifyOrderRequest(BaseModel):
+    limit_price: Optional[float] = None
+    stop_price:  Optional[float] = None
+
+
 @app.post("/api/order")
 async def place_order(req: OrderRequest):
     if _order_mgr is None:
@@ -431,6 +442,22 @@ async def cancel_order(order_id: int):
         return JSONResponse({"success": False, "error": "IB not connected"}, status_code=503)
     ok = _order_mgr.cancel_order(order_id)
     return {"success": ok}
+
+
+@app.put("/api/order/{order_id}")
+async def modify_order(order_id: int, req: ModifyOrderRequest):
+    if _order_mgr is None:
+        return JSONResponse({"success": False, "error": "IB not connected"}, status_code=503)
+    try:
+        result = _order_mgr.modify_order(
+            order_id,
+            limit_price=req.limit_price,
+            stop_price=req.stop_price,
+        )
+        return {"success": True, **result}
+    except Exception as e:
+        logger.error("modify_order error: %s", e)
+        return JSONResponse({"success": False, "error": str(e)}, status_code=400)
 
 
 @app.delete("/api/orders")

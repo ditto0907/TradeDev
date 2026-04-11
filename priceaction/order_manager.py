@@ -23,6 +23,7 @@ class IBOrderManager:
         self._ib       = ib
         self._contract = contract
         self._trades   = {}   # orderId (int) → Trade
+        self._brackets = {}   # orderId (int) → list[int]  (entry → [tp_id, sl_id])
 
     # ─── Place ───────────────────────────────────────────────────────────────
 
@@ -123,24 +124,68 @@ class IBOrderManager:
             logger.info("Bracket SL placed: %s %d STP @ %s ocaGroup=%s orderId=%s",
                         exit_action, quantity, sl_price, oca_group, sl_trade.order.orderId)
 
+        # Track bracket group: every member maps to all siblings
+        all_ids = [r["order_id"] for r in results]
+        for oid in all_ids:
+            self._brackets[oid] = [x for x in all_ids if x != oid]
+
         return results
+
+    # ─── Modify ───────────────────────────────────────────────────────────────
+
+    def modify_order(
+        self,
+        order_id:    int,
+        limit_price: Optional[float] = None,
+        stop_price:  Optional[float] = None,
+    ) -> dict:
+        """Modify the price of an existing order. Returns updated order dict."""
+        trade = self._find_trade(order_id)
+        if trade is None:
+            raise ValueError(f"Order {order_id} not found")
+        order = trade.order
+        if limit_price is not None:
+            order.lmtPrice = limit_price
+        if stop_price is not None:
+            order.auxPrice = stop_price
+        trade = self._ib.placeOrder(self._contract, order)
+        self._trades[order_id] = trade
+        logger.info("Order modified: orderId=%s lmt=%s stp=%s",
+                     order_id, limit_price, stop_price)
+        return self._trade_to_dict(trade)
 
     # ─── Cancel ──────────────────────────────────────────────────────────────
 
     def cancel_order(self, order_id: int) -> bool:
-        trade = self._trades.get(order_id)
+        trade = self._find_trade(order_id)
         if trade is None:
             logger.warning("cancel_order: orderId %s not found", order_id)
             return False
         self._ib.cancelOrder(trade.order)
         logger.info("Order cancel requested: orderId=%s", order_id)
+        # Auto-cancel bracket siblings
+        self._cancel_bracket_siblings(order_id)
         return True
+
+    def _cancel_bracket_siblings(self, order_id: int):
+        """Cancel all sibling orders in the same bracket group."""
+        siblings = self._brackets.get(order_id, [])
+        for sib_id in siblings:
+            trade = self._find_trade(sib_id)
+            if trade and trade.orderStatus.status not in _TERMINAL_STATUSES:
+                try:
+                    self._ib.cancelOrder(trade.order)
+                    logger.info("Bracket sibling auto-cancelled: orderId=%s (parent=%s)",
+                                sib_id, order_id)
+                except Exception as e:
+                    logger.warning("Bracket sibling cancel failed: orderId=%s: %s", sib_id, e)
 
     def cancel_all_orders(self) -> int:
         """Cancel all open (non-terminal) orders. Returns count cancelled."""
         count = 0
-        for trade in list(self._trades.values()):
-            if trade.orderStatus.status not in _TERMINAL_STATUSES:
+        for trade in self._ib.openTrades():
+            if (trade.contract.conId == self._contract.conId
+                    and trade.orderStatus.status not in _TERMINAL_STATUSES):
                 try:
                     self._ib.cancelOrder(trade.order)
                     count += 1
@@ -186,16 +231,42 @@ class IBOrderManager:
                 }
         return {"symbol": self._contract.symbol, "position": 0, "avg_cost": 0.0, "side": "FLAT"}
 
+    # ─── Helpers ──────────────────────────────────────────────────────────────
+
+    def _find_trade(self, order_id: int):
+        """Look up a Trade by orderId — check local cache first, then IB."""
+        trade = self._trades.get(order_id)
+        if trade is not None:
+            return trade
+        # Search IB's full trade list (open + recent)
+        for t in self._ib.trades():
+            if t.order.orderId == order_id:
+                self._trades[order_id] = t
+                return t
+        return None
+
+    def _sync_from_ib(self):
+        """Sync local _trades cache from IB — IB is the source of truth."""
+        for t in self._ib.trades():
+            if t.contract.conId == self._contract.conId:
+                self._trades[t.order.orderId] = t
+
     # ─── Query ───────────────────────────────────────────────────────────────
 
     def get_open_orders(self) -> list:
-        return [
-            self._trade_to_dict(t) for t in self._trades.values()
-            if t.orderStatus.status not in _TERMINAL_STATUSES
-        ]
+        """Return all open orders from IB (source of truth)."""
+        result = []
+        for t in self._ib.openTrades():
+            if t.contract.conId == self._contract.conId:
+                self._trades[t.order.orderId] = t   # keep cache in sync
+                result.append(self._trade_to_dict(t))
+        return result
 
     def get_all_orders(self) -> list:
-        return [self._trade_to_dict(t) for t in self._trades.values()]
+        """Return all orders (open + filled + cancelled) from IB."""
+        self._sync_from_ib()
+        return [self._trade_to_dict(t) for t in self._trades.values()
+                if t.contract.conId == self._contract.conId]
 
     # ─── Helpers ─────────────────────────────────────────────────────────────
 
@@ -203,16 +274,21 @@ class IBOrderManager:
     def _trade_to_dict(trade) -> dict:
         s = trade.orderStatus
         o = trade.order
+        # Filter out sentinel values: 0, None, and IB's DBL_MAX (~1.7976e+308)
+        def _price(v):
+            if v is None or v == 0 or v > 1e200:
+                return None
+            return v
         return {
             "order_id":   o.orderId,
             "action":     o.action,
             "quantity":   int(o.totalQuantity),
             "order_type": o.orderType,
-            "lmt_price":  o.lmtPrice  if o.lmtPrice  not in (0, None) else None,
-            "stp_price":  o.auxPrice  if o.auxPrice   not in (0, None) else None,
+            "lmt_price":  _price(o.lmtPrice),
+            "stp_price":  _price(o.auxPrice),
             "tif":        o.tif,
             "status":     s.status,
             "filled":     s.filled,
             "remaining":  s.remaining,
-            "avg_fill":   s.avgFillPrice if s.avgFillPrice not in (0, None) else None,
+            "avg_fill":   _price(s.avgFillPrice),
         }
