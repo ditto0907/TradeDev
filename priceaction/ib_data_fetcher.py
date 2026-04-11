@@ -9,7 +9,7 @@ import time
 from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional
 
-from ib_insync import IB, ContFuture, RealTimeBar, util
+from ib_insync import IB, ContFuture, Future, RealTimeBar, util
 
 import config
 import ib_log_translator  # auto-installs translation filter on import
@@ -241,6 +241,14 @@ class IBDataFetcher:
                     datetime.fromtimestamp(from_ts, tz=timezone.utc).isoformat(),
                     datetime.fromtimestamp(to_ts,   tz=timezone.utc).isoformat(),
                     dur_str)
+
+        if isinstance(contract, ContFuture):
+            contract = Future(
+                symbol=contract.symbol,
+                lastTradeDateOrContractMonth=contract.lastTradeDateOrContractMonth,
+                exchange=contract.exchange,
+                currency=contract.currency,
+            )
 
         try:
             raw = await asyncio.wait_for(
