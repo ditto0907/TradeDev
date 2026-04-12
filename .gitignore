@@ -64,6 +64,10 @@ logs/
 *.dump
 RiskControl.log
 
+# --- SQLite WAL files ---
+*.db-shm
+*.db-wal
+
 # --- 编译输出与依赖管理 ---
 *.exe
 *.dll
