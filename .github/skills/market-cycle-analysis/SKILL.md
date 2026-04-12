@@ -98,6 +98,7 @@ Content-Type: application/json
       "start_time": 1744200000,
       "price": 5402.50,
       "style": "dashed"
+      // Optional: "end_time": 1744220000 (if omitted, uses bar_to from analysis period)
     },
     {
       "label": "Bull BO",
@@ -111,12 +112,15 @@ Content-Type: application/json
 
 ### Annotation Types
 
-| Type | Required Fields | Description |
-|------|----------------|-------------|
-| `range` | `start_time`, `end_time`, `price_high`, `price_low` | Rectangle on chart (Opening Range, TR) |
-| `trend line` | `start_time`, `end_time`, `price_start`, `price_end` | Trend line for legs/channels (drawn from (start_time, price_start) to (end_time, price_end)) |
-| `hline` | `price`, `start_time` | Horizontal line (S/R levels, measured move targets) |
-| `label` | `start_time`, `price` | Text label at specific bar/price (BO point, reversal) |
+| Type | Required Fields | Optional Fields | Description |
+|------|----------------|----------------|-------------|
+| `range` | `start_time`, `end_time`, `price_high`, `price_low` | `color` | Rectangle on chart (Opening Range, TR, legs) |
+| `hline` | `price`, `start_time` | `end_time`, `style` | Horizontal S/R level (rendered as trend_line). If `end_time` omitted, defaults to `bar_to` (analysis period end). Text position: bottom-right. |
+| `label` | `start_time`, `price` | — | Text label at specific bar/price (BO point, reversal) |
+
+**`style` values for hline**: `"solid"` (default), `"dashed"`, `"dotted"`
+
+**Note**: `hline` annotations are rendered as horizontal trend lines extending from `start_time` to `end_time` (or `bar_to`). This ensures S/R levels are scoped to the analysis period rather than extending infinitely.
 
 ### Built-in Color Palette (auto-applied by label name)
 
