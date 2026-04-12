@@ -1632,6 +1632,9 @@ function renderCycleAnnotations(analysis) {
     return;
   }
   
+  // Extract bar_to as default end time for trend lines
+  const defaultEndTime = analysis.bar_to || analysis.annotations[0]?.start_time || Date.now() / 1000;
+  
   console.log('[Cycle] Rendering', analysis.annotations.length, 'annotations');
   
   // Color mapping based on label names (from SKILL.md color palette)
@@ -1701,7 +1704,7 @@ function renderCycleAnnotations(analysis) {
         }
         
       } else if (ann.type === 'hline') {
-        // Horizontal line
+        // Trend line (horizontal S/R level extending to end of analysis period)
         const labelLower = ann.label.toLowerCase();
         let lineColor = '#888';
         for (const [key, val] of Object.entries(lineColorMap)) {
@@ -1712,25 +1715,36 @@ function renderCycleAnnotations(analysis) {
         }
         
         const lineStyle = ann.style === 'dashed' ? 1 : ann.style === 'dotted' ? 2 : 0;
+        const endTime = ann.end_time || defaultEndTime;
+        
         const id = chart.createShape(
           { time: ann.start_time, price: ann.price },
           {
-            shape: 'horizontal_line',
+            shape: 'trend_line',
             lock: false,
             disableSelection: false,
             overrides: {
               linecolor: lineColor,
               linewidth: 1,
               linestyle: lineStyle,
-              showPrice: true,
               showLabel: true,
               text: ann.label,
               textcolor: lineColor,
               fontsize: 10,
+              horzLabelsAlign: 'right',
+              vertLabelsAlign: 'bottom',
             },
           }
         );
-        if (id) _cycleShapes.push(id);
+        
+        if (id) {
+          // Set second point (horizontal line at same price)
+          chart.setEntityPoints(id, [
+            { time: ann.start_time, price: ann.price },
+            { time: endTime, price: ann.price }
+          ]);
+          _cycleShapes.push(id);
+        }
         
       } else if (ann.type === 'label') {
         // Text label
