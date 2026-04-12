@@ -19,19 +19,55 @@ Analyze market structure and cycles strictly following Al Brooks' price action m
 
 ## Data Access
 
+- 默认后端服务已经启动，不要在本skill中启动后端服务。
+- 直接使用下面的API接口获取K线数据进行分析即可。获取不到数据就报错，提示用户检查后端服务是否正常运行。
+- 严禁自行创建任何环境以及启动服务，这不是你该干的事情。
+
 ### Read K-line Data
 
 ```
-GET http://localhost:8000/api/skill/bars?symbol={SYM}&resolution={RES}&session={SESSION}&from={FROM_TS}&to={TO_TS}
+GET http://localhost:8000/api/skill/bars?symbol={SYM}&resolution={RES}&session={SESSION}&from_dt={FROM_DT}&to_dt={TO_DT}
 ```
 
 Parameters:
 - `symbol`: MES (default), MNQ, NK225MC, MGC
 - `resolution`: 5 (5min), 15, 30, 60, 1D
 - `session`: RTH (default, 09:30-16:00 ET) or ETH (all hours)
-- `from`, `to`: Unix seconds timestamp range
+- `from_dt`, `to_dt`: Human-readable datetime strings
+  - Format: `"YYYY-MM-DD HH:MM"` (e.g. `"2026-04-08 09:30"`)
+  - Or: `"YYYY-MM-DD"` (e.g. `"2026-04-08"` for full day)
+  - Timezone: America/New_York (ET) for all trading times
+- `from`, `to`: Unix seconds timestamp (legacy, for backward compatibility)
 
 Response: `{ symbol, resolution, session, count, bars: [{time, open, high, low, close, volume}, ...] }`
+
+Example:
+```
+GET /api/skill/bars?symbol=MNQ&resolution=5&session=RTH&from_dt=2026-04-08%2009:30&to_dt=2026-04-08%2011:00
+```
+
+**Quick Start Example:**
+```bash
+# 1. Fetch bars using datetime strings (no timestamp conversion needed!)
+curl "http://localhost:8000/api/skill/bars?symbol=MNQ&resolution=5&session=RTH&from_dt=2026-04-08%2009:30&to_dt=2026-04-08%2011:00"
+
+# 2. Analyze the data
+# 3. POST results back to /api/skill/analysis
+```
+
+The API automatically converts datetime strings to Unix timestamps internally. No Python scripting required for date conversion!
+
+**⚠️ No Hindsight Bias — Critical for Historical Analysis:**
+```bash
+# ✓ CORRECT: Analyzing market at 11:00 → fetch bars UP TO 11:00 only
+curl "http://localhost:8000/api/skill/bars?symbol=MNQ&from_dt=2026-04-08 09:30&to_dt=2026-04-08 11:00"
+
+# ✗ WRONG: Analyzing market at 11:00 but fetching bars beyond that time
+curl "http://localhost:8000/api/skill/bars?symbol=MNQ&from_dt=2026-04-08 09:30&to_dt=2026-04-08 16:00"
+# ↑ This would include bars from 11:00-16:00 = hindsight bias!
+```
+
+When the user asks "market cycle at 11:00", they want to know what YOU COULD SEE at 11:00, not what happened after.
 
 ### Write Analysis Results
 
@@ -77,7 +113,8 @@ Content-Type: application/json
 
 | Type | Required Fields | Description |
 |------|----------------|-------------|
-| `range` | `start_time`, `end_time`, `price_high`, `price_low` | Rectangle on chart (Opening Range, TR, legs) |
+| `range` | `start_time`, `end_time`, `price_high`, `price_low` | Rectangle on chart (Opening Range, TR) |
+| `trend line` | `start_time`, `end_time`, `price_start`, `price_end` | Trend line for legs/channels (drawn from (start_time, price_start) to (end_time, price_end)) |
 | `hline` | `price`, `start_time` | Horizontal line (S/R levels, measured move targets) |
 | `label` | `start_time`, `price` | Text label at specific bar/price (BO point, reversal) |
 
@@ -100,22 +137,58 @@ Custom colors can be set via the `color` field (CSS rgba string).
 
 ## Analysis Procedure
 
+### Step 0: ⚠️ CRITICAL — No Hindsight Bias
+
+**When analyzing a specific historical time (e.g., "market cycle at 11:00"):**
+- **ONLY use bars BEFORE that time** — simulate real-time trading conditions
+- **DO NOT peek at future bars** — this is hindsight bias and violates Al Brooks methodology
+- Set `to_dt` to the analysis time (e.g., `to_dt="2026-04-08 11:00"`)
+- Use prior bars for context (e.g., fetch from `from_dt="2026-04-08 09:00"` to build OR and structure)
+
+**Example:** To analyze market at 11:00, fetch bars from 09:30 to 11:00 ONLY.
+
 ### Step 1: Fetch Data
 
 Determine the appropriate time range based on the user's request:
-- **Intraday today**: Use today's RTH session (from 09:30 ET to current time)
-- **Multi-day**: Use appropriate `from`/`to` range
+- **Historical analysis** (e.g., "market at 11:00"): Fetch from session open TO the specific time (`to_dt="2026-04-08 11:00"`)
+- **Current analysis** ("market now"): Use today's RTH session (from 09:30 ET to current time)
+- **Multi-day**: Use appropriate `from_dt`/`to_dt` range, never beyond the analysis point
 - **Daily chart**: Use resolution=1D with wider range
 
-Fetch bars using the skill API endpoint. Verify you received sufficient bars.
+Fetch bars using the skill API endpoint. Verify you received sufficient bars and NO bars after the analysis time.
 
-### Step 2: Multi-Timeframe Context (if needed)
+### Step 2: Multi-Timeframe Context 
 
 For intraday analysis, optionally fetch the daily chart (1D) for context:
 - Identify the daily chart's current phase (TR, trend, BO)
 - Note prior day's high, low, close as magnets
+- 多时间框架分析是本skill的核心能力，无需调用其他agent/skill，直接在本skill内部调用API获取不同时间框架的数据进行分析即可。
 
-### Step 3: Identify Market Structure
+#### Analysis Framework:
+
+#### 2.1 Market Cycle & Context (MTF)
+- **Daily:** [Cycle] | [Key S/R] | [Evidence: e.g. 3-bar Bear Microchannel, testing TR low]
+- **H1:** [Cycle] | [Key S/R] | [Evidence: e.g. WBC, frequent overlap, tails]
+- **M15:** [Cycle] | [Key S/R] | [Evidence]
+- **M5:** [Cycle] | [Key S/R] | [Evidence]
+
+#### 2.2 Daily Scenarios (Plan A/B)
+- **Plan A:** [Theme, e.g. MTR at Daily Low]
+  - **Key Signs:** [e.g. Strong Bull Signal Bar, H2 setup at EMA]
+  - **Restriction:** [e.g. DO NOT SELL at TR bottom without consecutive big bear bars]
+  
+- **Plan B:** [Theme, e.g. Breakout Gap Follow-through]
+  - **Key Signs:** [e.g. Gap Up open, no overlap with bar 1-5]
+  - **Restriction:** [e.g. DO NOT BUY top of Spike; wait for M5 Pullback/Channel]
+
+#### 2.3 Fundamental Rules:
+- TR: Buy Low, Sell High, Scalp.
+- Strong BO: Enter on Close or small Pullback.
+- Channel: Trade only in direction of trend unless 2nd attempt at MTR.
+- Always identify the "Magnet" (Prior Day H/L, MM targets).
+
+
+### Step 3: Identify Current 5min Market Structure
 
 Apply Al Brooks methodology strictly:
 
@@ -157,12 +230,19 @@ Output format — concise bullet points using Al Brooks abbreviations:
 • Magnets: [prior H/L, MM targets]
 • Bias: [Bull/Bear/Neutral] — [reasoning citing bar characteristics]
 ```
+#### Output Requirements:
+- HTF‘s rectangle don't need to be displayed on the chart, just need to be referenced in the analysis summary as context.
+- Use ultra-concise bullet points.
+- Use PA abbreviations (TR, TTR, BC, SC, BO, MM, MTR).
+- Evidence must reference Bar/Price characteristics (Body size, Tails, Overlap, Urgency).
+
 
 ### Step 6: Create Annotations
 
 Build the annotations array with appropriate types:
-- Use `range` for: Opening Range, Trading Ranges, legs, channels
-- Use `hline` for: Key S/R levels, MM targets, prior day H/L
+- Use `range` for: Opening Range, Trading Ranges,
+- Use `trend line` for: legs, channels can be identified by trend line and label
+- Use `hline` for: Key S/R levels, MM targets(specify whose MM) , prior day H/L, when multiple leveles are at same price, merger them and display as one hline with multiple labels.
 - Use `label` for: BO points, reversal signals, climax bars
 
 ### Step 7: Submit to Backend
@@ -171,6 +251,12 @@ POST the analysis to `/api/skill/analysis`. The chart will update automatically 
 
 ## Rules (Al Brooks Methodology)
 
+### Core Principle: No Hindsight Bias
+- **⚠️ NEVER use future bars** when analyzing a historical time point
+- **Only analyze with bars available at that moment** — simulate real-time trading
+- Example: Analyzing "market at 11:00" → use bars from 09:30 to 11:00 ONLY
+
+### Trading Rules
 - **Never sell at TR bottom** unless consecutive large bear bars appear
 - **Strong BO**: Enter on close or small pullback (1-2 bars)
 - **Trade channels in trend direction**, unless MTR on 2nd attempt

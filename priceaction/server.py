@@ -399,7 +399,7 @@ async def get_history(
     """
     from ib_data_fetcher import resolution_to_key
     key  = resolution_to_key(resolution)
-    sym  = symbol.replace("_RTH", "").upper()
+    sym  = symbol.upper()
     bars = db.get_bars(sym, key, from_ts=from_ts, to_ts=to_ts)
 
     # Auto-fetch from IB whenever the scroll goes before our earliest stored bar.
@@ -490,7 +490,7 @@ async def get_time():
 
 @app.get("/api/analysis")
 async def get_analysis(symbol: str = Query("MES")):
-    sym = symbol.replace("_RTH", "").upper()
+    sym = symbol.upper()
     if sym == MES_SYM:
         return _latest_analysis or {
             "support_levels": [], "resistance_levels": [],
@@ -531,8 +531,10 @@ async def skill_get_bars(
     symbol: str = Query("MES"),
     resolution: str = Query("5"),
     session: str = Query("RTH"),
-    from_ts: int = Query(0, alias="from"),
-    to_ts: int = Query(9_999_999_999, alias="to"),
+    from_ts: int = Query(None, alias="from"),
+    to_ts: int = Query(None, alias="to"),
+    from_dt: str = Query(None),  # "YYYY-MM-DD HH:MM" or "YYYY-MM-DD"
+    to_dt: str = Query(None),    # "YYYY-MM-DD HH:MM" or "YYYY-MM-DD"
 ):
     """
     Skill-facing K-line data endpoint.
@@ -540,11 +542,66 @@ async def skill_get_bars(
     Returns OHLCV bars as a JSON array (easier for LLM consumption than
     the TradingView UDF arrays-of-columns format).
     Supports session filter: RTH drops bars outside 09:30-16:00 ET.
+    
+    Time parameters (priority: datetime strings > unix timestamps):
+      - from_dt/to_dt: Human-readable datetime strings "YYYY-MM-DD HH:MM" or "YYYY-MM-DD"
+      - from/to: Unix timestamps (legacy, for backward compatibility)
     """
     from ib_data_fetcher import resolution_to_key
+    from datetime import datetime as _dt
+    import zoneinfo
+    
+    # Parse datetime strings if provided (takes priority over timestamps)
+    if from_dt:
+        try:
+            # Parse datetime string and convert to Unix timestamp
+            # Assume ET timezone for trading hours
+            et = zoneinfo.ZoneInfo("America/New_York")
+            if len(from_dt) == 10:  # "YYYY-MM-DD" format
+                dt_obj = _dt.strptime(from_dt, "%Y-%m-%d")
+            else:  # "YYYY-MM-DD HH:MM" format
+                dt_obj = _dt.strptime(from_dt, "%Y-%m-%d %H:%M")
+            # Create timezone-aware datetime in ET timezone
+            dt_obj_et = _dt(dt_obj.year, dt_obj.month, dt_obj.day,
+                           dt_obj.hour, dt_obj.minute, dt_obj.second, tzinfo=et)
+            from_ts = int(dt_obj_et.timestamp())
+        except ValueError as e:
+            return JSONResponse(
+                {"error": f"Invalid from_dt format: {e}. Use 'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM'"},
+                status_code=400
+            )
+    elif from_ts is None:
+        from_ts = 0
+    
+    if to_dt:
+        try:
+            et = zoneinfo.ZoneInfo("America/New_York")
+            if len(to_dt) == 10:  # "YYYY-MM-DD" format, use end of day
+                dt_obj = _dt.strptime(to_dt, "%Y-%m-%d")
+                dt_obj_et = _dt(dt_obj.year, dt_obj.month, dt_obj.day,
+                               23, 59, 59, tzinfo=et)
+            else:  # "YYYY-MM-DD HH:MM" format
+                dt_obj = _dt.strptime(to_dt, "%Y-%m-%d %H:%M")
+                dt_obj_et = _dt(dt_obj.year, dt_obj.month, dt_obj.day,
+                               dt_obj.hour, dt_obj.minute, dt_obj.second, tzinfo=et)
+            to_ts = int(dt_obj_et.timestamp())
+        except ValueError as e:
+            return JSONResponse(
+                {"error": f"Invalid to_dt format: {e}. Use 'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM'"},
+                status_code=400
+            )
+    elif to_ts is None:
+        to_ts = 9_999_999_999
+    
     key = resolution_to_key(resolution)
-    sym = symbol.replace("_RTH", "").upper()
+    sym = symbol.upper()
+    
+    # Debug logging
+    logger.info(f"skill_get_bars: sym={sym}, key={key}, from_ts={from_ts}, to_ts={to_ts}")
+    logger.info(f"  from_dt={from_dt}, to_dt={to_dt}")
+    
     bars = db.get_bars(sym, key, from_ts=from_ts, to_ts=to_ts)
+    logger.info(f"  Retrieved {len(bars)} bars from database")
 
     if session.upper() == "RTH" and key in ("5min", "1min", "3min", "15min", "30min", "60min"):
         from datetime import datetime as _dt, timezone as _tz, timedelta as _td

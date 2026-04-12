@@ -1371,6 +1371,7 @@ function handlePriceMessage(event) {
   } else if (msg.type === 'order_update') {
     updateWorkingOrderRow(msg.order);
   }
+  // cycle_analysis messages are handled by handleCycleAnalysisWS via datafeed callback
 }
 
 // ── Topbar OHLC (disabled - topbar simplified) ───────────────────────────────
@@ -1593,6 +1594,169 @@ function toggleSR(type) {
     }
     document.getElementById('leg-resistance')?.classList.toggle('sr-off', !_showResistance);
   }
+}
+
+// ── Market Cycle Annotations ──────────────────────────────────────────────────
+
+function renderCycleAnnotations(analysis) {
+  if (!_widget) return;
+  let chart;
+  try { chart = _widget.activeChart(); } catch { return; }
+  
+  // Check if analysis is for current symbol
+  const currentSym = _widget.symbolInterval().symbol;
+  if (!currentSym.includes(analysis.symbol)) {
+    console.log('[Cycle] Analysis for', analysis.symbol, 'but chart shows', currentSym);
+    return;
+  }
+  
+  // Clear previous annotations
+  _cycleShapes.forEach(id => { try { chart.removeEntity(id); } catch {} });
+  _cycleShapes = [];
+  
+  if (!analysis.annotations || !analysis.annotations.length) {
+    console.log('[Cycle] No annotations to render');
+    return;
+  }
+  
+  console.log('[Cycle] Rendering', analysis.annotations.length, 'annotations');
+  
+  // Color mapping based on label names (from SKILL.md color palette)
+  const colorMap = {
+    'opening range': 'rgba(33,150,243,0.15)',
+    'bear': 'rgba(244,67,54,0.15)',
+    'bull': 'rgba(76,175,80,0.15)',
+    'reversal': 'rgba(255,152,0,0.15)',
+    'trading range': 'rgba(158,158,158,0.12)',
+    'ttr': 'rgba(158,158,158,0.12)',
+    'tight trading range': 'rgba(158,158,158,0.12)',
+    'channel': 'rgba(156,39,176,0.15)',
+    'measured move': 'rgba(0,188,212,0.15)',
+    'mm': 'rgba(0,188,212,0.15)',
+    'climax': 'rgba(183,28,28,0.2)',
+  };
+  
+  const lineColorMap = {
+    'bear': '#f44336',
+    'bull': '#4caf50',
+    'reversal': '#ff9800',
+    'support': '#26a69a',
+    'resistance': '#ef5350',
+    'mm': '#00bcd4',
+  };
+  
+  analysis.annotations.forEach(ann => {
+    try {
+      if (ann.type === 'range') {
+        // Rectangle shape
+        const labelLower = ann.label.toLowerCase();
+        let color = ann.color || 'rgba(158,158,158,0.12)';
+        // Auto-select color based on label if not specified
+        for (const [key, val] of Object.entries(colorMap)) {
+          if (labelLower.includes(key)) {
+            color = val;
+            break;
+          }
+        }
+        
+        const id = chart.createShape(
+          { time: ann.start_time, price: ann.price_low },
+          {
+            shape: 'rectangle',
+            lock: false,
+            disableSelection: false,
+            overrides: {
+              color: color,
+              transparency: 85,
+              borderColor: color.replace('0.15', '0.4').replace('0.12', '0.4').replace('0.2', '0.5'),
+              borderWidth: 1,
+              extendLeft: false,
+              extendRight: false,
+              showLabel: true,
+              text: ann.label,
+              textcolor: '#fff',
+              fontsize: 11,
+            },
+          }
+        );
+        if (id) {
+          chart.setEntityPoints(id, [
+            { time: ann.start_time, price: ann.price_high },
+            { time: ann.end_time, price: ann.price_low },
+          ]);
+          _cycleShapes.push(id);
+        }
+        
+      } else if (ann.type === 'hline') {
+        // Horizontal line
+        const labelLower = ann.label.toLowerCase();
+        let lineColor = '#888';
+        for (const [key, val] of Object.entries(lineColorMap)) {
+          if (labelLower.includes(key)) {
+            lineColor = val;
+            break;
+          }
+        }
+        
+        const lineStyle = ann.style === 'dashed' ? 1 : ann.style === 'dotted' ? 2 : 0;
+        const id = chart.createShape(
+          { time: ann.start_time, price: ann.price },
+          {
+            shape: 'horizontal_line',
+            lock: false,
+            disableSelection: false,
+            overrides: {
+              linecolor: lineColor,
+              linewidth: 1,
+              linestyle: lineStyle,
+              showPrice: true,
+              showLabel: true,
+              text: ann.label,
+              textcolor: lineColor,
+              fontsize: 10,
+            },
+          }
+        );
+        if (id) _cycleShapes.push(id);
+        
+      } else if (ann.type === 'label') {
+        // Text label
+        const labelLower = ann.label.toLowerCase();
+        let textColor = '#fff';
+        let bgColor = '#666';
+        for (const [key, val] of Object.entries(lineColorMap)) {
+          if (labelLower.includes(key)) {
+            bgColor = val;
+            break;
+          }
+        }
+        
+        const id = chart.createShape(
+          { time: ann.start_time, price: ann.price },
+          {
+            shape: 'text',
+            lock: false,
+            disableSelection: false,
+            zOrder: 'top',
+            overrides: {
+              text: ann.label,
+              fontsize: 12,
+              color: textColor,
+              backgroundColor: bgColor,
+              borderColor: bgColor,
+              transparency: 20,
+              bold: true,
+            },
+          }
+        );
+        if (id) _cycleShapes.push(id);
+      }
+    } catch (e) {
+      console.error('[Cycle] Failed to render annotation:', ann, e);
+    }
+  });
+  
+  console.log('[Cycle] Rendered', _cycleShapes.length, 'shapes');
 }
 
 // ── Order Entry Panel ─────────────────────────────────────────────────────────
@@ -2159,7 +2323,7 @@ function drawOneAnalysis(chart, analysis) {
         const id = chart.createMultipointShape(
           [{ time: ann.start_time, price: ann.price_low || 0 },
            { time: ann.end_time,   price: ann.price_high || 0 }],
-          { shape: 'rectangle', lock: true, disableSelection: true, disableSave: true,
+          { shape: 'rectangle', lock: false, disableSelection: false, disableSave: true,
             zOrder: 'top',
             overrides: {
               backgroundColor: ann.color || c.bg,
@@ -2176,7 +2340,7 @@ function drawOneAnalysis(chart, analysis) {
         const c = _mcColor(ann.label);
         const id = chart.createShape(
           { price: ann.price, time: ann.start_time || 0 },
-          { shape: 'horizontal_line', lock: true, disableSelection: true, disableSave: true,
+          { shape: 'horizontal_line', lock: false, disableSelection: false, disableSave: true,
             zOrder: 'top',
             overrides: {
               linecolor: ann.color || c.text,
@@ -2192,7 +2356,7 @@ function drawOneAnalysis(chart, analysis) {
         const c = _mcColor(ann.label);
         const id = chart.createShape(
           { time: ann.start_time, price: ann.price },
-          { shape: 'text', lock: true, disableSelection: true, disableSave: true,
+          { shape: 'text', lock: false, disableSelection: false, disableSave: true,
             zOrder: 'top',
             overrides: {
               text: ann.label,
@@ -2222,7 +2386,11 @@ function handleCycleAnalysisWS(msg) {
     _mcAnalyses.unshift(msg.analysis);
     renderAnalysisTable();
     if (msg.analysis.active && _widget) {
-      try { drawOneAnalysis(_widget.activeChart(), msg.analysis); } catch {}
+      try {
+        const chart = _widget.activeChart();
+        drawOneAnalysis(chart, msg.analysis);
+        chart.selectLineTool('cursor');
+      } catch {}
     }
   } else if (msg.type === 'cycle_analysis_toggle') {
     const rec = _mcAnalyses.find(a => a.id === msg.id);
@@ -2266,6 +2434,45 @@ async function deleteAnalysis(id) {
   }
 }
 
+// Format analysis time period (bar_from - bar_to) to readable string
+function _formatAnalysisPeriod(bar_from, bar_to) {
+  if (!bar_from || !bar_to) return '';
+  
+  const etOptions = { 
+    timeZone: 'America/New_York',
+    year: 'numeric', 
+    month: '2-digit', 
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false
+  };
+  
+  const fromDate = new Date(bar_from * 1000);
+  const toDate = new Date(bar_to * 1000);
+  
+  const fromStr = fromDate.toLocaleString('en-US', etOptions);
+  const toStr = toDate.toLocaleString('en-US', etOptions);
+  
+  // Extract date and time parts
+  const [fromDatePart, fromTimePart] = fromStr.split(', ');
+  const [toDatePart, toTimePart] = toStr.split(', ');
+  
+  // Format date as YYYY-MM-DD
+  const [fromMonth, fromDay, fromYear] = fromDatePart.split('/');
+  const [toMonth, toDay, toYear] = toDatePart.split('/');
+  const fromFormatted = `${fromYear}-${fromMonth}-${fromDay}`;
+  const toFormatted = `${toYear}-${toMonth}-${toDay}`;
+  
+  // Same day: "2026-04-08 09:30-11:00"
+  if (fromFormatted === toFormatted) {
+    return `${fromFormatted} ${fromTimePart}-${toTimePart}`;
+  }
+  
+  // Different days: "2026-04-08 09:30 - 2026-04-09 11:00"
+  return `${fromFormatted} ${fromTimePart} - ${toFormatted} ${toTimePart}`;
+}
+
 function _formatSummaryHTML(text) {
   if (!text) return '<span style="color:var(--text-faint)">No summary</span>';
   const esc = text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
@@ -2304,7 +2511,8 @@ function showSummaryModal(id) {
   const title = document.getElementById('mc-modal-title');
   const body = document.getElementById('mc-modal-body');
   const label = [rec.symbol, rec.timeframe ? rec.timeframe + 'min' : '', rec.session].filter(Boolean).join(' · ');
-  title.textContent = `Analysis — ${label} ${rec.created_at ? rec.created_at.substring(0, 10) : ''}`;
+  const period = _formatAnalysisPeriod(rec.bar_from, rec.bar_to);
+  title.textContent = `Analysis — ${label} ${period}`;
   body.innerHTML = _formatSummaryHTML(rec.summary);
   // Reset position to center
   modal.style.transform = '';
@@ -2353,12 +2561,13 @@ function renderAnalysisTable() {
   if (!tbody) return;
 
   if (!_mcAnalyses.length) {
-    tbody.innerHTML = '<tr><td colspan="7"><div class="empty-table">No market cycle analyses</div></td></tr>';
+    tbody.innerHTML = '<tr><td colspan="8"><div class="empty-table">No market cycle analyses</div></td></tr>';
     return;
   }
 
   tbody.innerHTML = _mcAnalyses.map(a => {
-    const created = a.created_at ? a.created_at.replace('T', ' ').substring(0, 19) : '';
+    const period = _formatAnalysisPeriod(a.bar_from, a.bar_to);
+    const created = a.created_at ? a.created_at.replace('T', ' ').substring(0, 16) : '';
     const annCount = (a.annotations || []).length;
     const activeClass = a.active ? 'mc-active' : 'mc-inactive';
     const toggleIcon = a.active
@@ -2373,6 +2582,7 @@ function renderAnalysisTable() {
     return `<tr class="${activeClass}">
       <td>${created}</td>
       <td>${a.symbol || ''}</td>
+      <td>${period}</td>
       <td>${a.timeframe || ''}</td>
       <td>${a.session || ''}</td>
       <td class="mc-summary-cell" onclick="showSummaryModal(${a.id})" title="Click to view full summary">${summary}</td>

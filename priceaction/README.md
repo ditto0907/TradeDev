@@ -165,38 +165,63 @@ graph LR
 
 ### 1.7 市场周期分析模块 (Market Cycle Analysis)
 
-基于 Al Brooks 价格行为方法论的 LLM 辅助市场周期分析系统。通过 Skill API 供 LLM Agent 读取 K 线数据、执行分析，并将标注结果回写到图表上。
+基于 **Al Brooks 价格行为方法论**的 LLM 辅助市场周期分析系统。通过 Skill API 供 LLM Agent 读取 K 线数据、执行分析，并将标注结果实时回写到图表上。
+
+**核心特性**：
+- ✅ **人类可读时间**：支持 `"2026-04-08 09:30"` 格式，自动ET时区转换
+- ✅ **Hindsight Bias 防护**：分析历史时强制限制数据范围
+- ✅ **实时图表同步**：WebSocket 推送，annotations 自动渲染
+- ✅ **智能颜色映射**：根据 PA 术语自动选择颜色（Bull=绿，Bear=红）
+- ✅ **多时间框架**：支持 5min/15min/1H/1D 联合分析
 
 | 功能 | 函数 / 组件 | 调用接口 |
 |------|------------|--------|
 | 加载分析记录 | `loadCycleAnalyses()` | `GET /api/skill/analyses` |
-| 绘制图表标注 (rectangle/hline/label) | `drawOneAnalysis()` / `drawAllActiveAnalyses()` | — |
-| 移除图表标注 | `removeOneAnalysis()` | — |
+| 实时接收新分析 | `handlePriceMessage()` | WebSocket `type: cycle_analysis` |
+| 渲染图表标注 (range/hline/label) | `renderCycleAnnotations(analysis)` | — |
+| 清除图表标注 | `_cycleShapes` 数组管理 | — |
 | 显隐切换分析 | `toggleAnalysisActive(id)` | `PUT /api/skill/analyses/{id}/active` |
 | 删除分析记录 | `deleteAnalysis(id)` | `DELETE /api/skill/analyses/{id}` |
-| 分析列表渲染 | `renderAnalysisTable()` | — |
-| WebSocket 实时同步 | `handleCycleAnalysisWS(msg)` | WebSocket `cycle_analysis*` |
+| 分析列表渲染 | `renderAnalysisTable()` | 显示 Created / Analysis Period 列 |
+| 查看分析详情 | `showSummaryModal(id)` | Modal 弹窗展示完整 summary |
 
 **标注类型**：
 
-| 类型 | 图表元素 | 用途 |
-|------|---------|------|
-| `range` | 矩形区域 (rectangle) | 标记市场阶段 (TR, BO, Channel 等) |
-| `hline` | 水平线 | 标记关键价格 (S/R, MM 目标) |
-| `label` | 文字标签 | 标记特定事件或注释 |
+| 类型 | 图表元素 | 必填字段 | 用途 |
+|------|---------|---------|------|
+| `range` | 矩形区域 (rectangle) | `start_time`, `end_time`, `price_high`, `price_low` | 标记市场阶段 (OR, TR, TTR, Leg, Channel) |
+| `hline` | 水平线 | `price`, `start_time`, `style` | 标记关键价格 (S/R, MM 目标, 前日高低点) |
+| `label` | 文字标签 | `start_time`, `price` | 标记特定事件 (BO点, Reversal, SC) |
 
-**颜色体系** (Al Brooks PA 术语映射)：
+**style 样式**（hline专用）：`solid`（实线）, `dashed`（虚线）, `dotted`（点线）
 
-| 标签 | 颜色 |
-|------|------|
-| Opening Range | 蓝色 |
-| Bear Leg / Bear Breakout | 红色 |
-| Bull Leg / Bull Breakout | 绿色 |
-| Reversal / Double Bottom/Top | 橙色 |
-| Trading Range / TTR | 灰色 |
-| Channel | 紫色 |
-| Measured Move | 青色 |
-| Climax | 深红 |
+**颜色体系** (Al Brooks PA 术语自动映射)：
+
+| 标签关键词 | 颜色 | 透明度 | 用途 |
+|-----------|------|--------|------|
+| opening range | 蓝色 `rgba(33,150,243,0.15)` | 15% | OR 区间 |
+| bear / 卖出 | 红色 `rgba(244,67,54,0.15)` | 15% | Bear Leg/BO/Climax |
+| bull / 买入 | 绿色 `rgba(76,175,80,0.15)` | 15% | Bull Leg/BO |
+| reversal / double | 橙色 `rgba(255,152,0,0.15)` | 15% | 反转信号 (MTR, DT, DB) |
+| trading range / ttr / tight | 灰色 `rgba(158,158,158,0.12)` | 12% | 盘整区间 |
+| channel | 紫色 `rgba(156,39,176,0.15)` | 15% | 通道 (BC/SC) |
+| measured move / mm | 青色 `rgba(0,188,212,0.15)` | 15% | 测量目标 |
+| climax | 深红 `rgba(183,28,28,0.2)` | 20% | 高潮走势 |
+
+**线条颜色**（hline专用）：bear=#f44336, bull=#4caf50, support=#26a69a, resistance=#ef5350, mm=#00bcd4
+
+**分析表格列**：
+
+| 列名 | 说明 | 格式 |
+|------|------|------|
+| Created | 分析任务创建时间 | `YYYY-MM-DD HH:mm` |
+| Symbol | 交易品种 | `MNQ`, `MES`, etc. |
+| Analysis Period | 分析目标时间段 | `2026-04-08 09:30-11:00` |
+| TF | 时间周期 | `5`, `15`, `60`, `1D` |
+| Session | 交易时段 | `RTH` / `ETH` |
+| Summary | 分析摘要预览 | 点击查看完整内容 |
+| Shapes | 标注数量 | 整数 |
+| Actions | 操作按钮 | 显隐切换 / 删除 |
 
 ---
 
@@ -246,13 +271,40 @@ graph LR
 
 ### 2.5 Skill API (LLM Agent 接口)
 
+为 LLM Agent 设计的专用接口，用于市场周期分析。支持人类可读的日期时间字符串，自动处理 ET 时区转换。
+
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/api/skill/bars?symbol=MES&timeframe=5min&limit=200` | 读取 RTH K 线数据 (09:30–16:00 ET) |
+| GET | `/api/skill/bars` | 读取 K 线数据（支持datetime字符串）|
 | POST | `/api/skill/analysis` | 保存分析结果 + 标注 (WebSocket 广播) |
 | GET | `/api/skill/analyses?symbol=&timeframe=&active_only=false` | 查询分析记录列表 |
 | PUT | `/api/skill/analyses/{id}/active?active=true` | 切换分析显隐 |
 | DELETE | `/api/skill/analyses/{id}` | 删除分析记录 |
+
+**GET /api/skill/bars 参数**：
+
+| 参数 | 类型 | 默认值 | 说明 |
+|------|------|-------|------|
+| `symbol` | string | MES | 交易品种 (MES/MNQ/MGC/NK225MC) |
+| `resolution` | string | 5 | 时间周期 (5/15/30/60/1D) |
+| `session` | string | RTH | 交易时段 (RTH=09:30-16:00 ET, ETH=全天) |
+| `from_dt` | string | - | 起始时间 "YYYY-MM-DD HH:MM" (ET) |
+| `to_dt` | string | - | 结束时间 "YYYY-MM-DD HH:MM" (ET) |
+| `from` | int | 0 | 起始Unix时间戳（秒，legacy） |
+| `to` | int | 9999999999 | 结束Unix时间戳（秒，legacy） |
+
+**⚠️ Hindsight Bias 防护**：
+- 分析历史时间点时，**必须**将 `to_dt` 设置为该时间点
+- 例如：分析 "11:00的市场" → `to_dt="2026-04-08 11:00"`
+- **禁止**获取目标时间之后的bar（违反Al Brooks无后见之明原则）
+
+**示例**：
+```bash
+# 分析 2026-04-08 MNQ 09:30-11:00 市场周期
+curl "http://localhost:8000/api/skill/bars?symbol=MNQ&resolution=5&session=RTH&from_dt=2026-04-08%2009:30&to_dt=2026-04-08%2011:00"
+
+# 返回19根5分钟bar（09:30, 09:35, ..., 11:00）
+```
 
 ### 2.6 WebSocket
 
@@ -517,3 +569,37 @@ open http://localhost:8000
 | 数据库 | SQLite (WAL mode) |
 | 实时通信 | WebSocket |
 | 外部同步 | Google Sheets API |
+
+---
+
+## 更新日志
+
+### 2026-04-12 — Skill API & Market Cycle Analysis 增强
+
+**新功能**：
+- ✅ Skill API 支持人类可读日期时间字符串 (`from_dt`/`to_dt` 参数)
+- ✅ 自动 ET 时区转换（America/New_York），无需手动计算 Unix 时间戳
+- ✅ Hindsight Bias 防护：分析历史时间点时强制数据截断
+- ✅ 前端实时渲染 cycle_analysis annotations（range/hline/label）
+- ✅ 智能颜色映射：根据 Al Brooks PA 术语自动选择颜色
+- ✅ 分析表格显示 Analysis Period（目标时间段）和 Created（创建时间）
+
+**修复**：
+- 🐛 时区转换 bug：修复 `datetime.replace(tzinfo=et)` 导致的12小时偏移
+- 🐛 前端 WebSocket 消息处理：添加 `cycle_analysis` 类型处理
+- 🐛 表格列顺序调整：Created 列移至最左，Analysis Period 改名并移至 Symbol 后
+
+**API 变更**：
+```bash
+# 旧方法（仍支持）
+GET /api/skill/bars?symbol=MNQ&resolution=5&from=1775655000&to=1775660400
+
+# 新方法（推荐）
+GET /api/skill/bars?symbol=MNQ&resolution=5&from_dt=2026-04-08 09:30&to_dt=2026-04-08 11:00
+```
+
+**技术改进**：
+- 使用 `datetime(..., tzinfo=et)` 替代 `replace(tzinfo=et)` 进行时区感知构造
+- WebSocket `cycle_analysis` 消息自动触发图表标注渲染
+- 前端 `renderCycleAnnotations()` 函数处理3种annotation类型
+- Symbol 匹配验证确保annotations仅显示在对应图表

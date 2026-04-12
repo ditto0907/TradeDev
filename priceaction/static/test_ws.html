@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>WebSocket Test</title>
+  <style>
+    body { font-family: monospace; padding: 20px; background: #1e1e1e; color: #d4d4d4; }
+    #log { white-space: pre-wrap; }
+    .msg { margin: 10px 0; padding: 10px; background: #2d2d2d; border-left: 3px solid #4caf50; }
+    .cycle { border-left-color: #00bcd4; }
+  </style>
+</head>
+<body>
+  <h1>WebSocket Message Monitor</h1>
+  <button onclick="triggerAnalysis()">Trigger Analysis POST</button>
+  <div id="log"></div>
+
+  <script>
+    const log = document.getElementById('log');
+    
+    function addLog(text, type = '') {
+      const div = document.createElement('div');
+      div.className = 'msg ' + type;
+      div.textContent = new Date().toLocaleTimeString() + ' - ' + text;
+      log.appendChild(div);
+      log.scrollTop = log.scrollHeight;
+    }
+    
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    const ws = new WebSocket(`${proto}://${location.host}/ws/realtime`);
+    
+    ws.onopen = () => {
+      addLog('✓ WebSocket connected');
+    };
+    
+    ws.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data);
+        const type = msg.type || 'unknown';
+        
+        if (type === 'cycle_analysis') {
+          addLog(`✓ cycle_analysis received!\n  Symbol: ${msg.analysis.symbol}\n  Annotations: ${msg.analysis.annotations?.length || 0}`, 'cycle');
+          console.log('cycle_analysis details:', msg.analysis);
+        } else if (type === 'snapshot') {
+          addLog(`snapshot: ${msg.bars_5min?.length || 0} bars`);
+        } else if (type === 'bar') {
+          addLog(`bar update: ${msg.bar_size}`);
+        } else {
+          addLog(`${type}: ${JSON.stringify(msg).substring(0, 100)}`);
+        }
+      } catch (e) {
+        addLog(`parse error: ${e.message}`);
+      }
+    };
+    
+    ws.onerror = (err) => {
+      addLog('✗ WebSocket error: ' + err);
+    };
+    
+    ws.onclose = () => {
+      addLog('✗ WebSocket closed');
+    };
+    
+    async function triggerAnalysis() {
+      try {
+        const response = await fetch('/api/skill/analyses?symbol=MNQ&active_only=true');
+        const analyses = await response.json();
+        
+        if (analyses.length === 0) {
+          addLog('No active MNQ analyses found');
+          return;
+        }
+        
+        const analysis = analyses[0];
+        addLog(`Re-posting analysis ID ${analysis.id}`);
+        
+        const postResp = await fetch('/api/skill/analysis', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            symbol: analysis.symbol,
+            timeframe: analysis.timeframe,
+            session: analysis.session,
+            bar_from: analysis.bar_from,
+            bar_to: analysis.bar_to,
+            summary: analysis.summary,
+            annotations: analysis.annotations
+          })
+        });
+        
+        const result = await postResp.json();
+        addLog(`✓ Posted, new ID: ${result.id}`);
+      } catch (e) {
+        addLog(`✗ Trigger failed: ${e.message}`);
+      }
+    }
+  </script>
+</body>
+</html>
