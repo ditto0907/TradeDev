@@ -43,11 +43,14 @@ let _cycleShapes      = [];
 let _showSupport      = false;
 let _showResistance   = false;
 
-// Trade markers
-let _tradeShapes  = [];
-let _showTrades   = true;
-let _tradesLoaded = false;
-let _uploadedTrades = null;  // trades from CSV upload (overrides file-based)
+// Trade markers  — per-file management
+let _tradeFiles     = {};   // { filename: { trades: [], shown: false, expanded: true } }
+let _tradeShapesByFile = {};  // { filename: [shapes] }
+let _showTrades     = false;  // global chart visibility (legend toggle)
+
+// Market cycle analysis
+let _mcAnalyses     = [];   // full records from backend
+let _mcShapes       = {};   // analysis_id → [entity_id, ...]
 
 // Right-click order price — updated via crossHairMoved
 window._chartCursorPrice = null;
@@ -91,6 +94,27 @@ function createSaveLoadAdapter() {
       await fetch(`/api/charts/${id}`, { method: 'DELETE' });
     },
     async saveChart(chartData) {
+      // Strip transient shapes (execution arrows, programmatic trend lines) from
+      // the chart layout before saving. These are redrawn from live data on every
+      // page load, so persisting them causes stale duplicates on reload.
+      let content = chartData.content;
+      try {
+        const layout = JSON.parse(content);
+        if (layout.charts) {
+          layout.charts.forEach(chart => {
+            (chart.panes || []).forEach(pane => {
+              if (pane.sources) {
+                pane.sources = pane.sources.filter(
+                  s => s.type !== 'LineToolFlagMark' && s.type !== 'LineToolTrendLine'
+                );
+              }
+            });
+          });
+          content = JSON.stringify(layout);
+        }
+      } catch (e) {
+        console.warn('[SaveChart] Failed to strip transient shapes:', e);
+      }
       const res = await fetch('/api/charts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -99,7 +123,7 @@ function createSaveLoadAdapter() {
           name: chartData.name,
           symbol: chartData.symbol,
           resolution: chartData.resolution,
-          content: chartData.content,
+          content,
           timestamp: Math.floor(Date.now() / 1000),
         }),
       });
@@ -181,6 +205,8 @@ function initChart() {
     updateCycleBadge(analysis.market_cycle);
     updateSRPanel(analysis);
   });
+
+  datafeed.setCycleAnalysisCallback(handleCycleAnalysisWS);
 
   _widget = new TradingView.widget({
     container:    'tv-chart',
@@ -352,11 +378,14 @@ function initChart() {
       })
       .catch(e => console.warn('Analysis fetch error:', e));
 
-    // Load trade markers
-    if (_showTrades) initTradeMarkers();
+    // Load trade file list (don't show on chart by default)
+    loadTradeFileList();
 
     // Load existing working orders
     loadWorkingOrders();
+
+    // Load market cycle analyses
+    loadCycleAnalyses();
   });
 
   connectPriceFeed(datafeed);
@@ -939,23 +968,90 @@ function updatePositionPanel() {
   `;
 }
 
-// ── Trade Markers ─────────────────────────────────────────────────────────────
+// ── Trade Markers — Per-file Management ───────────────────────────────────────
 
-async function initTradeMarkers() {
+async function loadTradeFileList() {
   try {
-    let trades;
-    if (_uploadedTrades) {
-      trades = _uploadedTrades;
-    } else {
-      const res = await fetch('/api/trades');
-      trades = await res.json();
-    }
-    _tradesLoaded = true;
-    drawTradeMarkers(trades);
-    const countEl = document.getElementById('trade-count');
-    if (countEl) countEl.textContent = trades.length ? `${trades.length}` : '';
+    const res = await fetch('/api/trades/files');
+    const files = await res.json();
+    // Load file list and eagerly fetch trades for each file
+    const fetches = files.map(async f => {
+      if (!_tradeFiles[f.name]) {
+        _tradeFiles[f.name] = { trades: null, shown: false, expanded: true };
+      }
+      if (!_tradeFiles[f.name].trades) {
+        await loadTradesForFile(f.name);
+      }
+    });
+    await Promise.all(fetches);
+    renderTradeTable();
   } catch (e) {
-    console.warn('Trade markers load error:', e);
+    console.warn('Trade file list load error:', e);
+  }
+}
+
+function toggleFileExpand(filename) {
+  const entry = _tradeFiles[filename];
+  if (!entry) return;
+  entry.expanded = !entry.expanded;
+  renderTradeTable();
+}
+
+async function loadTradesForFile(filename) {
+  try {
+    const res = await fetch(`/api/trades/file/${encodeURIComponent(filename)}`);
+    const trades = await res.json();
+    if (_tradeFiles[filename]) {
+      _tradeFiles[filename].trades = trades;
+    }
+    return trades;
+  } catch (e) {
+    console.warn(`Trade file load error (${filename}):`, e);
+    return [];
+  }
+}
+
+async function toggleFileOnChart(filename) {
+  const entry = _tradeFiles[filename];
+  if (!entry) return;
+  entry.shown = !entry.shown;
+
+  if (entry.shown) {
+    // Load trades if not yet loaded
+    if (!entry.trades) await loadTradesForFile(filename);
+    drawTradeMarkersForFile(filename, entry.trades || []);
+    // Ensure global toggle is on
+    _showTrades = true;
+    document.getElementById('leg-trades')?.classList.remove('sr-off');
+  } else {
+    clearTradeShapesForFile(filename);
+    // Check if any file is still shown
+    const anyShown = Object.values(_tradeFiles).some(f => f.shown);
+    if (!anyShown) {
+      _showTrades = false;
+      document.getElementById('leg-trades')?.classList.add('sr-off');
+    }
+  }
+  _updateTradeCount();
+  renderTradeTable();
+}
+
+async function deleteTradeFile(filename) {
+  try {
+    await fetch(`/api/trades/file/${encodeURIComponent(filename)}`, { method: 'DELETE' });
+    clearTradeShapesForFile(filename);
+    delete _tradeFiles[filename];
+    delete _tradeShapesByFile[filename];
+    const anyShown = Object.values(_tradeFiles).some(f => f.shown);
+    if (!anyShown) {
+      _showTrades = false;
+      document.getElementById('leg-trades')?.classList.add('sr-off');
+    }
+    _updateTradeCount();
+    renderTradeTable();
+    console.log(`[Trades] Deleted file: ${filename}`);
+  } catch (e) {
+    console.warn(`Trade file delete error (${filename}):`, e);
   }
 }
 
@@ -966,59 +1062,50 @@ async function handleTradeCSVUpload(input) {
     const formData = new FormData();
     formData.append('file', file);
     const res = await fetch('/api/trades/upload', { method: 'POST', body: formData });
-    const trades = await res.json();
-    if (!trades.length) {
+    const data = await res.json();
+    if (!data.trades?.length) {
       alert('No filled trades found in CSV.');
       return;
     }
-    _uploadedTrades = trades;
+    const filename = data.filename;
+    _tradeFiles[filename] = { trades: data.trades, shown: true, expanded: true };
+    drawTradeMarkersForFile(filename, data.trades);
     _showTrades = true;
     document.getElementById('leg-trades')?.classList.remove('sr-off');
-    document.getElementById('trade-clear-btn').style.display = '';
-    drawTradeMarkers(trades);
-    const countEl = document.getElementById('trade-count');
-    if (countEl) countEl.textContent = `${trades.length}`;
-    console.log(`[Trades] Uploaded ${trades.length} trades from ${file.name}`);
+    _updateTradeCount();
+    renderTradeTable();
+    console.log(`[Trades] Uploaded ${data.trades.length} trades from ${filename}`);
   } catch (e) {
     console.warn('Trade CSV upload error:', e);
     alert('Failed to parse CSV file.');
   }
-  input.value = '';  // reset so same file can be re-uploaded
+  input.value = '';
 }
 
-function clearUploadedTrades() {
-  _uploadedTrades = null;
-  _tradesLoaded = false;
-  // Clear drawn shapes
-  if (_widget) {
+function clearTradeShapesForFile(filename) {
+  const shapes = _tradeShapesByFile[filename];
+  if (!shapes || !_widget) return;
+  let chart;
+  try { chart = _widget.activeChart(); } catch { return; }
+  shapes.forEach(s => {
     try {
-      const chart = _widget.activeChart();
-      _tradeShapes.forEach(obj => {
-        try { if (obj && typeof obj.remove === 'function') obj.remove(); } catch {}
-        try { if (typeof obj === 'string' || typeof obj === 'number') chart.removeEntity(obj); } catch {}
-      });
+      if (s.type === 'exec') { s.obj.remove(); }
+      else if (s.type === 'entity') { chart.removeEntity(s.id); }
     } catch {}
-  }
-  _tradeShapes = [];
-  document.getElementById('trade-clear-btn').style.display = 'none';
-  const countEl = document.getElementById('trade-count');
-  if (countEl) countEl.textContent = '';
-  console.log('[Trades] Cleared uploaded trades');
+  });
+  _tradeShapesByFile[filename] = [];
 }
 
-function drawTradeMarkers(trades) {
+function drawTradeMarkersForFile(filename, trades) {
   if (!_widget) return;
   let chart;
   try { chart = _widget.activeChart(); } catch { return; }
 
-  // Clear existing — execution shapes use .remove(), entity shapes use removeEntity()
-  _tradeShapes.forEach(obj => {
-    try { if (obj && typeof obj.remove === 'function') obj.remove(); } catch {}
-    try { if (typeof obj === 'string' || typeof obj === 'number') chart.removeEntity(obj); } catch {}
-  });
-  _tradeShapes = [];
+  // Clear existing shapes for this file
+  clearTradeShapesForFile(filename);
+  _tradeShapesByFile[filename] = [];
 
-  if (!_showTrades || !trades.length) return;
+  if (!trades.length) return;
 
   trades.forEach(trade => {
     try {
@@ -1026,7 +1113,6 @@ function drawTradeMarkers(trades) {
       const entryDir   = isLong ? 'buy' : 'sell';
       const entryColor = isLong ? '#26a69a' : '#ef5350';
 
-      // ── Entry execution mark ────────────────────────────────────────────
       const entryExec = chart.createExecutionShape()
         .setTime(trade.entry_time)
         .setPrice(trade.entry_price)
@@ -1036,9 +1122,8 @@ function drawTradeMarkers(trades) {
         .setTextColor(entryColor)
         .setArrowHeight(14)
         .setFont('bold 11px Arial');
-      _tradeShapes.push(entryExec);
+      _tradeShapesByFile[filename].push({ type: 'exec', obj: entryExec });
 
-      // ── Exit execution mark ─────────────────────────────────────────────
       if (trade.exit_time != null && trade.exit_price != null) {
         const exitDir   = isLong ? 'sell' : 'buy';
         const exitColor = isLong ? '#ef5350' : '#26a69a';
@@ -1055,9 +1140,8 @@ function drawTradeMarkers(trades) {
           .setTextColor(exitColor)
           .setArrowHeight(14)
           .setFont('bold 11px Arial');
-        _tradeShapes.push(exitExec);
+        _tradeShapesByFile[filename].push({ type: 'exec', obj: exitExec });
 
-        // ── Connecting trend line between entry and exit ──────────────────
         const lineColor = isLong ? 'rgba(38,166,154,0.50)' : 'rgba(239,83,80,0.50)';
         const lineId = chart.createMultipointShape(
           [
@@ -1066,17 +1150,17 @@ function drawTradeMarkers(trades) {
           ],
           {
             shape:            'trend_line',
-            lock:             true,
             disableSelection: true,
+            disableSave:      true,
             overrides: {
               linecolor:  lineColor,
               linewidth:  2,
-              linestyle:  2,        // dashed
+              linestyle:  2,
               showLabel:  false,
             },
           }
         );
-        if (lineId) _tradeShapes.push(lineId);
+        if (lineId) _tradeShapesByFile[filename].push({ type: 'entity', id: lineId });
       }
     } catch (e) {
       console.debug('Trade marker draw error:', e);
@@ -1089,24 +1173,164 @@ function toggleTrades() {
   document.getElementById('leg-trades')?.classList.toggle('sr-off', !_showTrades);
 
   if (!_showTrades) {
-    if (_widget) {
-      try {
-        const chart = _widget.activeChart();
-        _tradeShapes.forEach(obj => {
-          try { if (obj && typeof obj.remove === 'function') obj.remove(); } catch {}
-          try { if (typeof obj === 'string' || typeof obj === 'number') chart.removeEntity(obj); } catch {}
-        });
-      } catch {}
-    }
-    _tradeShapes = [];
+    // Hide all files from chart
+    Object.keys(_tradeFiles).forEach(fn => {
+      if (_tradeFiles[fn].shown) {
+        _tradeFiles[fn].shown = false;
+        clearTradeShapesForFile(fn);
+      }
+    });
   } else {
-    if (!_tradesLoaded) {
-      initTradeMarkers();
+    // Show all files that have loaded trades
+    Object.keys(_tradeFiles).forEach(async fn => {
+      const entry = _tradeFiles[fn];
+      if (!entry.trades) await loadTradesForFile(fn);
+      entry.shown = true;
+      drawTradeMarkersForFile(fn, entry.trades || []);
+    });
+  }
+  _updateTradeCount();
+  renderTradeTable();
+}
+
+function _updateTradeCount() {
+  const countEl = document.getElementById('trade-count');
+  if (!countEl) return;
+  let total = 0;
+  Object.values(_tradeFiles).forEach(f => {
+    if (f.shown && f.trades) total += f.trades.length;
+  });
+  countEl.textContent = total ? `${total}` : '';
+}
+
+function locateTradeOnChart(entryTime, exitTime) {
+  if (!_widget) return;
+  let chart;
+  try { chart = _widget.activeChart(); } catch { return; }
+  // Show 30min padding on each side
+  const from = entryTime - 1800;
+  const to = (exitTime || entryTime) + 1800;
+  chart.setVisibleRange({ from, to });
+}
+
+function renderTradeTable() {
+  const tbody = document.getElementById('history-tbody');
+  if (!tbody) return;
+  const info = document.getElementById('trade-panel-info');
+  const filenames = Object.keys(_tradeFiles).sort();
+
+  if (!filenames.length) {
+    tbody.innerHTML = '<tr><td colspan="7"><div class="empty-table">No trade logs — upload a CSV to view</div></td></tr>';
+    if (info) info.textContent = '';
+    return;
+  }
+
+  // Compute global stats
+  let totalPnl = 0, wins = 0, losses = 0, totalCount = 0, totalWinAmt = 0, totalLossAmt = 0;
+  filenames.forEach(fn => {
+    const f = _tradeFiles[fn];
+    if (f.trades) {
+      totalCount += f.trades.length;
+      f.trades.forEach(t => {
+        if (t.pnl != null) {
+          totalPnl += t.pnl;
+          if (t.pnl >= 0) { wins++; totalWinAmt += t.pnl; }
+          else { losses++; totalLossAmt += Math.abs(t.pnl); }
+        }
+      });
+    }
+  });
+  if (info) {
+    if (totalCount > 0) {
+      const wr = (wins + losses) > 0 ? ((wins / (wins + losses)) * 100).toFixed(0) : '—';
+      const avgWin = wins > 0 ? totalWinAmt / wins : 0;
+      const avgLoss = losses > 0 ? totalLossAmt / losses : 0;
+      const rr = avgLoss > 0 ? (avgWin / avgLoss).toFixed(2) : '—';
+      info.innerHTML = `<span style="color:var(--text-dim)">${totalCount} trades</span>` +
+        ` &nbsp;|&nbsp; <span style="color:${totalPnl >= 0 ? 'var(--green)' : 'var(--red)'}">P&L: ${totalPnl >= 0 ? '+' : ''}$${totalPnl.toFixed(0)}</span>` +
+        ` &nbsp;|&nbsp; WR: ${wr}% (${wins}W ${losses}L)` +
+        ` &nbsp;|&nbsp; RR: ${rr}`;
     } else {
-      // Re-fetch and redraw
-      initTradeMarkers();
+      info.textContent = `${filenames.length} file(s)`;
     }
   }
+
+  let html = '';
+  filenames.forEach(fn => {
+    const f = _tradeFiles[fn];
+    const isShown = f.shown;
+    const isExpanded = f.expanded !== false;
+    const count = f.trades ? f.trades.length : '—';
+
+    // Per-file stats
+    let fPnl = 0, fWins = 0, fLosses = 0, fWinAmt = 0, fLossAmt = 0;
+    if (f.trades) {
+      f.trades.forEach(t => {
+        if (t.pnl != null) {
+          fPnl += t.pnl;
+          if (t.pnl >= 0) { fWins++; fWinAmt += t.pnl; } else { fLosses++; fLossAmt += Math.abs(t.pnl); }
+        }
+      });
+    }
+    const fWr = (fWins + fLosses) > 0 ? ((fWins / (fWins + fLosses)) * 100).toFixed(0) : '—';
+    const fAvgWin = fWins > 0 ? fWinAmt / fWins : 0;
+    const fAvgLoss = fLosses > 0 ? fLossAmt / fLosses : 0;
+    const fRr = fAvgLoss > 0 ? (fAvgWin / fAvgLoss).toFixed(2) : '—';
+    const fStatsHtml = f.trades && f.trades.length
+      ? `<span style="color:var(--text-dim)">${count} trades</span>` +
+        ` &nbsp;|&nbsp; <span style="color:${fPnl >= 0 ? 'var(--green)' : 'var(--red)'}">P&L: ${fPnl >= 0 ? '+' : ''}$${fPnl.toFixed(0)}</span>` +
+        ` &nbsp;|&nbsp; <span style="color:var(--text-dim)">WR: ${fWr}%</span>` +
+        ` &nbsp;|&nbsp; <span style="color:var(--text-dim)">RR: ${fRr}</span>`
+      : '';
+
+    const eyeIcon = isShown
+      ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>'
+      : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
+    const chevron = isExpanded ? '▾' : '▸';
+
+    // File group header row
+    html += `<tr class="trade-file-header" style="background:var(--panel);border-bottom:1px solid var(--border)">
+      <td colspan="7" style="padding:5px 8px">
+        <div style="display:flex;align-items:center;gap:8px">
+          <span style="cursor:pointer;font-size:12px;opacity:0.6;user-select:none;flex-shrink:0" onclick="toggleFileExpand('${fn.replace(/'/g, "\\'")}')">${chevron}</span>
+          <span style="cursor:pointer;display:inline-flex;align-items:center;opacity:0.7;flex-shrink:0" onclick="toggleFileOnChart('${fn.replace(/'/g, "\\'")}')" title="${isShown ? 'Hide from chart' : 'Show on chart'}">${eyeIcon}</span>
+          <span style="font-size:12px;font-weight:500;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:160px;max-width:280px">${fn}</span>
+          <span style="font-size:11px;white-space:nowrap;flex-shrink:0;margin-left:12px">${fStatsHtml}</span>
+          <span style="margin-left:auto;cursor:pointer;display:inline-flex;align-items:center;opacity:0.5;flex-shrink:0" onclick="if(confirm('Delete ${fn.replace(/'/g, "\\'")}?'))deleteTradeFile('${fn.replace(/'/g, "\\'")}')" title="Delete file">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>
+          </span>
+        </div>
+      </td>
+    </tr>`;
+
+    // Trade rows — always show when expanded (independent of chart visibility)
+    if (isExpanded && f.trades && f.trades.length) {
+      f.trades.forEach(t => {
+        const side = t.direction === 'long' ? 'BUY' : 'SELL';
+        const sideClass = t.direction === 'long' ? 'up' : 'down';
+        const dt = t.entry_time ? new Date(t.entry_time * 1000) : null;
+        const dateStr = dt ? `${dt.toLocaleDateString()} ${dt.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}` : '—';
+        const pnlStr = t.pnl != null ? `${t.pnl >= 0 ? '+' : ''}$${t.pnl.toFixed(0)}` : '—';
+        const pnlClass = t.pnl != null ? (t.pnl >= 0 ? 'up' : 'down') : '';
+        const locateBtn = t.entry_time
+          ? `<span style="cursor:pointer;opacity:0.5;margin-left:4px;display:inline-flex;vertical-align:middle" onclick="locateTradeOnChart(${t.entry_time},${t.exit_time || t.entry_time})" title="Locate on chart"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/></svg></span>`
+          : '';
+        html += `<tr>
+          <td>${dateStr}${locateBtn}</td>
+          <td>${t.symbol || 'MES'}</td>
+          <td class="${sideClass}">${side}</td>
+          <td>${t.qty || 1}</td>
+          <td>${t.entry_price != null ? t.entry_price.toFixed(2) : '—'}</td>
+          <td>${t.exit_price != null ? t.exit_price.toFixed(2) : '—'}</td>
+          <td class="${pnlClass}">${pnlStr}</td>
+        </tr>`;
+      });
+    } else if (isExpanded && (!f.trades || !f.trades.length)) {
+      html += `<tr><td colspan="7" style="text-align:center;color:var(--text-dim);font-size:11px;padding:4px">Loading...</td></tr>`;
+    }
+  });
+
+  tbody.innerHTML = html;
 }
 
 // ── WebSocket price feed ───────────────────────────────────────────────────────
@@ -1788,6 +2012,7 @@ function initBottomTabs() {
       if (main.classList.contains('bottom-minimized')) {
         main.classList.remove('bottom-minimized');
         if (minBtn) { minBtn.textContent = '▼'; minBtn.title = 'Minimize'; }
+        setTimeout(() => { if (_widget) _widget.resize(); }, 50);
       }
       document.querySelectorAll('.btab').forEach(t => t.classList.remove('active'));
       document.querySelectorAll('.btab-pane').forEach(p => p.classList.remove('active'));
@@ -1801,6 +2026,17 @@ function initBottomTabs() {
       const minimized = main.classList.toggle('bottom-minimized');
       minBtn.textContent = minimized ? '▲' : '▼';
       minBtn.title = minimized ? 'Restore' : 'Minimize';
+      if (minimized) {
+        // Save current inline grid size and clear it so CSS class takes effect
+        main.dataset.bottomGrid = main.style.gridTemplateRows || '';
+        main.style.gridTemplateRows = '';
+      } else {
+        // Restore previously saved inline grid size
+        if (main.dataset.bottomGrid) {
+          main.style.gridTemplateRows = main.dataset.bottomGrid;
+        }
+      }
+      setTimeout(() => { if (_widget) _widget.resize(); }, 50);
     });
   }
 }
@@ -1863,4 +2099,288 @@ function setWsStatus(state, text) {
 function setText(id, text) {
   const el = document.getElementById(id);
   if (el) el.textContent = text;
+}
+
+// ── Market Cycle Analysis ─────────────────────────────────────────────────────
+
+const MC_COLORS = {
+  'Opening Range':          { bg: 'rgba(33,150,243,0.12)',  border: 'rgba(33,150,243,0.4)',  text: '#2196F3' },
+  'Bear Leg':               { bg: 'rgba(239,83,80,0.12)',   border: 'rgba(239,83,80,0.4)',   text: '#ef5350' },
+  'Bull Leg':               { bg: 'rgba(38,166,154,0.12)',  border: 'rgba(38,166,154,0.4)',  text: '#26a69a' },
+  'Bull Breakout':          { bg: 'rgba(38,166,154,0.18)',  border: 'rgba(38,166,154,0.5)',  text: '#26a69a' },
+  'Bear Breakout':          { bg: 'rgba(239,83,80,0.18)',   border: 'rgba(239,83,80,0.5)',   text: '#ef5350' },
+  'Reversal / Double Bottom':{ bg: 'rgba(255,152,0,0.12)', border: 'rgba(255,152,0,0.4)',   text: '#ff9800' },
+  'Reversal / Double Top':  { bg: 'rgba(255,152,0,0.12)',  border: 'rgba(255,152,0,0.4)',   text: '#ff9800' },
+  'Trading Range':          { bg: 'rgba(128,128,128,0.08)', border: 'rgba(128,128,128,0.3)', text: '#9e9e9e' },
+  'Tight Trading Range':    { bg: 'rgba(128,128,128,0.06)', border: 'rgba(128,128,128,0.2)', text: '#9e9e9e' },
+  'Channel':                { bg: 'rgba(156,39,176,0.10)',  border: 'rgba(156,39,176,0.3)',  text: '#9c27b0' },
+  'Measured Move':          { bg: 'rgba(0,188,212,0.10)',   border: 'rgba(0,188,212,0.3)',   text: '#00bcd4' },
+  'Climax':                 { bg: 'rgba(244,67,54,0.15)',   border: 'rgba(244,67,54,0.5)',   text: '#f44336' },
+};
+
+const MC_DEFAULTS = { bg: 'rgba(100,181,246,0.10)', border: 'rgba(100,181,246,0.3)', text: '#64b5f6' };
+
+function _mcColor(label) {
+  return MC_COLORS[label] || MC_DEFAULTS;
+}
+
+async function loadCycleAnalyses() {
+  try {
+    const res = await fetch('/api/skill/analyses?active_only=false');
+    _mcAnalyses = await res.json();
+    renderAnalysisTable();
+    drawAllActiveAnalyses();
+  } catch (e) {
+    console.warn('loadCycleAnalyses error:', e);
+  }
+}
+
+function drawAllActiveAnalyses() {
+  if (!_widget) return;
+  let chart;
+  try { chart = _widget.activeChart(); } catch { return; }
+
+  // Clear all existing analysis shapes
+  for (const [id, shapes] of Object.entries(_mcShapes)) {
+    shapes.forEach(sid => { try { chart.removeEntity(sid); } catch {} });
+  }
+  _mcShapes = {};
+
+  // Draw active analyses
+  _mcAnalyses.filter(a => a.active).forEach(a => drawOneAnalysis(chart, a));
+}
+
+function drawOneAnalysis(chart, analysis) {
+  const shapes = [];
+  (analysis.annotations || []).forEach(ann => {
+    try {
+      if (ann.type === 'range' && ann.start_time && ann.end_time) {
+        const c = _mcColor(ann.label);
+        const id = chart.createMultipointShape(
+          [{ time: ann.start_time, price: ann.price_low || 0 },
+           { time: ann.end_time,   price: ann.price_high || 0 }],
+          { shape: 'rectangle', lock: true, disableSelection: true, disableSave: true,
+            zOrder: 'top',
+            overrides: {
+              backgroundColor: ann.color || c.bg,
+              color: c.border, linewidth: 1,
+              fillBackground: true, transparency: 20,
+              showLabel: true, text: ann.label,
+              textColor: c.text, fontSize: 10,
+              extendLeft: false, extendRight: false,
+              vertLabelsAlign: /^bear/i.test(ann.label) ? 'bottom' : 'top',
+            } }
+        );
+        if (id) shapes.push(id);
+      } else if (ann.type === 'hline' && ann.price != null) {
+        const c = _mcColor(ann.label);
+        const id = chart.createShape(
+          { price: ann.price, time: ann.start_time || 0 },
+          { shape: 'horizontal_line', lock: true, disableSelection: true, disableSave: true,
+            zOrder: 'top',
+            overrides: {
+              linecolor: ann.color || c.text,
+              linewidth: 2,
+              linestyle: ann.style === 'dashed' ? 2 : ann.style === 'dotted' ? 1 : 0,
+              showPrice: true, showLabel: true,
+              text: `${ann.label} ${ann.price.toFixed(2)}`,
+              textcolor: ann.color || c.text, fontsize: 10,
+            } }
+        );
+        if (id) shapes.push(id);
+      } else if (ann.type === 'label' && ann.start_time && ann.price != null) {
+        const c = _mcColor(ann.label);
+        const id = chart.createShape(
+          { time: ann.start_time, price: ann.price },
+          { shape: 'text', lock: true, disableSelection: true, disableSave: true,
+            zOrder: 'top',
+            overrides: {
+              text: ann.label,
+              color: ann.color || c.text,
+              fontsize: 11,
+              bold: true,
+            } }
+        );
+        if (id) shapes.push(id);
+      }
+    } catch (e) {
+      console.warn('drawOneAnalysis annotation error:', e, ann);
+    }
+  });
+  _mcShapes[analysis.id] = shapes;
+}
+
+function removeOneAnalysis(chart, analysisId) {
+  const shapes = _mcShapes[analysisId] || [];
+  shapes.forEach(sid => { try { chart.removeEntity(sid); } catch {} });
+  delete _mcShapes[analysisId];
+}
+
+function handleCycleAnalysisWS(msg) {
+  if (msg.type === 'cycle_analysis') {
+    // New analysis arrived
+    _mcAnalyses.unshift(msg.analysis);
+    renderAnalysisTable();
+    if (msg.analysis.active && _widget) {
+      try { drawOneAnalysis(_widget.activeChart(), msg.analysis); } catch {}
+    }
+  } else if (msg.type === 'cycle_analysis_toggle') {
+    const rec = _mcAnalyses.find(a => a.id === msg.id);
+    if (rec) {
+      rec.active = msg.active ? 1 : 0;
+      renderAnalysisTable();
+      if (!_widget) return;
+      let chart;
+      try { chart = _widget.activeChart(); } catch { return; }
+      if (rec.active) {
+        drawOneAnalysis(chart, rec);
+      } else {
+        removeOneAnalysis(chart, rec.id);
+      }
+    }
+  } else if (msg.type === 'cycle_analysis_delete') {
+    if (_widget) {
+      try { removeOneAnalysis(_widget.activeChart(), msg.id); } catch {}
+    }
+    _mcAnalyses = _mcAnalyses.filter(a => a.id !== msg.id);
+    renderAnalysisTable();
+  }
+}
+
+async function toggleAnalysisActive(id) {
+  const rec = _mcAnalyses.find(a => a.id === id);
+  if (!rec) return;
+  const newActive = !rec.active;
+  try {
+    await fetch(`/api/skill/analyses/${id}/active?active=${newActive}`, { method: 'PUT' });
+  } catch (e) {
+    console.warn('toggleAnalysisActive error:', e);
+  }
+}
+
+async function deleteAnalysis(id) {
+  try {
+    await fetch(`/api/skill/analyses/${id}`, { method: 'DELETE' });
+  } catch (e) {
+    console.warn('deleteAnalysis error:', e);
+  }
+}
+
+function _formatSummaryHTML(text) {
+  if (!text) return '<span style="color:var(--text-faint)">No summary</span>';
+  const esc = text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const lines = esc.split('\n');
+  let html = '';
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    if (/^#{1,3}\s/.test(trimmed)) {
+      html += `<div class="mc-heading">${trimmed.replace(/^#+\s*/, '')}</div>`;
+    } else if (/^[•\-\*]\s/.test(trimmed)) {
+      let content = trimmed.replace(/^[•\-\*]\s*/, '');
+      const colonIdx = content.indexOf(':');
+      if (colonIdx > 0 && colonIdx < 30) {
+        const key = content.substring(0, colonIdx);
+        let val = content.substring(colonIdx + 1).trim();
+        const lval = val.toLowerCase();
+        let cls = '';
+        if (lval.startsWith('bull')) cls = 'mc-val-bull';
+        else if (lval.startsWith('bear')) cls = 'mc-val-bear';
+        content = `<span class="mc-key">${key}:</span> ${cls ? `<span class="${cls}">${val}</span>` : val}`;
+      }
+      html += `<div class="mc-bullet">${content}</div>`;
+    } else {
+      html += `<div class="mc-line">${trimmed}</div>`;
+    }
+  }
+  return html;
+}
+
+function showSummaryModal(id) {
+  const rec = _mcAnalyses.find(a => a.id === id);
+  if (!rec) return;
+  const overlay = document.getElementById('mc-modal-overlay');
+  const modal = overlay.querySelector('.mc-modal');
+  const title = document.getElementById('mc-modal-title');
+  const body = document.getElementById('mc-modal-body');
+  const label = [rec.symbol, rec.timeframe ? rec.timeframe + 'min' : '', rec.session].filter(Boolean).join(' · ');
+  title.textContent = `Analysis — ${label} ${rec.created_at ? rec.created_at.substring(0, 10) : ''}`;
+  body.innerHTML = _formatSummaryHTML(rec.summary);
+  // Reset position to center
+  modal.style.transform = '';
+  modal.dataset.dx = '0';
+  modal.dataset.dy = '0';
+  overlay.classList.add('open');
+}
+
+// ── Modal Drag ────────────────────────────────────────────────────────────────
+(function initModalDrag() {
+  let dragging = false, startX = 0, startY = 0, dx = 0, dy = 0;
+  document.addEventListener('mousedown', e => {
+    const header = e.target.closest('.mc-modal-header');
+    if (!header || e.target.closest('.mc-modal-close')) return;
+    const modal = header.closest('.mc-modal');
+    dragging = true;
+    startX = e.clientX;
+    startY = e.clientY;
+    dx = parseFloat(modal.dataset.dx) || 0;
+    dy = parseFloat(modal.dataset.dy) || 0;
+    e.preventDefault();
+  });
+  document.addEventListener('mousemove', e => {
+    if (!dragging) return;
+    const modal = document.querySelector('.mc-modal');
+    if (!modal) return;
+    const newDx = dx + (e.clientX - startX);
+    const newDy = dy + (e.clientY - startY);
+    modal.style.transform = `translate(${newDx}px, ${newDy}px)`;
+    modal.dataset.dx = newDx;
+    modal.dataset.dy = newDy;
+  });
+  document.addEventListener('mouseup', () => { dragging = false; });
+})();
+
+function closeSummaryModal() {
+  document.getElementById('mc-modal-overlay')?.classList.remove('open');
+}
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') closeSummaryModal();
+});
+
+function renderAnalysisTable() {
+  const tbody = document.getElementById('analysis-tbody');
+  if (!tbody) return;
+
+  if (!_mcAnalyses.length) {
+    tbody.innerHTML = '<tr><td colspan="7"><div class="empty-table">No market cycle analyses</div></td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = _mcAnalyses.map(a => {
+    const created = a.created_at ? a.created_at.replace('T', ' ').substring(0, 19) : '';
+    const annCount = (a.annotations || []).length;
+    const activeClass = a.active ? 'mc-active' : 'mc-inactive';
+    const toggleIcon = a.active
+      ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>'
+      : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19m-6.72-1.07a3 3 0 11-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
+    const toggleTitle = a.active ? 'Hide from chart' : 'Show on chart';
+    // Create short summary preview
+    const summary = (a.summary || '').length > 60
+      ? a.summary.substring(0, 60) + '…'
+      : (a.summary || '—');
+
+    return `<tr class="${activeClass}">
+      <td>${created}</td>
+      <td>${a.symbol || ''}</td>
+      <td>${a.timeframe || ''}</td>
+      <td>${a.session || ''}</td>
+      <td class="mc-summary-cell" onclick="showSummaryModal(${a.id})" title="Click to view full summary">${summary}</td>
+      <td>${annCount}</td>
+      <td class="mc-actions">
+        <span class="mc-btn" onclick="toggleAnalysisActive(${a.id})" title="${toggleTitle}">${toggleIcon}</span>
+        <span class="mc-btn mc-del" onclick="deleteAnalysis(${a.id})" title="Delete">✕</span>
+      </td>
+    </tr>`;
+  }).join('');
 }

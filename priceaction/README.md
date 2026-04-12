@@ -161,6 +161,42 @@ graph LR
 | Filled Orders | 已成交订单 | WebSocket `order_update` (status=Filled) |
 | Order History | 全部订单历史 | 启动加载 `GET /api/orders?all=true` |
 | Trade History | 历史交易日志 (CSV 来源) | 启动加载 `GET /api/trades` |
+| Analysis Log | 市场周期分析记录，支持显隐切换与删除 | `GET /api/skill/analyses` + WebSocket 实时推送 |
+
+### 1.7 市场周期分析模块 (Market Cycle Analysis)
+
+基于 Al Brooks 价格行为方法论的 LLM 辅助市场周期分析系统。通过 Skill API 供 LLM Agent 读取 K 线数据、执行分析，并将标注结果回写到图表上。
+
+| 功能 | 函数 / 组件 | 调用接口 |
+|------|------------|--------|
+| 加载分析记录 | `loadCycleAnalyses()` | `GET /api/skill/analyses` |
+| 绘制图表标注 (rectangle/hline/label) | `drawOneAnalysis()` / `drawAllActiveAnalyses()` | — |
+| 移除图表标注 | `removeOneAnalysis()` | — |
+| 显隐切换分析 | `toggleAnalysisActive(id)` | `PUT /api/skill/analyses/{id}/active` |
+| 删除分析记录 | `deleteAnalysis(id)` | `DELETE /api/skill/analyses/{id}` |
+| 分析列表渲染 | `renderAnalysisTable()` | — |
+| WebSocket 实时同步 | `handleCycleAnalysisWS(msg)` | WebSocket `cycle_analysis*` |
+
+**标注类型**：
+
+| 类型 | 图表元素 | 用途 |
+|------|---------|------|
+| `range` | 矩形区域 (rectangle) | 标记市场阶段 (TR, BO, Channel 等) |
+| `hline` | 水平线 | 标记关键价格 (S/R, MM 目标) |
+| `label` | 文字标签 | 标记特定事件或注释 |
+
+**颜色体系** (Al Brooks PA 术语映射)：
+
+| 标签 | 颜色 |
+|------|------|
+| Opening Range | 蓝色 |
+| Bear Leg / Bear Breakout | 红色 |
+| Bull Leg / Bull Breakout | 绿色 |
+| Reversal / Double Bottom/Top | 橙色 |
+| Trading Range / TTR | 灰色 |
+| Channel | 紫色 |
+| Measured Move | 青色 |
+| Climax | 深红 |
 
 ---
 
@@ -208,7 +244,17 @@ graph LR
 | GET/POST/DELETE | `/api/drawing_templates/{tool}[/{name}]` | Drawing 模板 CRUD |
 | GET/POST/DELETE | `/api/chart_templates[/{name}]` | Chart 模板 CRUD |
 
-### 2.5 WebSocket
+### 2.5 Skill API (LLM Agent 接口)
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/skill/bars?symbol=MES&timeframe=5min&limit=200` | 读取 RTH K 线数据 (09:30–16:00 ET) |
+| POST | `/api/skill/analysis` | 保存分析结果 + 标注 (WebSocket 广播) |
+| GET | `/api/skill/analyses?symbol=&timeframe=&active_only=false` | 查询分析记录列表 |
+| PUT | `/api/skill/analyses/{id}/active?active=true` | 切换分析显隐 |
+| DELETE | `/api/skill/analyses/{id}` | 删除分析记录 |
+
+### 2.6 WebSocket
 
 | 端点 | 方向 | type | 说明 |
 |------|------|------|------|
@@ -216,6 +262,9 @@ graph LR
 | | S→C | `bar` | 实时 5min bar 更新 (每个 tick 聚合) |
 | | S→C | `analysis` | S/R 分析更新 (新 bar 开盘时) |
 | | S→C | `order_update` | 订单状态变更 |
+| | S→C | `cycle_analysis` | 新分析回写 (含 annotations) |
+| | S→C | `cycle_analysis_toggle` | 分析显隐切换 |
+| | S→C | `cycle_analysis_delete` | 分析删除 |
 
 ---
 
@@ -413,6 +462,19 @@ erDiagram
         TEXT name PK "模板名称"
         TEXT content "完整图表配置 JSON"
     }
+
+    market_cycle_analyses {
+        INTEGER id PK "自增 ID"
+        TEXT symbol "品种"
+        TEXT timeframe "周期"
+        TEXT session "交易时段"
+        TEXT created_at "创建时间 ISO"
+        INTEGER bar_from "起始 bar 时间戳"
+        INTEGER bar_to "结束 bar 时间戳"
+        TEXT summary "分析摘要"
+        TEXT annotations "标注 JSON 数组"
+        INTEGER active "是否显示 (0/1)"
+    }
 ```
 
 ### 数据分类
@@ -424,6 +486,7 @@ erDiagram
 | **指标模板** | `study_templates` | 可复用的指标组合 | TradingView save_load_adapter |
 | **画线模板** | `drawing_templates` | 画线工具预设 | TradingView save_load_adapter |
 | **图表模板** | `chart_templates` | 完整图表样式预设 | TradingView save_load_adapter |
+| **市场周期分析** | `market_cycle_analyses` | LLM 分析结果 + 图表标注 | Skill API (LLM Agent) |
 
 ---
 

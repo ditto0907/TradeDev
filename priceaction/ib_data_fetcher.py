@@ -21,9 +21,13 @@ logger = logging.getLogger(__name__)
 
 def _bar_to_dict(bar) -> dict:
     """Convert ib_insync BarData to a plain dict with UTC seconds timestamp."""
+    import datetime as _dt_mod
     dt = bar.date
     if isinstance(dt, str):
         dt = datetime.strptime(dt, "%Y%m%d %H:%M:%S %Z") if " " in dt else datetime.strptime(dt, "%Y%m%d")
+    # datetime.date (daily bars) has no tzinfo — promote to datetime first
+    if isinstance(dt, _dt_mod.date) and not isinstance(dt, datetime):
+        dt = datetime(dt.year, dt.month, dt.day)
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return {

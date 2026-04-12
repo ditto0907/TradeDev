@@ -619,6 +619,7 @@
     /* Data table */
     .data-table {
       width: 100%;
+      table-layout: fixed;
       border-collapse: collapse;
       font-size: 12px;
     }
@@ -633,16 +634,36 @@
       border-bottom: 1px solid var(--border);
       white-space: nowrap;
       z-index: 2;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      position: relative;
+    }
+    .data-table th .col-resize {
+      position: absolute;
+      right: 0; top: 0; bottom: 0;
+      width: 4px;
+      cursor: col-resize;
+      background: transparent;
+      z-index: 3;
+    }
+    .data-table th .col-resize:hover,
+    .data-table th .col-resize.active {
+      background: var(--blue, #2196f3);
     }
     .data-table td {
       padding: 6px 12px;
       border-bottom: 1px solid rgba(42,46,57,0.4);
       color: var(--text);
       white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
     .data-table tr:hover td { background: rgba(41,62,81,0.18); }
     .data-table .up   { color: var(--green); }
     .data-table .down { color: var(--red); }
+
+    .trade-file-header:hover td { background: rgba(41,62,81,0.10) !important; }
+    .trade-file-header + tr:not(.trade-file-header) td { padding-left: 12px; }
 
     .empty-table {
       display: flex;
@@ -652,6 +673,95 @@
       color: var(--text-faint);
       font-size: 12px;
     }
+
+    /* Summary Modal */
+    .mc-modal-overlay {
+      display: none;
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,0.55);
+      z-index: 9999;
+      align-items: center; justify-content: center;
+    }
+    .mc-modal-overlay.open { display: flex; }
+    .mc-modal {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      width: 560px; min-width: 320px; min-height: 200px;
+      max-width: 90vw; max-height: 80vh;
+      display: flex; flex-direction: column;
+      resize: both; overflow: auto;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+      position: relative;
+    }
+    .mc-modal-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 10px 16px;
+      border-bottom: 1px solid var(--border);
+      font-size: 12px; font-weight: 600;
+      color: var(--text);
+      cursor: grab;
+      flex-shrink: 0;
+      user-select: none;
+    }
+    .mc-modal-header:active { cursor: grabbing; }
+    .mc-modal-close {
+      cursor: pointer; opacity: 0.5;
+      font-size: 16px; line-height: 1;
+      padding: 0 2px;
+    }
+    .mc-modal-close:hover { opacity: 1; }
+    .mc-modal-body {
+      padding: 14px 16px;
+      overflow-y: auto;
+      flex: 1;
+      font-family: -apple-system, BlinkMacSystemFont, "Trebuchet MS", "Segoe UI", sans-serif;
+      font-size: 12px;
+      line-height: 1.65;
+      color: var(--text);
+    }
+    .mc-modal-body .mc-line { margin: 2px 0; }
+    .mc-modal-body .mc-heading {
+      color: var(--text-dim);
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin: 10px 0 4px;
+      padding-bottom: 3px;
+      border-bottom: 1px solid rgba(42,46,57,0.5);
+    }
+    .mc-modal-body .mc-heading:first-child { margin-top: 0; }
+    .mc-modal-body .mc-bullet { padding-left: 12px; position: relative; }
+    .mc-modal-body .mc-bullet::before {
+      content: '•'; position: absolute; left: 0; color: var(--text-dim);
+    }
+    .mc-modal-body .mc-key { color: var(--text-dim); }
+    .mc-modal-body .mc-val-bull { color: var(--green); font-weight: 500; }
+    .mc-modal-body .mc-val-bear { color: var(--red); font-weight: 500; }
+    .mc-summary-cell {
+      cursor: pointer;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 300px;
+    }
+    .mc-summary-cell:hover { color: #64b5f6; text-decoration: underline; }
+
+    /* Market Cycle Analysis rows */
+    .mc-inactive td { opacity: 0.4; }
+    .mc-actions { white-space: nowrap; }
+    .mc-btn {
+      cursor: pointer;
+      padding: 0 3px;
+      font-size: 13px;
+      opacity: 0.7;
+      display: inline-flex;
+      align-items: center;
+      vertical-align: middle;
+    }
+    .mc-btn:hover { opacity: 1; }
+    .mc-btn.mc-del:hover { color: var(--red); }
 
     /* Scrollbar global */
     ::-webkit-scrollbar { width: 5px; height: 5px; }
@@ -859,6 +969,7 @@
       <div class="btab"        data-pane="fills">Filled Orders</div>
       <div class="btab"        data-pane="order-history">Order History</div>
       <div class="btab"        data-pane="history">Trade History</div>
+      <div class="btab"        data-pane="analysis">Analysis Log</div>
       <button id="bottom-minimize" title="Minimize">▼</button>
     </div>
     <div id="bottom-content">
@@ -927,15 +1038,46 @@
 
       <!-- Trade History -->
       <div class="btab-pane" id="pane-history">
+        <div style="display:flex;align-items:center;gap:12px;padding:6px 12px;border-bottom:1px solid var(--border)">
+          <span style="font-size:11px;color:var(--text-dim)" id="trade-panel-info"></span>
+          <span style="margin-left:auto"></span>
+          <label class="mc-btn" style="cursor:pointer;display:inline-flex;align-items:center;gap:4px;font-size:12px;opacity:0.85" title="Upload trade CSV">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            Upload CSV
+            <input type="file" accept=".csv" style="display:none" onchange="handleTradeCSVUpload(this)">
+          </label>
+        </div>
+        <div style="overflow:auto;flex:1">
+          <table class="data-table">
+            <thead>
+              <tr>
+                <th>Time</th><th>Symbol</th><th>Side</th>
+                <th>Qty</th><th>Entry</th><th>Exit</th><th>P&amp;L</th>
+              </tr>
+            </thead>
+            <tbody id="history-tbody">
+              <tr><td colspan="7"><div class="empty-table">No trade logs — upload a CSV to view</div></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Analysis Log -->
+      <div class="btab-pane" id="pane-analysis">
         <table class="data-table">
           <thead>
             <tr>
-              <th>Date</th><th>Symbol</th><th>Side</th>
-              <th>Qty</th><th>Entry</th><th>Exit</th><th>P&amp;L</th>
+              <th>Created</th>
+              <th>Symbol</th>
+              <th>TF</th>
+              <th>Session</th>
+              <th>Summary</th>
+              <th>Shapes</th>
+              <th>Actions</th>
             </tr>
           </thead>
-          <tbody id="history-tbody">
-            <tr><td colspan="7"><div class="empty-table">No trade history</div></td></tr>
+          <tbody id="analysis-tbody">
+            <tr><td colspan="7"><div class="empty-table">No market cycle analyses</div></td></tr>
           </tbody>
         </table>
       </div>
@@ -944,6 +1086,17 @@
   </div><!-- /bottom -->
 
 </div><!-- /main -->
+
+<!-- Summary Modal -->
+<div class="mc-modal-overlay" id="mc-modal-overlay" onclick="if(event.target===this)closeSummaryModal()">
+  <div class="mc-modal">
+    <div class="mc-modal-header">
+      <span id="mc-modal-title">Analysis Summary</span>
+      <span class="mc-modal-close" onclick="closeSummaryModal()">&times;</span>
+    </div>
+    <div class="mc-modal-body" id="mc-modal-body"></div>
+  </div>
+</div>
 
 <!-- SR Legend — lives outside #main so TradingView's iframe can't block it -->
 <div id="sr-legend">
@@ -959,7 +1112,7 @@
     <div class="leg-row"><div class="leg-box" style="background:rgba(33,150,243,.18)"></div>Accumulation</div>
     <div class="leg-row"><div class="leg-box" style="background:rgba(255,152,0,.18)"></div>Distribution</div>
     <div style="border-top:1px solid var(--border);margin:4px 0"></div>
-    <div class="leg-row" id="leg-trades" style="justify-content:space-between">
+    <div class="leg-row sr-off" id="leg-trades" style="justify-content:space-between">
       <div style="display:flex;align-items:center;gap:6px;cursor:pointer" onclick="toggleTrades()">
         <div style="display:flex;gap:3px;align-items:center">
           <div style="width:7px;height:7px;border-radius:50%;background:#26a69a"></div>
@@ -967,13 +1120,8 @@
         </div>
         Trade Logs
       </div>
-      <div style="display:flex;align-items:center;gap:4px">
-        <span id="trade-count" style="font-size:10px;opacity:0.5"></span>
-        <div onclick="document.getElementById('csv-upload').click();event.stopPropagation()" style="cursor:pointer;font-size:13px;opacity:0.6;padding:0 2px" title="Upload CSV">⬆</div>
-        <div id="trade-clear-btn" onclick="clearUploadedTrades();event.stopPropagation()" style="cursor:pointer;font-size:13px;opacity:0.6;padding:0 2px;display:none" title="Clear trades">✕</div>
-      </div>
+      <span id="trade-count" style="font-size:10px;opacity:0.5"></span>
     </div>
-    <input type="file" id="csv-upload" accept=".csv" style="display:none" onchange="handleTradeCSVUpload(this)">
   </div>
 </div>
 
@@ -981,6 +1129,55 @@
 <script src="/charting_library/charting_library.standalone.js"></script>
 <script src="/static/datafeed.js"></script>
 <script src="/static/app.js"></script>
+
+<script>
+// ── Column resize for .data-table ─────────────────────────────────────────────
+(function() {
+  function initTableResize(table) {
+    const ths = table.querySelectorAll('thead th');
+    if (!ths.length) return;
+    ths.forEach(th => {
+      if (th.querySelector('.col-resize')) return;
+      const handle = document.createElement('span');
+      handle.className = 'col-resize';
+      th.appendChild(handle);
+
+      let startX, startW, tableW;
+      handle.addEventListener('mousedown', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        startX = e.clientX;
+        startW = th.offsetWidth;
+        tableW = table.offsetWidth;
+        handle.classList.add('active');
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+      });
+
+      function onMove(e) {
+        const dx = e.clientX - startX;
+        const newW = Math.max(30, startW + dx);
+        th.style.width = newW + 'px';
+        table.style.tableLayout = 'fixed';
+      }
+      function onUp() {
+        handle.classList.remove('active');
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+      }
+    });
+  }
+
+  // Init on existing tables and observe for new ones
+  function initAll() {
+    document.querySelectorAll('.data-table').forEach(initTableResize);
+  }
+  document.addEventListener('DOMContentLoaded', initAll);
+  // Re-init when tbody content changes (dynamic tables)
+  const obs = new MutationObserver(() => initAll());
+  obs.observe(document.body, { childList: true, subtree: true });
+})();
+</script>
 
 </body>
 </html>

@@ -24,6 +24,7 @@ MES_CURRENCY = "USD"
 
 # Historical data fetch window on startup
 HISTORY_DURATION_5MIN = "5 D"   # last 5 days of 5-min bars
+HISTORY_DURATION_1D   = "2 Y"   # 2 years of daily bars
 MAX_BARS_IN_MEMORY = 5000        # cap per bar size
 
 # Extra symbols to prefetch on startup (if DB has no data)

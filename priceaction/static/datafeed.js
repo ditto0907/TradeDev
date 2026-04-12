@@ -138,6 +138,7 @@ class MESDatafeed {
   // ── Analysis callback ──────────────────────────────────────────────────────
 
   setAnalysisCallback(cb) { this._onAnalysis = cb; }
+  setCycleAnalysisCallback(cb) { this._onCycleAnalysis = cb; }
 
   // ── WebSocket ──────────────────────────────────────────────────────────────
 
@@ -163,6 +164,8 @@ class MESDatafeed {
         if (this._onAnalysis) this._onAnalysis(msg.data);
       } else if (msg.type === 'snapshot') {
         if (this._onAnalysis && msg.analysis) this._onAnalysis(msg.analysis);
+      } else if (msg.type === 'cycle_analysis' || msg.type === 'cycle_analysis_toggle' || msg.type === 'cycle_analysis_delete') {
+        if (this._onCycleAnalysis) this._onCycleAnalysis(msg);
       }
     };
 

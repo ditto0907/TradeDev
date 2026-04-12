@@ -82,6 +82,24 @@ def init_db() -> None:
                 content TEXT NOT NULL
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS market_cycle_analyses (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol     TEXT    NOT NULL,
+                timeframe  TEXT    NOT NULL,
+                session    TEXT    NOT NULL DEFAULT 'RTH',
+                created_at TEXT    NOT NULL,
+                bar_from   INTEGER NOT NULL,
+                bar_to     INTEGER NOT NULL,
+                summary    TEXT    NOT NULL DEFAULT '',
+                annotations TEXT   NOT NULL DEFAULT '[]',
+                active     INTEGER NOT NULL DEFAULT 1
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_mca_sym_tf "
+            "ON market_cycle_analyses (symbol, timeframe)"
+        )
     logger.info("Database ready: %s", _DB_PATH)
 
 
@@ -284,3 +302,66 @@ def get_chart_template_content(name: str) -> Optional[str]:
 def remove_chart_template(name: str) -> None:
     with _conn() as conn:
         conn.execute("DELETE FROM chart_templates WHERE name=?", (name,))
+
+
+# ─── Market Cycle Analysis CRUD ──────────────────────────────────────────────
+
+def save_analysis(symbol: str, timeframe: str, session: str,
+                  created_at: str, bar_from: int, bar_to: int,
+                  summary: str, annotations: str) -> int:
+    """Insert a new analysis record. Returns the new row id."""
+    with _conn() as conn:
+        cur = conn.execute(
+            "INSERT INTO market_cycle_analyses "
+            "(symbol, timeframe, session, created_at, bar_from, bar_to, summary, annotations, active) "
+            "VALUES (?,?,?,?,?,?,?,?,1)",
+            (symbol, timeframe, session, created_at, bar_from, bar_to, summary, annotations),
+        )
+        return cur.lastrowid
+
+
+def get_analyses(symbol: str = None, timeframe: str = None,
+                 active_only: bool = False) -> List[dict]:
+    """Return analysis records, optionally filtered."""
+    clauses, params = [], []
+    if symbol:
+        clauses.append("symbol=?"); params.append(symbol)
+    if timeframe:
+        clauses.append("timeframe=?"); params.append(timeframe)
+    if active_only:
+        clauses.append("active=1")
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    with _conn() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            f"SELECT * FROM market_cycle_analyses {where} ORDER BY created_at DESC",
+            params,
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_analysis_by_id(analysis_id: int) -> Optional[dict]:
+    with _conn() as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM market_cycle_analyses WHERE id=?", (analysis_id,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def update_analysis_active(analysis_id: int, active: bool) -> bool:
+    """Toggle active flag. Returns True if row was found."""
+    with _conn() as conn:
+        cur = conn.execute(
+            "UPDATE market_cycle_analyses SET active=? WHERE id=?",
+            (1 if active else 0, analysis_id),
+        )
+    return cur.rowcount > 0
+
+
+def delete_analysis(analysis_id: int) -> bool:
+    with _conn() as conn:
+        cur = conn.execute(
+            "DELETE FROM market_cycle_analyses WHERE id=?", (analysis_id,),
+        )
+    return cur.rowcount > 0

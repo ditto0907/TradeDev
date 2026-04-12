@@ -137,42 +137,68 @@ async def lifespan(app: FastAPI):
     # ── Step 2b: prefetch extra symbols if DB is empty ───────────────────────
     if ib_ok and fetcher.ib and fetcher.ib.isConnected():
         from ib_insync import ContFuture
-        for sym_cfg in config.EXTRA_SYMBOLS:
+
+        # All symbols to prefetch (primary + extras)
+        all_symbols = [
+            {"symbol": MES_SYM, "ib_symbol": config.MES_SYMBOL,
+             "exchange": config.MES_EXCHANGE, "currency": config.MES_CURRENCY},
+        ] + config.EXTRA_SYMBOLS
+
+        for sym_cfg in all_symbols:
             sym_name = sym_cfg["symbol"]
-            existing = db.get_bars(sym_name, "5min")
-            if existing:
-                logger.info("DB already has %d bars for %s — skip fetch", len(existing), sym_name)
-                continue
+            contract = ContFuture(
+                symbol=sym_cfg.get("ib_symbol", sym_name),
+                exchange=sym_cfg["exchange"],
+                currency=sym_cfg["currency"],
+            )
             try:
-                contract = ContFuture(
-                    symbol=sym_cfg.get("ib_symbol", sym_name),
-                    exchange=sym_cfg["exchange"],
-                    currency=sym_cfg["currency"],
-                )
                 qualified = await asyncio.wait_for(
                     fetcher.ib.qualifyContractsAsync(contract), timeout=30.0,
                 )
                 if not qualified:
                     logger.warning("IB returned no contract for %s — skipping", sym_name)
                     continue
-                raw = await asyncio.wait_for(
+                qc = qualified[0]
+
+                # ── 5min bars (skip if already populated) ─────────────────
+                if sym_name != MES_SYM:  # MES 5min already fetched above
+                    existing_5m = db.get_bars(sym_name, "5min")
+                    if not existing_5m:
+                        raw = await asyncio.wait_for(
+                            fetcher.ib.reqHistoricalDataAsync(
+                                qc, endDateTime="",
+                                durationStr=config.HISTORY_DURATION_5MIN,
+                                barSizeSetting="5 mins", whatToShow="TRADES",
+                                useRTH=False, formatDate=2,
+                            ), timeout=60.0,
+                        )
+                        bars5 = [_bar_to_dict(b) for b in raw]
+                        if bars5:
+                            db.insert_bars(sym_name, "5min", bars5)
+                            logger.info("Prefetched %d 5min bars for %s", len(bars5), sym_name)
+
+                # ── 1D bars (always refresh to keep daily chart up to date) ─
+                since_1d = db.get_latest_ts(sym_name, "1D")
+                existing_1d = db.get_bars(sym_name, "1D")
+                if existing_1d and since_1d:
+                    import time as _time
+                    gap_days = (_time.time() - since_1d) / 86400
+                    if gap_days < 1:
+                        logger.info("1D bars for %s are up to date — skip fetch", sym_name)
+                        continue
+                raw_1d = await asyncio.wait_for(
                     fetcher.ib.reqHistoricalDataAsync(
-                        qualified[0],
-                        endDateTime="",
-                        durationStr=config.HISTORY_DURATION_5MIN,
-                        barSizeSetting="5 mins",
-                        whatToShow="TRADES",
-                        useRTH=False,
-                        formatDate=2,
-                    ),
-                    timeout=60.0,
+                        qc, endDateTime="",
+                        durationStr=config.HISTORY_DURATION_1D,
+                        barSizeSetting="1 day", whatToShow="TRADES",
+                        useRTH=True, formatDate=2,
+                    ), timeout=60.0,
                 )
-                bars = [_bar_to_dict(b) for b in raw]
-                if bars:
-                    saved = db.insert_bars(sym_name, "5min", bars)
-                    logger.info("Prefetched %d 5min bars for %s", saved, sym_name)
-                else:
-                    logger.info("IB returned 0 bars for %s", sym_name)
+                bars_1d = [_bar_to_dict(b) for b in raw_1d]
+                if bars_1d:
+                    saved_1d = db.insert_bars(sym_name, "1D", bars_1d)
+                    logger.info("Prefetched %d 1D bars for %s", saved_1d, sym_name)
+
             except Exception as e:
                 logger.warning("Prefetch %s failed: %s", sym_name, e)
 
@@ -478,6 +504,155 @@ async def get_analysis(symbol: str = Query("MES")):
     return analyzer.get_analysis(bars)
 
 
+# ─── Skill: Market Cycle Analysis Endpoints ───────────────────────────────────
+
+class AnalysisAnnotation(BaseModel):
+    label: str                    # e.g. "Opening Range", "Bull Breakout"
+    type: str                     # "range" | "hline" | "label"
+    start_time: int               # Unix seconds
+    end_time: Optional[int] = None   # For range type
+    price: Optional[float] = None    # For hline / label
+    price_high: Optional[float] = None  # For range type
+    price_low: Optional[float] = None   # For range type
+    color: Optional[str] = None
+    style: Optional[str] = None   # "solid" | "dashed" | "dotted"
+
+class AnalysisPayload(BaseModel):
+    symbol: str = "MES"
+    timeframe: str = "5"
+    session: str = "RTH"
+    bar_from: int
+    bar_to: int
+    summary: str                  # Concise textual summary of the analysis
+    annotations: List[AnalysisAnnotation]
+
+@app.get("/api/skill/bars")
+async def skill_get_bars(
+    symbol: str = Query("MES"),
+    resolution: str = Query("5"),
+    session: str = Query("RTH"),
+    from_ts: int = Query(0, alias="from"),
+    to_ts: int = Query(9_999_999_999, alias="to"),
+):
+    """
+    Skill-facing K-line data endpoint.
+
+    Returns OHLCV bars as a JSON array (easier for LLM consumption than
+    the TradingView UDF arrays-of-columns format).
+    Supports session filter: RTH drops bars outside 09:30-16:00 ET.
+    """
+    from ib_data_fetcher import resolution_to_key
+    key = resolution_to_key(resolution)
+    sym = symbol.replace("_RTH", "").upper()
+    bars = db.get_bars(sym, key, from_ts=from_ts, to_ts=to_ts)
+
+    if session.upper() == "RTH" and key in ("5min", "1min", "3min", "15min", "30min", "60min"):
+        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+        import zoneinfo
+        et = zoneinfo.ZoneInfo("America/New_York")
+        filtered = []
+        for b in bars:
+            dt = _dt.fromtimestamp(b["time"], tz=_tz.utc).astimezone(et)
+            # RTH: 09:30 - 16:00 ET
+            t = dt.hour * 60 + dt.minute
+            if 570 <= t < 960:        # 9:30=570  16:00=960
+                filtered.append(b)
+        bars = filtered
+
+    return {
+        "symbol": sym,
+        "resolution": resolution,
+        "session": session,
+        "count": len(bars),
+        "bars": bars,
+    }
+
+@app.post("/api/skill/analysis")
+async def skill_save_analysis(payload: AnalysisPayload):
+    """
+    Writeback: save LLM market cycle analysis results to DB.
+
+    The annotations include typed shapes (ranges, hlines, labels) that the
+    frontend will render on the chart.
+    """
+    from datetime import datetime as _dt, timezone as _tz
+    created_at = _dt.now(_tz.utc).isoformat()
+    annotations_json = json.dumps([a.dict() for a in payload.annotations])
+    row_id = db.save_analysis(
+        symbol=payload.symbol.upper(),
+        timeframe=payload.timeframe,
+        session=payload.session,
+        created_at=created_at,
+        bar_from=payload.bar_from,
+        bar_to=payload.bar_to,
+        summary=payload.summary,
+        annotations=annotations_json,
+    )
+    logger.info("Saved market cycle analysis #%d for %s/%s",
+                row_id, payload.symbol, payload.timeframe)
+
+    # Broadcast to WebSocket clients so chart updates live
+    msg = {
+        "type": "cycle_analysis",
+        "analysis": {
+            "id": row_id,
+            "symbol": payload.symbol.upper(),
+            "timeframe": payload.timeframe,
+            "session": payload.session,
+            "created_at": created_at,
+            "bar_from": payload.bar_from,
+            "bar_to": payload.bar_to,
+            "summary": payload.summary,
+            "annotations": [a.dict() for a in payload.annotations],
+            "active": 1,
+        },
+    }
+    await broadcast(msg)
+
+    return {"success": True, "id": row_id}
+
+@app.get("/api/skill/analyses")
+async def skill_list_analyses(
+    symbol: str = Query(None),
+    timeframe: str = Query(None),
+    active_only: bool = Query(False),
+):
+    """List all saved market cycle analyses, optionally filtered."""
+    rows = db.get_analyses(symbol=symbol, timeframe=timeframe, active_only=active_only)
+    # Parse annotations JSON for each row
+    for r in rows:
+        try:
+            r["annotations"] = json.loads(r.get("annotations", "[]"))
+        except (json.JSONDecodeError, TypeError):
+            r["annotations"] = []
+    return rows
+
+@app.put("/api/skill/analyses/{analysis_id}/active")
+async def skill_toggle_analysis(analysis_id: int, active: bool = Query(...)):
+    """Toggle an analysis active/inactive (shows/hides on chart)."""
+    ok = db.update_analysis_active(analysis_id, active)
+    if not ok:
+        return JSONResponse(status_code=404, content={"error": "not found"})
+
+    # Broadcast state change
+    msg = {"type": "cycle_analysis_toggle", "id": analysis_id, "active": active}
+    await broadcast(msg)
+
+    return {"success": True, "id": analysis_id, "active": active}
+
+@app.delete("/api/skill/analyses/{analysis_id}")
+async def skill_delete_analysis(analysis_id: int):
+    """Permanently delete an analysis record."""
+    ok = db.delete_analysis(analysis_id)
+    if not ok:
+        return JSONResponse(status_code=404, content={"error": "not found"})
+
+    msg = {"type": "cycle_analysis_delete", "id": analysis_id}
+    await broadcast(msg)
+
+    return {"success": True}
+
+
 @app.get("/api/trades")
 async def get_trades():
     """Return parsed historical trades from log files in data/."""
@@ -488,17 +663,77 @@ async def get_trades():
         return []
 
 
+@app.get("/api/trades/files")
+async def list_trade_files():
+    """List trade CSV files in data/ directory."""
+    data_dir = Path(__file__).parent / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    files = []
+    patterns = ["trade_log_topstep*", "trade_log_IB*", "trade_log_lucid*"]
+    seen = set()
+    for pat in patterns:
+        for fp in sorted(data_dir.glob(pat)):
+            if fp.name not in seen and fp.is_file():
+                seen.add(fp.name)
+                files.append({"name": fp.name, "size": fp.stat().st_size})
+    return files
+
+
+@app.get("/api/trades/file/{filename}")
+async def get_trades_from_file(filename: str):
+    """Parse and return trades from a specific CSV file."""
+    data_dir = Path(__file__).parent / "data"
+    filepath = (data_dir / filename).resolve()
+    # Prevent path traversal
+    if not str(filepath).startswith(str(data_dir.resolve())):
+        return JSONResponse(status_code=400, content={"error": "Invalid filename"})
+    if not filepath.exists():
+        return JSONResponse(status_code=404, content={"error": "File not found"})
+    try:
+        text = filepath.read_text(encoding="utf-8-sig", errors="replace")
+        trades = parse_csv_content(text)
+        return trades
+    except Exception as e:
+        logger.error("Trade file parse error: %s", e)
+        return []
+
+
 @app.post("/api/trades/upload")
 async def upload_trades(file: UploadFile):
-    """Parse an uploaded CSV file and return trades."""
+    """Save uploaded CSV to data/ folder and return parsed trades."""
     try:
         content = await file.read()
         text = content.decode("utf-8-sig", errors="replace")
         trades = parse_csv_content(text)
-        return trades
+        if not trades:
+            return {"filename": None, "trades": []}
+        # Save to data/ folder with original filename
+        data_dir = Path(__file__).parent / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        save_name = file.filename or "trade_log_upload.csv"
+        save_path = (data_dir / save_name).resolve()
+        if not str(save_path).startswith(str(data_dir.resolve())):
+            return JSONResponse(status_code=400, content={"error": "Invalid filename"})
+        save_path.write_bytes(content)
+        logger.info("Saved trade CSV to %s (%d trades)", save_name, len(trades))
+        return {"filename": save_name, "trades": trades}
     except Exception as e:
         logger.error("Trade upload parse error: %s", e)
-        return []
+        return {"filename": None, "trades": []}
+
+
+@app.delete("/api/trades/file/{filename}")
+async def delete_trade_file(filename: str):
+    """Delete a trade CSV file from data/ directory."""
+    data_dir = Path(__file__).parent / "data"
+    filepath = (data_dir / filename).resolve()
+    if not str(filepath).startswith(str(data_dir.resolve())):
+        return JSONResponse(status_code=400, content={"error": "Invalid filename"})
+    if not filepath.exists():
+        return JSONResponse(status_code=404, content={"error": "File not found"})
+    filepath.unlink()
+    logger.info("Deleted trade file: %s", filename)
+    return {"success": True}
 
 
 # ─── Order Endpoints ──────────────────────────────────────────────────────────
