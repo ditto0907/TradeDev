@@ -384,7 +384,17 @@ function initChart() {
     // Load existing working orders
     loadWorkingOrders();
 
-    // Load market cycle analyses
+    // Sync _currentSymbol with the chart's actual symbol (may differ from default
+    // when load_last_chart restores a previous session)
+    try { _currentSymbol = chart.symbol(); } catch {}
+
+    // Reload analyses (and redraw active ones) whenever the chart symbol changes
+    chart.onSymbolChanged().subscribe(null, () => {
+      try { _currentSymbol = chart.symbol(); } catch {}
+      loadCycleAnalyses();
+    });
+
+    // Load market cycle analyses for the current symbol
     loadCycleAnalyses();
   });
 
@@ -1408,6 +1418,9 @@ function initWatchlistClick() {
               updateSRPanel(analysis);
             })
             .catch(e => console.warn('Analysis fetch error:', e));
+          // Reload market cycle analyses for new symbol
+          // (onSymbolChanged also fires but calling here ensures _currentSymbol is already updated)
+          loadCycleAnalyses();
         });
       } catch (e) {
         console.warn('[Watchlist] setSymbol error:', e);
@@ -2290,7 +2303,8 @@ function _mcColor(label) {
 
 async function loadCycleAnalyses() {
   try {
-    const res = await fetch('/api/skill/analyses?active_only=false');
+    const sym = _currentSymbol || 'MES';
+    const res = await fetch(`/api/skill/analyses?active_only=false&symbol=${encodeURIComponent(sym)}`);
     _mcAnalyses = await res.json();
     renderAnalysisTable();
     drawAllActiveAnalyses();
@@ -2310,8 +2324,9 @@ function drawAllActiveAnalyses() {
   }
   _mcShapes = {};
 
-  // Draw active analyses
-  _mcAnalyses.filter(a => a.active).forEach(a => drawOneAnalysis(chart, a));
+  // Draw active analyses for the current symbol only
+  const sym = _currentSymbol || 'MES';
+  _mcAnalyses.filter(a => a.active && (!a.symbol || a.symbol === sym)).forEach(a => drawOneAnalysis(chart, a));
 }
 
 function drawOneAnalysis(chart, analysis) {
@@ -2349,6 +2364,21 @@ function drawOneAnalysis(chart, analysis) {
               showPrice: true, showLabel: true,
               text: `${ann.label} ${ann.price.toFixed(2)}`,
               textcolor: ann.color || c.text, fontsize: 10,
+            } }
+        );
+        if (id) shapes.push(id);
+      } else if (ann.type === 'trend line' && ann.start_time && ann.end_time && ann.price_start != null && ann.price_end != null) {
+        const c = _mcColor(ann.label);
+        const id = chart.createMultipointShape(
+          [{ time: ann.start_time, price: ann.price_start },
+           { time: ann.end_time,   price: ann.price_end }],
+          { shape: 'trend_line', lock: false, disableSelection: false, disableSave: true,
+            zOrder: 'top',
+            overrides: {
+              linecolor: ann.color || c.text,
+              linewidth: ann.linewidth || 2,
+              linestyle: ann.style === 'dashed' ? 2 : ann.style === 'dotted' ? 1 : 0,
+              extendLeft: false, extendRight: false,
             } }
         );
         if (id) shapes.push(id);

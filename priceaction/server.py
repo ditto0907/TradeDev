@@ -508,14 +508,17 @@ async def get_analysis(symbol: str = Query("MES")):
 
 class AnalysisAnnotation(BaseModel):
     label: str                    # e.g. "Opening Range", "Bull Breakout"
-    type: str                     # "range" | "hline" | "label"
+    type: str                     # "range" | "hline" | "label" | "trend line"
     start_time: int               # Unix seconds
-    end_time: Optional[int] = None   # For range type
-    price: Optional[float] = None    # For hline / label
-    price_high: Optional[float] = None  # For range type
-    price_low: Optional[float] = None   # For range type
+    end_time: Optional[int] = None       # For range / trend line type
+    price: Optional[float] = None        # For hline / label
+    price_high: Optional[float] = None   # For range type
+    price_low: Optional[float] = None    # For range type
+    price_start: Optional[float] = None  # For trend line type (start point price)
+    price_end: Optional[float] = None    # For trend line type (end point price)
     color: Optional[str] = None
-    style: Optional[str] = None   # "solid" | "dashed" | "dotted"
+    style: Optional[str] = None          # "solid" | "dashed" | "dotted"
+    linewidth: Optional[int] = None      # For trend line type
 
 class AnalysisPayload(BaseModel):
     symbol: str = "MES"
