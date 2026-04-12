@@ -2353,13 +2353,14 @@ function drawOneAnalysis(chart, analysis) {
         if (id) shapes.push(id);
       } else if (ann.type === 'hline' && ann.price != null) {
         const c = _mcColor(ann.label);
+        const lineWidth = Number.isFinite(ann.linewidth) ? ann.linewidth : 1;
         const id = chart.createShape(
           { price: ann.price, time: ann.start_time || 0 },
           { shape: 'horizontal_line', lock: false, disableSelection: false, disableSave: true,
             zOrder: 'top',
             overrides: {
               linecolor: ann.color || c.text,
-              linewidth: 2,
+              linewidth: lineWidth,
               linestyle: ann.style === 'dashed' ? 2 : ann.style === 'dotted' ? 1 : 0,
               showPrice: true, showLabel: true,
               text: `${ann.label} ${ann.price.toFixed(2)}`,

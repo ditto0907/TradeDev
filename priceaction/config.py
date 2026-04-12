@@ -50,4 +50,6 @@ SERVER_PORT = 8000
 SR_LOOKBACK = 5           # bars on each side for swing high/low detection
 SR_MERGE_PCT = 0.15       # merge S/R levels within 0.15% of each other
 SR_MIN_TOUCHES = 2        # minimum touches to count as a level
+SR_MAX_LEVELS_PER_SIDE = 4   # keep only major levels per side
+SR_MAX_DISTANCE_PCT = 1.2    # ignore levels too far from current price
 ANALYSIS_BAR_SIZE = "5min"  # run analysis on 5-min bars

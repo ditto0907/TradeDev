@@ -105,6 +105,72 @@ def cluster_levels(points: List[dict], merge_pct: float = None) -> List[dict]:
     return [l for l in levels if l["touches"] >= config.SR_MIN_TOUCHES]
 
 
+def select_primary_levels(
+    levels: List[dict],
+    current_price: float,
+    latest_time: int,
+    is_support: bool,
+) -> List[dict]:
+    """
+    Keep only major S/R levels by combining strength, recency, and proximity.
+
+    Steps:
+    1) Keep levels on the correct side of current price.
+    2) Drop levels too far from current price.
+    3) Score by touches (major), recency (secondary), proximity (secondary).
+    4) Return a small ordered set nearest to current price directionally.
+    """
+    if not levels or current_price <= 0:
+        return []
+
+    max_distance_pct = getattr(config, "SR_MAX_DISTANCE_PCT", 1.2)
+    max_levels = getattr(config, "SR_MAX_LEVELS_PER_SIDE", 4)
+    if max_levels <= 0:
+        return []
+
+    # Keep levels on the expected side and inside the max distance window.
+    side_levels = []
+    for l in levels:
+        price = l["price"]
+        if is_support and price > current_price:
+            continue
+        if (not is_support) and price < current_price:
+            continue
+        dist_pct = abs(price - current_price) / current_price * 100
+        if dist_pct <= max_distance_pct:
+            side_levels.append(l)
+
+    # Fallback: if the distance filter is too strict, keep side-only levels.
+    if not side_levels:
+        side_levels = [
+            l for l in levels
+            if (l["price"] <= current_price if is_support else l["price"] >= current_price)
+        ]
+
+    # Score and keep only the strongest few.
+    scored = []
+    for l in side_levels:
+        touches = float(l.get("touches", 0))
+        last_time = int(l.get("last_time", 0) or 0)
+        dist_pct = abs(l["price"] - current_price) / current_price * 100
+
+        recency = 0.0
+        if latest_time > 0 and last_time > 0:
+            age_ratio = max(0.0, min(1.0, (latest_time - last_time) / 86400.0))
+            recency = 1.0 - age_ratio
+
+        proximity = max(0.0, 1.0 - dist_pct / max(max_distance_pct, 1e-6))
+        score = touches * 3.0 + recency + proximity
+        scored.append((score, l))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    selected = [l for _, l in scored[:max_levels]]
+
+    # Render order: nearest first (support from high to low, resistance low to high)
+    selected.sort(key=lambda x: x["price"], reverse=is_support)
+    return selected
+
+
 # ─── Market Structure & Cycle Detection ──────────────────────────────────────
 
 def _range_pct(bars: List[dict]) -> float:
@@ -250,20 +316,21 @@ class PriceActionAnalyzer:
         support_levels = cluster_levels(swing_lows)
         resistance_levels = cluster_levels(swing_highs)
 
-        # Classify levels relative to current price
+        # Keep only primary levels around current price.
         current_price = bars[-1]["close"] if bars else 0
-        support_levels = [l for l in support_levels if l["price"] <= current_price * 1.002]
-        resistance_levels = [l for l in resistance_levels if l["price"] >= current_price * 0.998]
-
-        # Sort: supports descending (nearest first), resistances ascending (nearest first)
-        support_levels.sort(key=lambda x: x["price"], reverse=True)
-        resistance_levels.sort(key=lambda x: x["price"])
+        latest_time = bars[-1]["time"] if bars else 0
+        support_levels = select_primary_levels(
+            support_levels, current_price, latest_time, is_support=True
+        )
+        resistance_levels = select_primary_levels(
+            resistance_levels, current_price, latest_time, is_support=False
+        )
 
         market_cycle, cycle_ranges = detect_market_structure(bars)
 
         return {
-            "support_levels": support_levels[:10],     # top 10 nearest
-            "resistance_levels": resistance_levels[:10],
+            "support_levels": support_levels,
+            "resistance_levels": resistance_levels,
             "market_cycle": market_cycle,
             "cycle_ranges": cycle_ranges,
         }
