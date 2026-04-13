@@ -473,7 +473,7 @@ async def get_symbols(symbol: str = Query("MES")):
             "exchange": "CME", "listed_exchange": "CME",
             "pricescale": 100, "minmov": 25,
             "timezone": "America/New_York",
-            "session_eth": "1800-1700:12345",
+            "session_eth": "1800-1700:123456",
             "session_rth": "0930-1600:23456",
             "ib_symbol": "MES", "ib_exchange": "CME",
         },
@@ -483,7 +483,7 @@ async def get_symbols(symbol: str = Query("MES")):
             "exchange": "CME", "listed_exchange": "CME",
             "pricescale": 100, "minmov": 25,
             "timezone": "America/New_York",
-            "session_eth": "1800-1700:12345",
+            "session_eth": "1800-1700:123456",
             "session_rth": "0930-1600:23456",
             "ib_symbol": "MNQ", "ib_exchange": "CME",
         },
@@ -503,7 +503,7 @@ async def get_symbols(symbol: str = Query("MES")):
             "exchange": "COMEX", "listed_exchange": "COMEX",
             "pricescale": 10, "minmov": 1,
             "timezone": "America/New_York",
-            "session_eth": "1800-1700:12345",
+            "session_eth": "1800-1700:123456",
             "session_rth": "0930-1700:23456",
             "ib_symbol": "MGC", "ib_exchange": "COMEX",
         },
@@ -594,7 +594,22 @@ async def get_history(
         if latest_db is not None:
             capped_to = min(to_ts, now_ts)
             gap_right = capped_to - latest_db
+            
+            # Limit max gap to fetch: 3 days for intraday bars to avoid IB timeouts
+            # on inactive contracts or weekend gaps. Fur daily bars, allow up to 30 days.
+            max_gap = 30 * 86400 if interval >= 86400 else 3 * 86400
+            
             if gap_right > interval * 2:
+                if gap_right > max_gap:
+                    logger.warning(
+                        "[%s/%s] Right gap %ds (%.1f days) exceeds max %ds — "
+                        "capping fetch to avoid timeout. Consider manual data sync.",
+                        sym, key, gap_right, gap_right/86400, max_gap,
+                    )
+                    # Cap the fetch to max_gap from latest_db
+                    capped_to = min(capped_to, latest_db + max_gap)
+                    gap_right = capped_to - latest_db
+                
                 cooldown_key = (sym, key)
                 cooldown_until = _ib_fetch_cooldown.get(cooldown_key, 0)
                 if now_ts >= cooldown_until:

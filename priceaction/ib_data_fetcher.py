@@ -63,14 +63,23 @@ def _key_to_ib(key: str) -> tuple:
     return "5 mins", 300
 
 
-def ib_duration(gap_sec: int) -> str:
+def ib_duration(gap_sec: int, max_days: int = 30) -> str:
     """
     Convert a time gap (seconds) to an IB durationStr string.
     Supports up to 1 year — weeks/year strings allow fetching any
     historical date range when the chart scrolls past cached data.
+    
+    Args:
+        gap_sec: Time gap in seconds
+        max_days: Maximum duration in days (default 30 to avoid IB timeouts)
     """
     gap_sec += 3_600          # +1h buffer to ensure the boundary bar is included
     days = gap_sec / 86_400
+    
+    # Cap at max_days to avoid IB timeouts on large gaps (e.g., weekends + inactive contracts)
+    if days > max_days:
+        days = max_days
+    
     if days < 1:
         return f"{max(int(gap_sec), 3_600)} S"
     if days <= 7:
