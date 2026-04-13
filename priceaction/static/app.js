@@ -2714,7 +2714,9 @@ async function runStrategyBacktest() {
     const fromEl = document.getElementById('strat-from');
     const toEl   = document.getElementById('strat-to');
     const session = document.getElementById('strat-session')?.value || 'all';
-    const timeFilter = document.getElementById('strat-time-filter')?.value || '';
+    const timeStart = document.getElementById('strat-time-start')?.value || '';
+    const timeEnd   = document.getElementById('strat-time-end')?.value || '';
+    const timeFilter = (timeStart && timeEnd) ? `${timeStart}-${timeEnd}` : '';
 
     const from_ts = fromEl?.value ? Math.floor(new Date(fromEl.value).getTime() / 1000) : 0;
     const to_ts   = toEl?.value   ? Math.floor(new Date(toEl.value + 'T23:59:59').getTime() / 1000) : STRAT_TS_MAX;
@@ -2998,13 +3000,9 @@ function stratLocateTrade(entry_time) {
 // ── Chart markers ─────────────────────────────────────────────────────────────
 
 function _clearBacktestMarkers() {
-  if (!_widget) return;
-  try {
-    const chart = _widget.activeChart();
-    for (const id of _stratMarkerShapes) {
-      try { chart.removeEntity(id); } catch (_) {}
-    }
-  } catch (_) {}
+  for (const obj of _stratMarkerShapes) {
+    try { obj.remove(); } catch (_) {}
+  }
   _stratMarkerShapes = [];
 }
 
@@ -3037,7 +3035,7 @@ function _drawBacktestMarkers(trades, showFiltered) {
         : (isLong ? 'Entry▲ Stop' : 'Entry▼ Stop');
 
       try {
-        const entryId = chart.createExecutionShape()
+        const entryExec = chart.createExecutionShape()
           .setTime(t.entry_time)
           .setDirection(isLong ? 'buy' : 'sell')
           .setPrice(t.entry_price)
@@ -3046,9 +3044,8 @@ function _drawBacktestMarkers(trades, showFiltered) {
           .setArrowSpacing(3)
           .setFont('bold 11px sans-serif')
           .setTextColor(entryColor)
-          .setText(entryLabel)
-          .getShapeId();
-        if (entryId) _stratMarkerShapes.push(entryId);
+          .setText(entryLabel);
+        _stratMarkerShapes.push(entryExec);
       } catch (_) {}
 
       // ── Exit marker (only for non-filtered closed trades) ──
@@ -3066,7 +3063,7 @@ function _drawBacktestMarkers(trades, showFiltered) {
             : 'Exit (open)';
 
         try {
-          const exitId = chart.createExecutionShape()
+          const exitExec = chart.createExecutionShape()
             .setTime(t.exit_time)
             .setDirection(isLong ? 'sell' : 'buy')
             .setPrice(t.exit_price)
@@ -3075,9 +3072,8 @@ function _drawBacktestMarkers(trades, showFiltered) {
             .setArrowSpacing(3)
             .setFont('bold 11px sans-serif')
             .setTextColor(exitColor)
-            .setText(exitLabel)
-            .getShapeId();
-          if (exitId) _stratMarkerShapes.push(exitId);
+            .setText(exitLabel);
+          _stratMarkerShapes.push(exitExec);
         } catch (_) {}
       }
     }
