@@ -93,7 +93,7 @@ def on_new_bar(bar_size_key: str, bar: dict):
         analysis_updated = True
 
     asyncio.create_task(broadcast({
-        "type": "bar", "bar_size": bar_size_key, "bar": bar,
+        "type": "bar", "bar_size": bar_size_key, "bar": bar, "symbol": MES_SYM,
     }))
     if analysis_updated:
         asyncio.create_task(broadcast({

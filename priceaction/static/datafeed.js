@@ -119,7 +119,7 @@ class MESDatafeed {
   // ── subscribeBars ──────────────────────────────────────────────────────────
 
   subscribeBars(symbolInfo, resolution, onTick, listenerGuid) {
-    this._subscriptions[listenerGuid] = { resolution, onTick };
+    this._subscriptions[listenerGuid] = { resolution, onTick, symbol: symbolInfo.name };
     this._ensureWebSocket();
   }
 
@@ -186,6 +186,7 @@ class MESDatafeed {
     const barRes = resMap[msg.bar_size];
     if (!barRes) return;
 
+    const msgSymbol = msg.symbol || 'MES';
     const tvBar = {
       time:   msg.bar.time * 1000,
       open:   msg.bar.open,
@@ -195,7 +196,7 @@ class MESDatafeed {
       volume: msg.bar.volume,
     };
     for (const sub of Object.values(this._subscriptions)) {
-      if (sub.resolution === barRes) sub.onTick(tvBar);
+      if (sub.resolution === barRes && sub.symbol === msgSymbol) sub.onTick(tvBar);
     }
   }
 }
