@@ -62,6 +62,8 @@ _db_coverage_task:    Optional[asyncio.Task] = None  # debug background task
 # Cooldown map: avoid re-fetching from IB when market is closed / no data
 # {(symbol, db_key): expiry_unix_ts}
 _ib_fetch_cooldown:   dict = {}
+_IB_COOLDOWN_NO_DATA: int  = 300   # 5 min cooldown after IB returns 0 bars
+_IB_COOLDOWN_ERROR:   int  = 60    # 1 min cooldown after IB fetch exception
 
 
 # ─── WebSocket Broadcast ──────────────────────────────────────────────────────
@@ -88,7 +90,10 @@ def on_new_bar(bar_size_key: str, bar: dict):
     """
     global _latest_analysis, _last_analysis_bar_ts
 
-    # Track completed bars per (symbol, bar_size_key) — currently only MES streams
+    # Track completed bars per (symbol, bar_size_key).
+    # Real-time streaming is currently only wired for MES; when additional
+    # symbols get their own subscriptions the symbol can be passed through
+    # the callback and this will work without further changes.
     symbol = MES_SYM
     prev_key = (symbol, bar_size_key)
     prev = _prev_completed_bar.get(prev_key)
@@ -607,9 +612,10 @@ async def get_history(
                     )
                     # Set cooldown for right-gap fetches to avoid hammering IB
                     if idx == right_gap_index:
-                        _ib_fetch_cooldown[(sym, key)] = now_ts + 300
+                        _ib_fetch_cooldown[(sym, key)] = now_ts + _IB_COOLDOWN_NO_DATA
                         logger.debug(
-                            "[%s/%s] Right gap cooldown set (5 min)", sym, key,
+                            "[%s/%s] Right gap cooldown set (%ds)",
+                            sym, key, _IB_COOLDOWN_NO_DATA,
                         )
             except Exception as e:
                 logger.warning(
@@ -617,7 +623,7 @@ async def get_history(
                     sym, key, f_from, f_to, e,
                 )
                 if idx == right_gap_index:
-                    _ib_fetch_cooldown[(sym, key)] = now_ts + 60
+                    _ib_fetch_cooldown[(sym, key)] = now_ts + _IB_COOLDOWN_ERROR
     elif fetch_ranges:
         logger.debug(
             "[%s/%s] Data gaps detected but IB not ready — skipping fetch",
