@@ -280,6 +280,7 @@ def find_gaps(
         return []
 
     from datetime import datetime, timezone, timedelta
+    from market_holidays import spans_us_holiday
 
     gaps: List[dict] = []
     for i in range(1, len(rows)):
@@ -302,11 +303,15 @@ def find_gaps(
                     spans_weekend = True
                     break
 
+        # Check whether the gap includes a US market holiday
+        spans_holiday = spans_us_holiday(d1.date(), d2.date())
+
         gaps.append({
             "gap_start": t1,
             "gap_end": t2,
             "gap_seconds": gap,
             "spans_weekend": spans_weekend,
+            "spans_holiday": spans_holiday,
         })
 
     return gaps

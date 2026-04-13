@@ -159,13 +159,15 @@ async def _db_coverage_loop():
                         interval = 300  # fallback
                     gaps = db.find_gaps(sym, tf, expected_interval=interval)
                     if gaps:
-                        # Separate weekday (suspicious) gaps from weekend (expected) gaps
-                        weekday_gaps = [g for g in gaps if not g["spans_weekend"]]
+                        # Separate weekday (suspicious) gaps from weekend/holiday (expected) gaps
+                        weekday_gaps = [g for g in gaps if not g["spans_weekend"] and not g.get("spans_holiday")]
                         weekend_gaps = [g for g in gaps if g["spans_weekend"]]
+                        holiday_gaps = [g for g in gaps if g.get("spans_holiday") and not g["spans_weekend"]]
                         gap_lines = [
                             f"[Continuity] {sym}/{tf}: "
                             f"{len(gaps)} gap(s) total — "
-                            f"{len(weekday_gaps)} weekday, {len(weekend_gaps)} weekend"
+                            f"{len(weekday_gaps)} weekday, {len(weekend_gaps)} weekend, "
+                            f"{len(holiday_gaps)} holiday"
                         ]
                         for g in weekday_gaps[:10]:
                             g_start = _dt.fromtimestamp(g["gap_start"], tz=_tz.utc).strftime("%Y-%m-%d %H:%M")
@@ -176,12 +178,19 @@ async def _db_coverage_loop():
                             )
                         if len(weekday_gaps) > 10:
                             gap_lines.append(f"  ... and {len(weekday_gaps) - 10} more weekday gaps")
+                        for g in holiday_gaps[:5]:
+                            g_start = _dt.fromtimestamp(g["gap_start"], tz=_tz.utc).strftime("%Y-%m-%d %H:%M")
+                            g_end   = _dt.fromtimestamp(g["gap_end"],   tz=_tz.utc).strftime("%Y-%m-%d %H:%M")
+                            gap_lines.append(
+                                f"  🏖 HOLIDAY GAP: {g_start} → {g_end} "
+                                f"({g['gap_seconds']}s / {g['gap_seconds']/3600:.1f}h)"
+                            )
                         if weekday_gaps:
                             _db_debug_logger.warning("\n".join(gap_lines))
                         else:
                             _db_debug_logger.debug(
-                                "[Continuity] %s/%s: %d weekend gaps only (OK)",
-                                sym, tf, len(weekend_gaps),
+                                "[Continuity] %s/%s: %d weekend + %d holiday gaps (OK)",
+                                sym, tf, len(weekend_gaps), len(holiday_gaps),
                             )
                     else:
                         _db_debug_logger.debug("[Continuity] %s/%s: OK (no gaps)", sym, tf)
