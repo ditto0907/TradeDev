@@ -223,7 +223,9 @@ def run_backtest(
 
         # ── Position sizing: cap risk at max_stop_loss ────────────────────────
         risk_per_contract = stop_distance * tick_value
-        contracts = int(math.floor(max_stop_loss / risk_per_contract)) if risk_per_contract > 0 else 0
+        if risk_per_contract <= 0:
+            continue
+        contracts = math.floor(max_stop_loss / risk_per_contract)
         if contracts < 1:
             continue  # stop distance too large for max allowed risk
 
