@@ -56,8 +56,14 @@ _order_mgr:  Optional[IBOrderManager] = None   # set after IB connect
 _ws_clients:          List[WebSocket] = []
 _latest_analysis:     dict = {}
 _last_analysis_bar_ts: int = 0
-_prev_completed_bar:  dict = {"5min": None}  # for DB write on completion
+_prev_completed_bar:  dict = {}   # {(symbol, bar_size_key): bar_dict}
 _db_coverage_task:    Optional[asyncio.Task] = None  # debug background task
+
+# Cooldown map: avoid re-fetching from IB when market is closed / no data
+# {(symbol, db_key): expiry_unix_ts}
+_ib_fetch_cooldown:   dict = {}
+_IB_COOLDOWN_NO_DATA: int  = 300   # 5 min cooldown after IB returns 0 bars
+_IB_COOLDOWN_ERROR:   int  = 60    # 1 min cooldown after IB fetch exception
 
 
 # ─── WebSocket Broadcast ──────────────────────────────────────────────────────
@@ -82,14 +88,20 @@ def on_new_bar(bar_size_key: str, bar: dict):
     Saves completed bars to DB (when timestamp advances), re-runs analysis
     on new 5min bars, and broadcasts bar+analysis to WebSocket clients.
     """
-    global _latest_analysis, _last_analysis_bar_ts, _prev_completed_bar
+    global _latest_analysis, _last_analysis_bar_ts
 
-    prev = _prev_completed_bar[bar_size_key]
+    # Track completed bars per (symbol, bar_size_key).
+    # Real-time streaming is currently only wired for MES; when additional
+    # symbols get their own subscriptions the symbol can be passed through
+    # the callback and this will work without further changes.
+    symbol = MES_SYM
+    prev_key = (symbol, bar_size_key)
+    prev = _prev_completed_bar.get(prev_key)
     if prev is not None and bar["time"] > prev["time"]:
         # The previous bar just completed — persist it
-        db.insert_bars(MES_SYM, bar_size_key, [prev])
+        db.insert_bars(symbol, bar_size_key, [prev])
         sheets.buffer_bar(bar_size_key, prev)
-    _prev_completed_bar[bar_size_key] = dict(bar)
+    _prev_completed_bar[prev_key] = dict(bar)
 
     # Re-run price-action analysis only when a new 5min bar opens
     analysis_updated = False
@@ -111,8 +123,13 @@ def on_new_bar(bar_size_key: str, bar: dict):
 
 
 async def _db_coverage_loop():
-    """Background task: log DB bar coverage for every symbol × timeframe every 60 s."""
+    """Background task: log DB bar coverage and check data continuity every 60 s.
+
+    When DATAFEED_DEBUG is enabled, also scans every symbol × timeframe for
+    unexpected gaps (missing bars during trading hours).
+    """
     from datetime import datetime as _dt, timezone as _tz
+    from ib_data_fetcher import _key_to_ib
     while True:
         try:
             coverage = db.get_coverage()
@@ -130,6 +147,54 @@ async def _db_coverage_loop():
                     )
                 lines.append("────────────────────────────────────────────────")
                 _db_debug_logger.info("\n".join(lines))
+
+            # ── Data continuity check (debug mode only) ──────────────────────
+            if DATAFEED_DEBUG and coverage:
+                for c in coverage:
+                    sym = c["symbol"]
+                    tf  = c["timeframe"]
+                    try:
+                        _, interval = _key_to_ib(tf)
+                    except Exception:
+                        interval = 300  # fallback
+                    gaps = db.find_gaps(sym, tf, expected_interval=interval)
+                    if gaps:
+                        # Separate weekday (suspicious) gaps from weekend/holiday (expected) gaps
+                        weekday_gaps = [g for g in gaps if not g["spans_weekend"] and not g.get("spans_holiday")]
+                        weekend_gaps = [g for g in gaps if g["spans_weekend"]]
+                        holiday_gaps = [g for g in gaps if g.get("spans_holiday") and not g["spans_weekend"]]
+                        gap_lines = [
+                            f"[Continuity] {sym}/{tf}: "
+                            f"{len(gaps)} gap(s) total — "
+                            f"{len(weekday_gaps)} weekday, {len(weekend_gaps)} weekend, "
+                            f"{len(holiday_gaps)} holiday"
+                        ]
+                        for g in weekday_gaps[:10]:
+                            g_start = _dt.fromtimestamp(g["gap_start"], tz=_tz.utc).strftime("%Y-%m-%d %H:%M")
+                            g_end   = _dt.fromtimestamp(g["gap_end"],   tz=_tz.utc).strftime("%Y-%m-%d %H:%M")
+                            gap_lines.append(
+                                f"  ⚠ WEEKDAY GAP: {g_start} → {g_end} "
+                                f"({g['gap_seconds']}s / {g['gap_seconds']/3600:.1f}h)"
+                            )
+                        if len(weekday_gaps) > 10:
+                            gap_lines.append(f"  ... and {len(weekday_gaps) - 10} more weekday gaps")
+                        for g in holiday_gaps[:5]:
+                            g_start = _dt.fromtimestamp(g["gap_start"], tz=_tz.utc).strftime("%Y-%m-%d %H:%M")
+                            g_end   = _dt.fromtimestamp(g["gap_end"],   tz=_tz.utc).strftime("%Y-%m-%d %H:%M")
+                            gap_lines.append(
+                                f"  🏖 HOLIDAY GAP: {g_start} → {g_end} "
+                                f"({g['gap_seconds']}s / {g['gap_seconds']/3600:.1f}h)"
+                            )
+                        if weekday_gaps:
+                            _db_debug_logger.warning("\n".join(gap_lines))
+                        else:
+                            _db_debug_logger.debug(
+                                "[Continuity] %s/%s: %d weekend + %d holiday gaps (OK)",
+                                sym, tf, len(weekend_gaps), len(holiday_gaps),
+                            )
+                    else:
+                        _db_debug_logger.debug("[Continuity] %s/%s: OK (no gaps)", sym, tf)
+
             await asyncio.sleep(60)
         except asyncio.CancelledError:
             break
@@ -311,10 +376,10 @@ async def lifespan(app: FastAPI):
     # ── Shutdown ──────────────────────────────────────────────────────────────
     _db_coverage_task.cancel()
     logger.info("Shutting down…")
-    # Flush any in-progress bars to DB
-    bar = _prev_completed_bar.get("5min")
-    if bar:
-        db.insert_bars(MES_SYM, "5min", [bar])
+    # Flush any in-progress bars to DB (keyed by (symbol, bar_size_key))
+    for (sym, bsk), bar in _prev_completed_bar.items():
+        if bar:
+            db.insert_bars(sym, bsk, [bar])
     sheets.flush_buffer()
     fetcher.unsubscribe_realtime()
     fetcher.disconnect()
@@ -390,7 +455,7 @@ async def get_symbols(symbol: str = Query("MES")):
             "exchange": "CME", "listed_exchange": "CME",
             "pricescale": 100, "minmov": 25,
             "timezone": "America/New_York",
-            "session_eth": "1800-1700:1234567",
+            "session_eth": "1800-1700:12345",
             "session_rth": "0930-1600:23456",
             "ib_symbol": "MES", "ib_exchange": "CME",
         },
@@ -400,7 +465,7 @@ async def get_symbols(symbol: str = Query("MES")):
             "exchange": "CME", "listed_exchange": "CME",
             "pricescale": 100, "minmov": 25,
             "timezone": "America/New_York",
-            "session_eth": "1800-1700:1234567",
+            "session_eth": "1800-1700:12345",
             "session_rth": "0930-1600:23456",
             "ib_symbol": "MNQ", "ib_exchange": "CME",
         },
@@ -420,7 +485,7 @@ async def get_symbols(symbol: str = Query("MES")):
             "exchange": "COMEX", "listed_exchange": "COMEX",
             "pricescale": 10, "minmov": 1,
             "timezone": "America/New_York",
-            "session_eth": "1800-1700:1234567",
+            "session_eth": "1800-1700:12345",
             "session_rth": "0930-1700:23456",
             "ib_symbol": "MGC", "ib_exchange": "COMEX",
         },
@@ -456,12 +521,20 @@ async def get_history(
     """
     TradingView DataFeed: getBars.
 
-    Serves bars from SQLite.  If countback bars aren't available in the DB
-    for the requested range (e.g. chart scrolled past cached history), an
-    on-demand fetch from IB is attempted and the result is saved to the DB.
+    Serves bars from SQLite.  If the DB does not fully cover the requested
+    [from_ts, to_ts] range, on-demand fetches from IB fill the gaps and
+    persist the result to the DB before returning.
+
+    Gap detection covers three cases:
+      1. **No data at all** — fetch the entire requested range.
+      2. **Left gap** — request extends before the earliest bar in DB.
+      3. **Right gap** — DB data is stale (latest bar older than ``to_ts``).
+
+    A per-symbol cooldown prevents repeated IB calls when the market is
+    closed and IB returns no new data.
     Works for ALL supported symbols (MES, MNQ, NK225MC, MGC, …).
     """
-    from ib_data_fetcher import resolution_to_key
+    from ib_data_fetcher import resolution_to_key, _key_to_ib
     key  = resolution_to_key(resolution)
     sym  = symbol.upper()
 
@@ -474,36 +547,102 @@ async def get_history(
         sym, key, len(bars), from_ts, to_ts, earliest_db, latest_db,
     )
 
-    # ── Step 2: Auto-fetch from IB when DB has gaps ──────────────────────────
-    # Trigger when the requested range extends before our earliest stored bar.
-    needs_older = (earliest_db is None or from_ts < earliest_db)
-    if needs_older:
-        if fetcher._ib_ready and fetcher.ib and fetcher.ib.isConnected():
-            fetch_end = earliest_db if earliest_db else to_ts
+    # ── Step 2: Determine missing ranges ─────────────────────────────────────
+    _, interval = _key_to_ib(key)
+    now_ts = int(time.time())
+    fetch_ranges: list = []            # [(from, to), ...]
+    right_gap_index: int = -1          # index into fetch_ranges for cooldown
+
+    if earliest_db is None:
+        # ---- Case 1: no data at all for this symbol / timeframe -------------
+        capped_to = min(to_ts, now_ts)
+        if capped_to > from_ts:
+            fetch_ranges.append((from_ts, capped_to))
             logger.info(
-                "[%s/%s] Scroll past DB boundary → fetching from IB "
-                "(from=%s earliest_db=%s fetch_end=%s)",
-                sym, key, from_ts, earliest_db, fetch_end,
+                "[%s/%s] No data in DB — will fetch full range [%s→%s] from IB",
+                sym, key, from_ts, capped_to,
             )
-            try:
-                fetched = await fetcher.fetch_range(key, from_ts, fetch_end, symbol=sym)
-                if fetched:
-                    saved = db.insert_bars(sym, key, fetched)
-                    bars = db.get_bars(sym, key, from_ts=from_ts, to_ts=to_ts)
+    else:
+        # ---- Case 2: left gap (chart scrolled past oldest bar) --------------
+        if from_ts < earliest_db:
+            fetch_ranges.append((from_ts, earliest_db))
+            logger.info(
+                "[%s/%s] Left gap: request starts before DB coverage "
+                "(from=%s < earliest_db=%s)",
+                sym, key, from_ts, earliest_db,
+            )
+
+        # ---- Case 3: right gap (stale data, no real-time for this symbol) ---
+        if latest_db is not None:
+            capped_to = min(to_ts, now_ts)
+            gap_right = capped_to - latest_db
+            if gap_right > interval * 2:
+                cooldown_key = (sym, key)
+                cooldown_until = _ib_fetch_cooldown.get(cooldown_key, 0)
+                if now_ts >= cooldown_until:
+                    right_gap_index = len(fetch_ranges)
+                    fetch_ranges.append((latest_db, capped_to))
                     logger.info(
-                        "[%s/%s] IB auto-fetch OK: %d bars fetched, %d saved, %d total in range",
-                        sym, key, len(fetched), saved, len(bars),
+                        "[%s/%s] Right gap: latest_db=%s is %ds behind request "
+                        "end — will fetch newer data from IB",
+                        sym, key, latest_db, gap_right,
                     )
                 else:
-                    logger.info("[%s/%s] IB returned 0 bars for range %s→%s",
-                                sym, key, from_ts, fetch_end)
-            except Exception as e:
-                logger.warning("[%s/%s] On-demand IB fetch failed: %s", sym, key, e)
-        else:
-            logger.debug(
-                "[%s/%s] Scroll past DB boundary but IB not ready — skipping auto-fetch",
-                sym, key,
+                    logger.debug(
+                        "[%s/%s] Right gap detected (%ds) but in cooldown "
+                        "(%ds remaining) — skipping",
+                        sym, key, gap_right, cooldown_until - now_ts,
+                    )
+
+    # ── Step 3: Fetch each missing range from IB ─────────────────────────────
+    any_fetched = False
+    ib_ready = fetcher._ib_ready and fetcher.ib and fetcher.ib.isConnected()
+
+    if fetch_ranges and ib_ready:
+        for idx, (f_from, f_to) in enumerate(fetch_ranges):
+            logger.info(
+                "[%s/%s] IB fetch start: range [%s→%s]", sym, key, f_from, f_to,
             )
+            try:
+                fetched = await fetcher.fetch_range(key, f_from, f_to, symbol=sym)
+                if fetched:
+                    saved = db.insert_bars(sym, key, fetched)
+                    logger.info(
+                        "[%s/%s] IB fetch OK: %d bars fetched, %d saved to DB",
+                        sym, key, len(fetched), saved,
+                    )
+                    any_fetched = True
+                    # Clear cooldown on success
+                    _ib_fetch_cooldown.pop((sym, key), None)
+                else:
+                    logger.info(
+                        "[%s/%s] IB returned 0 bars for range [%s→%s]",
+                        sym, key, f_from, f_to,
+                    )
+                    # Set cooldown for right-gap fetches to avoid hammering IB
+                    if idx == right_gap_index:
+                        _ib_fetch_cooldown[(sym, key)] = now_ts + _IB_COOLDOWN_NO_DATA
+                        logger.debug(
+                            "[%s/%s] Right gap cooldown set (%ds)",
+                            sym, key, _IB_COOLDOWN_NO_DATA,
+                        )
+            except Exception as e:
+                logger.warning(
+                    "[%s/%s] IB fetch failed for range [%s→%s]: %s",
+                    sym, key, f_from, f_to, e,
+                )
+                if idx == right_gap_index:
+                    _ib_fetch_cooldown[(sym, key)] = now_ts + _IB_COOLDOWN_ERROR
+    elif fetch_ranges:
+        logger.debug(
+            "[%s/%s] Data gaps detected but IB not ready — skipping fetch",
+            sym, key,
+        )
+
+    # Re-query DB after successful fetches
+    if any_fetched:
+        bars = db.get_bars(sym, key, from_ts=from_ts, to_ts=to_ts)
+        logger.info("[%s/%s] After IB fill: %d bars in range", sym, key, len(bars))
 
     # Final fallback: in-memory cache (only valid for the primary symbol MES)
     if not bars and sym == MES_SYM:

@@ -245,6 +245,78 @@ def get_coverage() -> List[dict]:
     ]
 
 
+def find_gaps(
+    symbol: str,
+    timeframe: str,
+    expected_interval: int,
+    max_acceptable_gap: int = None,
+) -> List[dict]:
+    """
+    Detect gaps in bar data that exceed *max_acceptable_gap* seconds.
+
+    Returns a list of gap dicts::
+
+        {
+            "gap_start":    int,   # timestamp of last bar before the gap
+            "gap_end":      int,   # timestamp of first bar after the gap
+            "gap_seconds":  int,   # duration in seconds
+            "spans_weekend": bool, # True if any Sat/Sun falls inside the gap
+        }
+
+    Gaps that span a weekend are expected (market closed); gaps during
+    weekdays likely indicate missing data that should be back-filled.
+    """
+    if max_acceptable_gap is None:
+        # Default thresholds: 4 h for intraday, 4 days for daily
+        max_acceptable_gap = 14400 if expected_interval < 86400 else 345600
+
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT ts FROM bars WHERE symbol=? AND timeframe=? ORDER BY ts",
+            (symbol, timeframe),
+        ).fetchall()
+
+    if len(rows) < 2:
+        return []
+
+    from datetime import datetime, timezone, timedelta
+    from market_holidays import spans_us_holiday
+
+    gaps: List[dict] = []
+    for i in range(1, len(rows)):
+        t1 = rows[i - 1][0]
+        t2 = rows[i][0]
+        gap = t2 - t1
+        if gap <= max_acceptable_gap:
+            continue
+
+        # Check whether the gap includes a Saturday or Sunday (UTC)
+        d1 = datetime.fromtimestamp(t1, tz=timezone.utc)
+        d2 = datetime.fromtimestamp(t2, tz=timezone.utc)
+        days_diff = (d2.date() - d1.date()).days
+        spans_weekend = False
+        if days_diff >= 7:
+            spans_weekend = True
+        else:
+            for j in range(days_diff + 1):
+                if (d1 + timedelta(days=j)).weekday() in (5, 6):
+                    spans_weekend = True
+                    break
+
+        # Check whether the gap includes a US market holiday
+        spans_holiday = spans_us_holiday(d1.date(), d2.date())
+
+        gaps.append({
+            "gap_start": t1,
+            "gap_end": t2,
+            "gap_seconds": gap,
+            "spans_weekend": spans_weekend,
+            "spans_holiday": spans_holiday,
+        })
+
+    return gaps
+
+
 # ─── Chart Layout CRUD ────────────────────────────────────────────────────────
 
 def get_all_charts() -> List[dict]:
