@@ -2649,6 +2649,8 @@ let _stratMarkerShapes = [];     // chart execution shapes for current backtest
 let _stratShowMarkers  = false;
 let _stratBacktestList = [];     // cached list from server
 
+const STRAT_TS_MAX = 9999999999;   // sentinel: no upper timestamp bound
+
 function initStrategyTab() {
   // Set default date range: last 60 days
   const now = new Date();
@@ -2684,8 +2686,10 @@ function _renderBacktestHistorySelect() {
     const p   = bt.params  || {};
     const dt  = (bt.created_at || '').slice(0, 16).replace('T', ' ');
     const wr  = s.win_rate != null ? (s.win_rate * 100).toFixed(0) + '%' : '?';
-    const pnl = s.total_pnl != null ? (s.total_pnl >= 0 ? '+' : '') + '$' + s.total_pnl.toFixed(0) : '';
-    const lbl = `${dt}  ${p.symbol || ''}/${p.timeframe || ''}  IBS${((p.ibs_threshold || 0.7) * 100).toFixed(0)}%  ${s.total || 0}T ${wr} ${pnl}`;
+    const pnlSign = (s.total_pnl ?? 0) >= 0 ? '+' : '';
+    const pnl = s.total_pnl != null ? `${pnlSign}$${s.total_pnl.toFixed(0)}` : '';
+    const ibsPct = ((p.ibs_threshold || 0.7) * 100).toFixed(0);
+    const lbl = `${dt}  ${p.symbol || ''}/${p.timeframe || ''}  IBS${ibsPct}%  ${s.total || 0}T ${wr} ${pnl}`;
     const opt = document.createElement('option');
     opt.value = bt.id;
     opt.textContent = lbl;
@@ -2705,7 +2709,7 @@ async function runStrategyBacktest() {
     const toEl   = document.getElementById('strat-to');
 
     const from_ts = fromEl?.value ? Math.floor(new Date(fromEl.value).getTime() / 1000) : 0;
-    const to_ts   = toEl?.value   ? Math.floor(new Date(toEl.value + 'T23:59:59').getTime() / 1000) : 9999999999;
+    const to_ts   = toEl?.value   ? Math.floor(new Date(toEl.value + 'T23:59:59').getTime() / 1000) : STRAT_TS_MAX;
 
     const res = await fetch('/api/strategy/backtest', {
       method: 'POST',

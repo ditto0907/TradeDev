@@ -317,7 +317,12 @@ def _compute_summary(trades: List[dict], bars_used: int, data_source: str) -> di
     gross_win  = sum(t["pnl"] for t in wins   if t["pnl"] is not None)
     gross_loss = abs(sum(t["pnl"] for t in losses if t["pnl"] is not None))
 
-    profit_factor = (gross_win / gross_loss) if gross_loss > 0 else (float("inf") if gross_win > 0 else 0.0)
+    if gross_loss > 0:
+        profit_factor = gross_win / gross_loss
+    elif gross_win > 0:
+        profit_factor = float("inf")
+    else:
+        profit_factor = 0.0
 
     # Max drawdown
     running = 0.0

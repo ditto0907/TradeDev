@@ -1068,7 +1068,7 @@ async def run_strategy_backtest(req: BacktestRequest):
         return result
     except Exception as e:
         logger.error("Backtest error: %s", e, exc_info=True)
-        return JSONResponse({"error": str(e)}, status_code=500)
+        return JSONResponse({"error": "Backtest failed. Check server logs for details."}, status_code=500)
 
 
 @app.get("/api/strategy/backtests")
