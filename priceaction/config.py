@@ -16,7 +16,7 @@ IB_HOST = "127.0.0.1"
 IB_PORT = 7497         # TWS paper/live. Use 7496 for live, 4001 for IB Gateway paper
 IB_CLIENT_ID = 10      # Use 10 to avoid conflicts with RiskControl (uses 0)
 
-# ─── MES Contract ────────────────────────────────────────────────────────────
+# ─── MES Contract (legacy — kept for backward compatibility) ─────────────────
 MES_SYMBOL = "MES"
 MES_SEC_TYPE = "CONTFUT"   # Continuous front-month contract (auto-rolls)
 MES_EXCHANGE = "CME"
@@ -34,6 +34,52 @@ EXTRA_SYMBOLS = [
     {"symbol": "NK225MC", "ib_symbol": "N225MC", "exchange": "OSE.JPN", "currency": "JPY"},
     {"symbol": "MGC",     "ib_symbol": "MGC", "exchange": "COMEX", "currency": "USD"},
 ]
+
+# ─── Unified Instrument Registry ─────────────────────────────────────────────
+# Central source-of-truth for all supported symbols.
+# Keys: our display/DB symbol name.
+INSTRUMENTS = {
+    "MES": {
+        "ib_symbol": "MES",
+        "exchange": "CME",
+        "currency": "USD",
+        "timezone": "America/New_York",
+        "contract_type": "quarterly",          # quarterly rollover
+        "contract_months": [3, 6, 9, 12],      # H M U Z
+        "rth_start": (9, 30),                   # local-time RTH window
+        "rth_end":   (16, 0),
+    },
+    "MNQ": {
+        "ib_symbol": "MNQ",
+        "exchange": "CME",
+        "currency": "USD",
+        "timezone": "America/New_York",
+        "contract_type": "quarterly",
+        "contract_months": [3, 6, 9, 12],
+        "rth_start": (9, 30),
+        "rth_end":   (16, 0),
+    },
+    "NK225MC": {
+        "ib_symbol": "N225MC",
+        "exchange": "OSE.JPN",
+        "currency": "JPY",
+        "timezone": "Asia/Tokyo",
+        "contract_type": "monthly",            # monthly rollover
+        "contract_months": list(range(1, 13)),  # every month
+        "rth_start": (8, 45),                   # JST RTH window
+        "rth_end":   (15, 45),
+    },
+    "MGC": {
+        "ib_symbol": "MGC",
+        "exchange": "COMEX",
+        "currency": "USD",
+        "timezone": "America/New_York",
+        "contract_type": "bi-monthly",         # Feb,Apr,Jun,Aug,Oct,Dec
+        "contract_months": [2, 4, 6, 8, 10, 12],
+        "rth_start": (9, 30),
+        "rth_end":   (17, 0),
+    },
+}
 
 # ─── Google Sheets ────────────────────────────────────────────────────────────
 GOOGLE_CREDENTIALS_PATH = BASE_DIR / "credentials" / "service_account.json"
