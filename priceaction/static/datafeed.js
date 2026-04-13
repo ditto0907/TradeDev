@@ -80,6 +80,9 @@ class MESDatafeed {
   getBars(symbolInfo, resolution, periodParams, onResult, onError) {
     const { from, to, countBack } = periodParams;
     let url = `/api/history?symbol=${encodeURIComponent(symbolInfo.name)}&resolution=${resolution}&from=${from}&to=${to}`;
+    if (countBack) {
+      url += `&countback=${countBack}`;
+    }
     console.log('[DataFeed] getBars:', symbolInfo.name, 'res:', resolution, 'from:', from, 'to:', to, 'countBack:', countBack);
 
     fetch(url)
