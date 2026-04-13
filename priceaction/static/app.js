@@ -1366,10 +1366,13 @@ function handlePriceMessage(event) {
   try { msg = JSON.parse(event.data); } catch { return; }
 
   if (msg.type === 'bar' && msg.bar_size === '5min') {
-    updateTopbarOHLC(msg.bar);
+    const barSymbol = msg.symbol || 'MES';
     updateWatchlistMES(msg.bar.close);
-    updateBidAsk(msg.bar.close);
-    _lastBar = msg.bar;
+    if (barSymbol === (_currentSymbol || 'MES')) {
+      updateTopbarOHLC(msg.bar);
+      updateBidAsk(msg.bar.close);
+      _lastBar = msg.bar;
+    }
 
   } else if (msg.type === 'snapshot' && msg.bars_5min?.length > 0) {
     const latest = msg.bars_5min[msg.bars_5min.length - 1];
