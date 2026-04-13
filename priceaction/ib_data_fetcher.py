@@ -124,6 +124,24 @@ def _prev_contract_month(yyyymm: str, symbol: str = "MES") -> str:
     return f"{y}{months[idx - 1]:02d}"
 
 
+def _next_contract_month(yyyymm: str, symbol: str = "MES") -> str:
+    """Return the YYYYMM of the next contract for *symbol*."""
+    inst = config.INSTRUMENTS.get(symbol)
+    months = inst["contract_months"] if inst else [3, 6, 9, 12]
+
+    y = int(yyyymm[:4])
+    m = int(yyyymm[4:])
+    if m not in months:
+        nxt = [q for q in months if q > m]
+        if nxt:
+            return f"{y}{nxt[0]:02d}"
+        return f"{y + 1}{months[0]:02d}"
+    idx = months.index(m)
+    if idx == len(months) - 1:
+        return f"{y + 1}{months[0]:02d}"
+    return f"{y}{months[idx + 1]:02d}"
+
+
 # ─── IBDataFetcher ────────────────────────────────────────────────────────────
 
 class IBDataFetcher:
@@ -347,7 +365,14 @@ class IBDataFetcher:
 
         # ── Strategy 1: month-specific Future contracts (with rollover) ──────
         target_month = _contract_month_for_ts(end_ts, symbol)
-        months_to_try = [target_month, _prev_contract_month(target_month, symbol)]
+        months_to_try = [
+            target_month,
+            _next_contract_month(target_month, symbol),
+            _prev_contract_month(target_month, symbol),
+        ]
+        # Deduplicate while preserving order
+        seen = set()
+        months_to_try = [m for m in months_to_try if not (m in seen or seen.add(m))]
 
         for month in months_to_try:
             try:
@@ -393,6 +418,8 @@ class IBDataFetcher:
                         symbol, contract.localSymbol, bar_size_key)
 
         # ── Strategy 2: ContFuture (continuous contract) as fallback ─────────
+        # IB does not allow setting endDateTime for ContFuture (error 10339),
+        # so we use endDateTime="" to fetch the most recent bars, then filter.
         logger.info("[%s] Trying ContFuture fallback for %s %s→%s",
                     symbol, bar_size_key, from_ts, to_ts)
         try:
@@ -407,7 +434,7 @@ class IBDataFetcher:
                 raw = await asyncio.wait_for(
                     self.ib.reqHistoricalDataAsync(
                         qualified[0],
-                        endDateTime=end_str,
+                        endDateTime="",
                         durationStr=dur_str,
                         barSizeSetting=bar_size,
                         whatToShow="TRADES",

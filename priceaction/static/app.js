@@ -2650,7 +2650,9 @@ function renderAnalysisTable() {
 let _stratCurrentId    = null;   // currently loaded backtest id
 let _stratMarkerShapes = [];     // chart execution shapes for current backtest
 let _stratShowMarkers  = false;
+let _stratShowFiltered = true;   // show SR-filtered trades on chart & in summary
 let _stratBacktestList = [];     // cached list from server
+let _stratCurrentTrades = [];    // trades from the current backtest run
 
 const STRAT_TS_MAX = 9999999999;   // sentinel: no upper timestamp bound
 
@@ -2711,6 +2713,8 @@ async function runStrategyBacktest() {
     const maxStop = parseFloat(document.getElementById('strat-maxstop')?.value || '200');
     const fromEl = document.getElementById('strat-from');
     const toEl   = document.getElementById('strat-to');
+    const session = document.getElementById('strat-session')?.value || 'all';
+    const timeFilter = document.getElementById('strat-time-filter')?.value || '';
 
     const from_ts = fromEl?.value ? Math.floor(new Date(fromEl.value).getTime() / 1000) : 0;
     const to_ts   = toEl?.value   ? Math.floor(new Date(toEl.value + 'T23:59:59').getTime() / 1000) : STRAT_TS_MAX;
@@ -2725,6 +2729,9 @@ async function runStrategyBacktest() {
         use_context_filter: ctx,
         rr_ratio: 1.0,
         max_stop_loss: maxStop,
+        session: session,
+        time_filter: timeFilter,
+        include_filtered: true,
       }),
     });
 
@@ -2736,9 +2743,10 @@ async function runStrategyBacktest() {
 
     const data = await res.json();
     _stratCurrentId = data.backtest_id;
-    _renderStrategySummary(data.summary);
-    _renderStrategyTrades(data.trades);
-    if (_stratShowMarkers) _drawBacktestMarkers(data.trades);
+    _stratCurrentTrades = data.trades || [];
+    _renderStrategySummary(data.summary, _stratShowFiltered);
+    _renderStrategyTrades(_stratCurrentTrades, _stratShowFiltered);
+    if (_stratShowMarkers) _drawBacktestMarkers(_stratCurrentTrades, _stratShowFiltered);
 
     // Reload history list and select current
     await _loadBacktestList();
@@ -2756,6 +2764,7 @@ async function runStrategyBacktest() {
 async function loadBacktestHistory(backtest_id) {
   if (!backtest_id) {
     _stratCurrentId = null;
+    _stratCurrentTrades = [];
     _clearStrategySummary();
     _clearStrategyTrades();
     _clearBacktestMarkers();
@@ -2770,9 +2779,10 @@ async function loadBacktestHistory(backtest_id) {
     // Find summary from cached list
     const bt = _stratBacktestList.find(b => b.id === backtest_id);
     _stratCurrentId = backtest_id;
-    _renderStrategySummary(bt?.summary || {});
-    _renderStrategyTrades(data.trades);
-    if (_stratShowMarkers) _drawBacktestMarkers(data.trades);
+    _stratCurrentTrades = data.trades || [];
+    _renderStrategySummary(bt?.summary || {}, _stratShowFiltered);
+    _renderStrategyTrades(_stratCurrentTrades, _stratShowFiltered);
+    if (_stratShowMarkers) _drawBacktestMarkers(_stratCurrentTrades, _stratShowFiltered);
   } catch (e) {
     console.error('[Strategy] loadBacktestHistory error:', e);
   }
@@ -2789,6 +2799,7 @@ async function deleteCurrentBacktest() {
     if (!res.ok) { alert('Delete failed.'); return; }
     if (_stratCurrentId === id) {
       _stratCurrentId = null;
+      _stratCurrentTrades = [];
       _clearStrategySummary();
       _clearStrategyTrades();
       _clearBacktestMarkers();
@@ -2805,19 +2816,37 @@ function toggleBacktestMarkers(show) {
     _clearBacktestMarkers();
     return;
   }
-  // Redraw from current trades table
+  // Redraw from current trades
+  if (_stratCurrentTrades.length) {
+    _drawBacktestMarkers(_stratCurrentTrades, _stratShowFiltered);
+    return;
+  }
+  // Fallback: re-fetch and draw
   const tbody = document.getElementById('strat-trades-tbody');
   if (!tbody || !_stratCurrentId) return;
-  // Re-fetch and draw
   fetch(`/api/strategy/backtests/${encodeURIComponent(_stratCurrentId)}/trades`)
     .then(r => r.json())
-    .then(d => _drawBacktestMarkers(d.trades))
+    .then(d => {
+      _stratCurrentTrades = d.trades || [];
+      _drawBacktestMarkers(_stratCurrentTrades, _stratShowFiltered);
+    })
     .catch(e => console.warn('[Strategy] toggleBacktestMarkers error:', e));
+}
+
+function toggleFilteredDisplay(show) {
+  _stratShowFiltered = show;
+  // Re-render trades table and markers with filtered visibility
+  if (_stratCurrentTrades.length) {
+    _renderStrategyTrades(_stratCurrentTrades, _stratShowFiltered);
+    // Recompute summary from trades when toggling filtered display
+    _recomputeSummary(_stratCurrentTrades, _stratShowFiltered);
+    if (_stratShowMarkers) _drawBacktestMarkers(_stratCurrentTrades, _stratShowFiltered);
+  }
 }
 
 // ── Summary rendering ─────────────────────────────────────────────────────────
 
-function _renderStrategySummary(s) {
+function _renderStrategySummary(s, showFiltered) {
   const el = document.getElementById('strategy-summary');
   if (el) el.style.display = '';
 
@@ -2842,6 +2871,45 @@ function _renderStrategySummary(s) {
   set('ss-bars',    s.bars_used ?? '—');
 }
 
+function _recomputeSummary(trades, showFiltered) {
+  // Recompute summary from trade list for the current filtered display mode
+  const executed = trades.filter(t => t.context_pass === 1);
+  const filteredAll = trades.filter(t => t.context_pass === 0);
+  const closed = executed.filter(t => t.outcome === 'win' || t.outcome === 'loss');
+  const wins = closed.filter(t => t.outcome === 'win');
+  const losses = closed.filter(t => t.outcome === 'loss');
+
+  const totalPnl = closed.reduce((s, t) => s + (t.pnl || 0), 0);
+  const grossWin = wins.reduce((s, t) => s + (t.pnl || 0), 0);
+  const grossLoss = Math.abs(losses.reduce((s, t) => s + (t.pnl || 0), 0));
+
+  const summary = {
+    total: executed.length,
+    wins: wins.length,
+    losses: losses.length,
+    win_rate: closed.length ? wins.length / closed.length : 0,
+    total_pnl: totalPnl,
+    avg_win: wins.length ? grossWin / wins.length : 0,
+    avg_loss: losses.length ? -grossLoss / losses.length : 0,
+    profit_factor: grossLoss > 0 ? grossWin / grossLoss : (grossWin > 0 ? 999 : 0),
+    max_drawdown: 0,
+    filtered_count: filteredAll.length,
+    bars_used: '—',
+  };
+
+  // Max drawdown
+  let running = 0, peak = 0, maxDD = 0;
+  for (const t of closed) {
+    running += (t.pnl || 0);
+    if (running > peak) peak = running;
+    const dd = peak - running;
+    if (dd > maxDD) maxDD = dd;
+  }
+  summary.max_drawdown = -maxDD;
+
+  _renderStrategySummary(summary, showFiltered);
+}
+
 function _clearStrategySummary() {
   const el = document.getElementById('strategy-summary');
   if (el) el.style.display = 'none';
@@ -2849,16 +2917,19 @@ function _clearStrategySummary() {
 
 // ── Trade table rendering ─────────────────────────────────────────────────────
 
-function _renderStrategyTrades(trades) {
+function _renderStrategyTrades(trades, showFiltered) {
   const tbody = document.getElementById('strat-trades-tbody');
   if (!tbody) return;
 
-  if (!trades || !trades.length) {
+  // Filter visible trades based on showFiltered toggle
+  const visible = showFiltered ? trades : (trades || []).filter(t => t.context_pass === 1);
+
+  if (!visible || !visible.length) {
     tbody.innerHTML = '<tr><td colspan="12"><div class="empty-table">No trades</div></td></tr>';
     return;
   }
 
-  tbody.innerHTML = trades.map((t, idx) => {
+  tbody.innerHTML = visible.map((t, idx) => {
     const isFiltered = t.context_pass === 0;
     const rowClass   = isFiltered ? 'bt-filtered'
                      : t.outcome === 'win'  ? 'bt-win'
@@ -2937,23 +3008,33 @@ function _clearBacktestMarkers() {
   _stratMarkerShapes = [];
 }
 
-function _drawBacktestMarkers(trades) {
+function _drawBacktestMarkers(trades, showFiltered) {
   _clearBacktestMarkers();
   if (!_widget || !trades) return;
 
+  // Filter visible trades based on showFiltered toggle
+  const visible = showFiltered ? trades : trades.filter(t => t.context_pass === 1);
+
   try {
     const chart = _widget.activeChart();
-    for (const t of trades) {
+    for (const t of visible) {
       if (!t.entry_time) continue;
       const isFiltered = t.context_pass === 0;
       const isLong = t.direction === 'long';
 
-      // Entry shape
-      const entryColor = isFiltered ? '#888888'
-        : isLong ? '#26a69a' : '#ef5350';
-      const entryText = isFiltered
-        ? (isLong ? '↑?' : '↓?')
-        : (isLong ? '↑' : '↓');
+      // ── Colors ──
+      // Long: green (#26a69a), Short: red (#ef5350), Filtered: gray (#888888)
+      const longColor = '#26a69a';
+      const shortColor = '#ef5350';
+      const filteredColor = '#888888';
+
+      const entryColor = isFiltered ? filteredColor : (isLong ? longColor : shortColor);
+
+      // ── Entry marker ──
+      // direction: 'buy' shows up-arrow, 'sell' shows down-arrow
+      const entryLabel = isFiltered
+        ? (isLong ? 'Entry▲ (filtered)' : 'Entry▼ (filtered)')
+        : (isLong ? 'Entry▲ Stop' : 'Entry▼ Stop');
 
       try {
         const entryId = chart.createExecutionShape()
@@ -2961,30 +3042,40 @@ function _drawBacktestMarkers(trades) {
           .setDirection(isLong ? 'buy' : 'sell')
           .setPrice(t.entry_price)
           .setArrowColor(entryColor)
-          .setArrowHeight(12)
-          .setArrowSpacing(2)
-          .setFont('12px sans-serif')
+          .setArrowHeight(14)
+          .setArrowSpacing(3)
+          .setFont('bold 11px sans-serif')
           .setTextColor(entryColor)
-          .setText(isFiltered ? (isLong ? '↑?' : '↓?') : '')
+          .setText(entryLabel)
           .getShapeId();
         if (entryId) _stratMarkerShapes.push(entryId);
       } catch (_) {}
 
-      // Exit shape (only for closed trades)
+      // ── Exit marker (only for non-filtered closed trades) ──
       if (!isFiltered && t.exit_time && t.exit_price != null) {
-        const exitColor = t.outcome === 'win' ? '#26a69a'
-          : t.outcome === 'loss' ? '#ef5350' : '#64b5f6';
+        const isWin = t.outcome === 'win';
+        const isLoss = t.outcome === 'loss';
+        const exitColor = isWin ? longColor
+          : isLoss ? shortColor : '#64b5f6';
+
+        // Exit arrow is opposite of entry direction
+        const exitLabel = isWin
+          ? 'Exit ✓ Target'
+          : isLoss
+            ? 'Exit ✗ Stop'
+            : 'Exit (open)';
+
         try {
           const exitId = chart.createExecutionShape()
             .setTime(t.exit_time)
             .setDirection(isLong ? 'sell' : 'buy')
             .setPrice(t.exit_price)
             .setArrowColor(exitColor)
-            .setArrowHeight(10)
-            .setArrowSpacing(2)
-            .setFont('11px sans-serif')
+            .setArrowHeight(12)
+            .setArrowSpacing(3)
+            .setFont('bold 11px sans-serif')
             .setTextColor(exitColor)
-            .setText(t.outcome === 'win' ? '✓' : t.outcome === 'loss' ? '✗' : '')
+            .setText(exitLabel)
             .getShapeId();
           if (exitId) _stratMarkerShapes.push(exitId);
         } catch (_) {}
