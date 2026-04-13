@@ -1141,6 +1141,9 @@
           <label>IBS&nbsp;%
             <input type="number" id="strat-ibs" value="70" min="50" max="99" step="1" style="width:56px">
           </label>
+          <label>Max&nbsp;Stop$
+            <input type="number" id="strat-maxstop" value="200" min="10" max="5000" step="10" style="width:66px">
+          </label>
           <label><input type="checkbox" id="strat-ctx" checked> Context&nbsp;Filter</label>
           <div class="sep"></div>
           <label>From
@@ -1180,6 +1183,7 @@
               <tr>
                 <th style="width:130px">Entry Time</th>
                 <th style="width:52px">Dir</th>
+                <th style="width:36px">Qty</th>
                 <th style="width:72px">Entry</th>
                 <th style="width:72px">Exit</th>
                 <th style="width:72px">Stop</th>
@@ -1192,7 +1196,7 @@
               </tr>
             </thead>
             <tbody id="strat-trades-tbody">
-              <tr><td colspan="11"><div class="empty-table">Run a backtest to see results</div></td></tr>
+              <tr><td colspan="12"><div class="empty-table">Run a backtest to see results</div></td></tr>
             </tbody>
           </table>
         </div>
