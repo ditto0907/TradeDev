@@ -2705,6 +2705,7 @@ async function runStrategyBacktest() {
   try {
     const ibsPct = parseFloat(document.getElementById('strat-ibs')?.value || '70') / 100;
     const ctx    = document.getElementById('strat-ctx')?.checked ?? true;
+    const maxStop = parseFloat(document.getElementById('strat-maxstop')?.value || '200');
     const fromEl = document.getElementById('strat-from');
     const toEl   = document.getElementById('strat-to');
 
@@ -2720,6 +2721,7 @@ async function runStrategyBacktest() {
         ibs_threshold: ibsPct,
         use_context_filter: ctx,
         rr_ratio: 1.0,
+        max_stop_loss: maxStop,
       }),
     });
 
@@ -2849,7 +2851,7 @@ function _renderStrategyTrades(trades) {
   if (!tbody) return;
 
   if (!trades || !trades.length) {
-    tbody.innerHTML = '<tr><td colspan="11"><div class="empty-table">No trades</div></td></tr>';
+    tbody.innerHTML = '<tr><td colspan="12"><div class="empty-table">No trades</div></td></tr>';
     return;
   }
 
@@ -2885,6 +2887,7 @@ function _renderStrategyTrades(trades) {
     return `<tr class="${rowClass}" data-trade-idx="${idx}">
       <td>${entryDt}</td>
       <td>${dirArrow}</td>
+      <td>${t.contracts ?? 1}</td>
       <td>${t.entry_price?.toFixed(2) ?? '—'}</td>
       <td>${t.exit_price != null ? t.exit_price.toFixed(2) : '—'}</td>
       <td>${t.stop_price?.toFixed(2) ?? '—'}</td>
@@ -2900,7 +2903,7 @@ function _renderStrategyTrades(trades) {
 
 function _clearStrategyTrades() {
   const tbody = document.getElementById('strat-trades-tbody');
-  if (tbody) tbody.innerHTML = '<tr><td colspan="11"><div class="empty-table">Run a backtest to see results</div></td></tr>';
+  if (tbody) tbody.innerHTML = '<tr><td colspan="12"><div class="empty-table">Run a backtest to see results</div></td></tr>';
 }
 
 // ── Locate trade on chart ─────────────────────────────────────────────────────

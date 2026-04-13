@@ -59,3 +59,4 @@ IBS_THRESHOLD        = 0.70    # IBS ≥ threshold → long; IBS ≤ (1-threshol
 IBS_SR_PROXIMITY_PCT = 0.30    # % distance to consider "near" an S/R level
 IBS_CONTEXT_LOOKBACK = 200     # rolling bars for S/R context (prevents look-ahead bias)
 MES_TICK_VALUE       = 5.0     # USD per point for MES ($5/pt)
+MAX_STOP_LOSS        = 200.0   # max USD risk per trade; contracts = floor(max_stop / (stop_dist * tick_value))

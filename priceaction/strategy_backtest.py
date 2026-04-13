@@ -19,6 +19,7 @@ Market Context Filter (prevents look-ahead bias via rolling window):
 
 import json
 import logging
+import math
 import uuid
 from datetime import datetime, timezone
 from typing import List, Optional
@@ -105,9 +106,13 @@ def run_backtest(
     ibs_threshold: float = None,
     rr_ratio: float = 1.0,
     use_context_filter: bool = True,
+    max_stop_loss: float = None,
 ) -> dict:
     """
     Run the IBS 2-bar strategy backtest over stored bars.
+
+    Position sizing: contracts = floor(max_stop_loss / (stop_distance * tick_value)).
+    If the stop distance is too large (contracts < 1), the signal is skipped.
 
     Returns a dict:
     {
@@ -119,6 +124,8 @@ def run_backtest(
     """
     if ibs_threshold is None:
         ibs_threshold = config.IBS_THRESHOLD
+    if max_stop_loss is None:
+        max_stop_loss = config.MAX_STOP_LOSS
 
     proximity_pct = config.IBS_SR_PROXIMITY_PCT
     context_lookback = config.IBS_CONTEXT_LOOKBACK
@@ -133,7 +140,8 @@ def run_backtest(
             "summary": _empty_summary(0, "db"),
             "trades": [],
             "params": _build_params(symbol, timeframe, from_ts, to_ts,
-                                    ibs_threshold, rr_ratio, use_context_filter),
+                                    ibs_threshold, rr_ratio, use_context_filter,
+                                    max_stop_loss),
         }
 
     actual_from = all_bars[0]["time"]
@@ -171,10 +179,11 @@ def run_backtest(
 
             if hit_target or hit_stop:
                 exit_price = target_price if hit_target else stop_price
+                contracts  = open_trade["contracts"]
                 if direction == "long":
-                    pnl = (exit_price - entry_price) * tick_value
+                    pnl = (exit_price - entry_price) * tick_value * contracts
                 else:
-                    pnl = (entry_price - exit_price) * tick_value
+                    pnl = (entry_price - exit_price) * tick_value * contracts
 
                 open_trade["exit_time"]  = bar2["time"]
                 open_trade["exit_price"] = exit_price
@@ -212,6 +221,12 @@ def run_backtest(
             stop_price   = entry_price + stop_distance
             target_price = entry_price - stop_distance * rr_ratio
 
+        # ── Position sizing: cap risk at max_stop_loss ────────────────────────
+        risk_per_contract = stop_distance * tick_value
+        contracts = int(math.floor(max_stop_loss / risk_per_contract)) if risk_per_contract > 0 else 0
+        if contracts < 1:
+            continue  # stop distance too large for max allowed risk
+
         # ── Context filter ────────────────────────────────────────────────────
         context_pass   = 1
         context_reason = ""
@@ -230,6 +245,7 @@ def run_backtest(
             "symbol":         symbol,
             "timeframe":      timeframe,
             "direction":      direction,
+            "contracts":      contracts,
             "entry_time":     bar2["time"],
             "entry_price":    entry_price,
             "exit_time":      None,
@@ -257,10 +273,11 @@ def run_backtest(
         last_bar = all_bars[-1]
         open_trade["exit_time"]  = last_bar["time"]
         open_trade["exit_price"] = last_bar["close"]
+        contracts = open_trade["contracts"]
         if open_trade["direction"] == "long":
-            pnl = (last_bar["close"] - open_trade["entry_price"]) * tick_value
+            pnl = (last_bar["close"] - open_trade["entry_price"]) * tick_value * contracts
         else:
-            pnl = (open_trade["entry_price"] - last_bar["close"]) * tick_value
+            pnl = (open_trade["entry_price"] - last_bar["close"]) * tick_value * contracts
         open_trade["pnl"]    = round(pnl, 2)
         open_trade["outcome"] = "open"
         open_trade["bars_held"] = len(all_bars) - 1 - open_trade["_entry_idx"]
@@ -275,7 +292,8 @@ def run_backtest(
 
     # ── Persist to DB ─────────────────────────────────────────────────────────
     params = _build_params(symbol, timeframe, actual_from, actual_to,
-                           ibs_threshold, rr_ratio, use_context_filter)
+                           ibs_threshold, rr_ratio, use_context_filter,
+                           max_stop_loss)
     db.save_backtest(
         backtest_id=backtest_id,
         symbol=symbol,
@@ -363,7 +381,8 @@ def _empty_summary(bars_used: int, data_source: str) -> dict:
 
 
 def _build_params(symbol, timeframe, from_ts, to_ts,
-                  ibs_threshold, rr_ratio, use_context_filter) -> dict:
+                  ibs_threshold, rr_ratio, use_context_filter,
+                  max_stop_loss) -> dict:
     return {
         "symbol":             symbol,
         "timeframe":          timeframe,
@@ -372,4 +391,5 @@ def _build_params(symbol, timeframe, from_ts, to_ts,
         "ibs_threshold":      ibs_threshold,
         "rr_ratio":           rr_ratio,
         "use_context_filter": use_context_filter,
+        "max_stop_loss":      max_stop_loss,
     }

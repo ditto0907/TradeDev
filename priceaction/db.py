@@ -120,6 +120,7 @@ def init_db() -> None:
                 symbol         TEXT    NOT NULL,
                 timeframe      TEXT    NOT NULL,
                 direction      TEXT    NOT NULL,
+                contracts      INTEGER NOT NULL DEFAULT 1,
                 entry_time     INTEGER NOT NULL,
                 entry_price    REAL    NOT NULL,
                 exit_time      INTEGER,
@@ -140,6 +141,13 @@ def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_st_backtest_id "
             "ON strategy_trades (backtest_id)"
         )
+        # ── Migrate: add contracts column to existing databases ───────────────
+        cursor = conn.execute("PRAGMA table_info(strategy_trades)")
+        columns = {row[1] for row in cursor.fetchall()}
+        if "contracts" not in columns:
+            conn.execute(
+                "ALTER TABLE strategy_trades ADD COLUMN contracts INTEGER NOT NULL DEFAULT 1"
+            )
     logger.info("Database ready: %s", _DB_PATH)
 
 
@@ -458,6 +466,7 @@ def save_strategy_trades(trades: List[dict]) -> None:
     rows = [
         (
             t["backtest_id"], t["symbol"], t["timeframe"], t["direction"],
+            t.get("contracts", 1),
             t["entry_time"], t["entry_price"], t.get("exit_time"),
             t.get("exit_price"), t["stop_price"], t["target_price"],
             t.get("pnl"), t["outcome"], t["bars_held"], t["signal_ibs"],
@@ -468,10 +477,10 @@ def save_strategy_trades(trades: List[dict]) -> None:
     with _conn() as conn:
         conn.executemany(
             "INSERT INTO strategy_trades "
-            "(backtest_id, symbol, timeframe, direction, entry_time, entry_price, "
+            "(backtest_id, symbol, timeframe, direction, contracts, entry_time, entry_price, "
             "exit_time, exit_price, stop_price, target_price, pnl, outcome, "
             "bars_held, signal_ibs, context_pass, context_reason, created_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             rows,
         )
 

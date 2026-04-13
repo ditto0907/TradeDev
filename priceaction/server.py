@@ -1051,6 +1051,7 @@ class BacktestRequest(BaseModel):
     ibs_threshold:      float = 0.70
     rr_ratio:           float = 1.0
     use_context_filter: bool  = True
+    max_stop_loss:      float = 200.0
 
 
 @app.post("/api/strategy/backtest")
@@ -1064,6 +1065,7 @@ async def run_strategy_backtest(req: BacktestRequest):
             ibs_threshold=req.ibs_threshold,
             rr_ratio=req.rr_ratio,
             use_context_filter=req.use_context_filter,
+            max_stop_loss=req.max_stop_loss,
         )
         return result
     except Exception as e:
