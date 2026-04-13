@@ -396,6 +396,19 @@ async def datafeed_debug_middleware(request: Request, call_next):
         t0  = time.perf_counter()
         response: Response = await call_next(request)
         elapsed_ms = (time.perf_counter() - t0) * 1000
+
+        # Skip body logging for large-payload layout endpoints (chart saves,
+        # study templates, drawing templates) to avoid flooding the log with
+        # multi-KB JSON blobs.
+        _LAYOUT_PREFIXES = ("/api/charts", "/api/chart_templates",
+                            "/api/study_templates", "/api/drawing_templates")
+        if any(request.url.path.startswith(p) for p in _LAYOUT_PREFIXES):
+            datafeed_logger.debug("%-6s %-40s → %d (%.1f ms) [body omitted]",
+                                  request.method,
+                                  str(request.url.path) + ("?" + str(request.url.query) if request.url.query else ""),
+                                  response.status_code, elapsed_ms)
+            return response
+
         body = b""
         async for chunk in response.body_iterator:
             body += chunk
@@ -403,7 +416,12 @@ async def datafeed_debug_middleware(request: Request, call_next):
             payload  = json.loads(body)
             summary  = {}
             for k, v in payload.items():
-                summary[k] = f"[{v[0]!r}…{v[-1]!r}]({len(v)})" if isinstance(v, list) and len(v) > 6 else v
+                if isinstance(v, list) and len(v) > 6:
+                    summary[k] = f"[{v[0]!r}…{v[-1]!r}]({len(v)})"
+                elif isinstance(v, str) and len(v) > 200:
+                    summary[k] = f"({len(v)} chars)"
+                else:
+                    summary[k] = v
             body_log = json.dumps(summary)
         except Exception:
             body_log = body.decode(errors="replace")[:300]
@@ -649,7 +667,12 @@ async def get_history(
         bars = fetcher.get_bars(key, from_ts=from_ts, to_ts=to_ts)
 
     if countback and len(bars) > countback:
-        bars = bars[-countback:]
+        # Scale countback ×4 so that RTH sessions (which filter out ~75% of
+        # ETH bars) still receive enough visible bars on initial chart load.
+        # Cap at len(bars)-1 so at least one older bar is always withheld —
+        # this keeps TradingView's scroll-to-load pagination alive.
+        effective = max(countback, min(countback * 4, len(bars) - 1))
+        bars = bars[-effective:]
 
     if not bars:
         # Provide nextTime so TradingView keeps requesting older data
