@@ -80,6 +80,7 @@ document.addEventListener('DOMContentLoaded', () => {
   fetchWatchlistContractInfo();
   // Refresh watchlist prices every 60s
   setInterval(fetchWatchlistPrices, 60000);
+  initStrategyTab();
 });
 
 // ── Save/Load Adapter (TradingView chart layout persistence) ──────────────────
@@ -2638,4 +2639,348 @@ function renderAnalysisTable() {
       </td>
     </tr>`;
   }).join('');
+}
+
+
+// ── Strategy Backtest Tab ──────────────────────────────────────────────────────
+
+let _stratCurrentId    = null;   // currently loaded backtest id
+let _stratMarkerShapes = [];     // chart execution shapes for current backtest
+let _stratShowMarkers  = false;
+let _stratBacktestList = [];     // cached list from server
+
+function initStrategyTab() {
+  // Set default date range: last 60 days
+  const now = new Date();
+  const past = new Date(now.getTime() - 60 * 24 * 3600 * 1000);
+  const fmt = d => d.toISOString().slice(0, 10);
+  const fromEl = document.getElementById('strat-from');
+  const toEl   = document.getElementById('strat-to');
+  if (fromEl) fromEl.value = fmt(past);
+  if (toEl)   toEl.value   = fmt(now);
+
+  _loadBacktestList();
+}
+
+async function _loadBacktestList() {
+  try {
+    const res = await fetch('/api/strategy/backtests');
+    if (!res.ok) return;
+    _stratBacktestList = await res.json();
+    _renderBacktestHistorySelect();
+  } catch (e) {
+    console.warn('[Strategy] Failed to load backtest list:', e);
+  }
+}
+
+function _renderBacktestHistorySelect() {
+  const sel = document.getElementById('strat-history-select');
+  if (!sel) return;
+  const cur = _stratCurrentId;
+  // Keep placeholder
+  sel.innerHTML = '<option value="">— select run —</option>';
+  for (const bt of _stratBacktestList) {
+    const s   = bt.summary || {};
+    const p   = bt.params  || {};
+    const dt  = (bt.created_at || '').slice(0, 16).replace('T', ' ');
+    const wr  = s.win_rate != null ? (s.win_rate * 100).toFixed(0) + '%' : '?';
+    const pnl = s.total_pnl != null ? (s.total_pnl >= 0 ? '+' : '') + '$' + s.total_pnl.toFixed(0) : '';
+    const lbl = `${dt}  ${p.symbol || ''}/${p.timeframe || ''}  IBS${((p.ibs_threshold || 0.7) * 100).toFixed(0)}%  ${s.total || 0}T ${wr} ${pnl}`;
+    const opt = document.createElement('option');
+    opt.value = bt.id;
+    opt.textContent = lbl;
+    if (bt.id === cur) opt.selected = true;
+    sel.appendChild(opt);
+  }
+}
+
+async function runStrategyBacktest() {
+  const btn = document.getElementById('strat-run-btn');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Running…'; }
+
+  try {
+    const ibsPct = parseFloat(document.getElementById('strat-ibs')?.value || '70') / 100;
+    const ctx    = document.getElementById('strat-ctx')?.checked ?? true;
+    const fromEl = document.getElementById('strat-from');
+    const toEl   = document.getElementById('strat-to');
+
+    const from_ts = fromEl?.value ? Math.floor(new Date(fromEl.value).getTime() / 1000) : 0;
+    const to_ts   = toEl?.value   ? Math.floor(new Date(toEl.value + 'T23:59:59').getTime() / 1000) : 9999999999;
+
+    const res = await fetch('/api/strategy/backtest', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        symbol: 'MES', timeframe: '5min',
+        from_ts, to_ts,
+        ibs_threshold: ibsPct,
+        use_context_filter: ctx,
+        rr_ratio: 1.0,
+      }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json();
+      alert('Backtest error: ' + (err.error || res.status));
+      return;
+    }
+
+    const data = await res.json();
+    _stratCurrentId = data.backtest_id;
+    _renderStrategySummary(data.summary);
+    _renderStrategyTrades(data.trades);
+    if (_stratShowMarkers) _drawBacktestMarkers(data.trades);
+
+    // Reload history list and select current
+    await _loadBacktestList();
+    const sel = document.getElementById('strat-history-select');
+    if (sel && _stratCurrentId) sel.value = _stratCurrentId;
+
+  } catch (e) {
+    console.error('[Strategy] runStrategyBacktest error:', e);
+    alert('Backtest failed: ' + e.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '▶ Run Backtest'; }
+  }
+}
+
+async function loadBacktestHistory(backtest_id) {
+  if (!backtest_id) {
+    _stratCurrentId = null;
+    _clearStrategySummary();
+    _clearStrategyTrades();
+    _clearBacktestMarkers();
+    return;
+  }
+
+  try {
+    const res = await fetch(`/api/strategy/backtests/${encodeURIComponent(backtest_id)}/trades`);
+    if (!res.ok) { alert('Failed to load backtest trades.'); return; }
+    const data = await res.json();
+
+    // Find summary from cached list
+    const bt = _stratBacktestList.find(b => b.id === backtest_id);
+    _stratCurrentId = backtest_id;
+    _renderStrategySummary(bt?.summary || {});
+    _renderStrategyTrades(data.trades);
+    if (_stratShowMarkers) _drawBacktestMarkers(data.trades);
+  } catch (e) {
+    console.error('[Strategy] loadBacktestHistory error:', e);
+  }
+}
+
+async function deleteCurrentBacktest() {
+  const sel = document.getElementById('strat-history-select');
+  const id  = sel?.value;
+  if (!id) return;
+  if (!confirm('Delete this backtest run and all its trades?')) return;
+
+  try {
+    const res = await fetch(`/api/strategy/backtests/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    if (!res.ok) { alert('Delete failed.'); return; }
+    if (_stratCurrentId === id) {
+      _stratCurrentId = null;
+      _clearStrategySummary();
+      _clearStrategyTrades();
+      _clearBacktestMarkers();
+    }
+    await _loadBacktestList();
+  } catch (e) {
+    console.error('[Strategy] deleteCurrentBacktest error:', e);
+  }
+}
+
+function toggleBacktestMarkers(show) {
+  _stratShowMarkers = show;
+  if (!show) {
+    _clearBacktestMarkers();
+    return;
+  }
+  // Redraw from current trades table
+  const tbody = document.getElementById('strat-trades-tbody');
+  if (!tbody || !_stratCurrentId) return;
+  // Re-fetch and draw
+  fetch(`/api/strategy/backtests/${encodeURIComponent(_stratCurrentId)}/trades`)
+    .then(r => r.json())
+    .then(d => _drawBacktestMarkers(d.trades))
+    .catch(e => console.warn('[Strategy] toggleBacktestMarkers error:', e));
+}
+
+// ── Summary rendering ─────────────────────────────────────────────────────────
+
+function _renderStrategySummary(s) {
+  const el = document.getElementById('strategy-summary');
+  if (el) el.style.display = '';
+
+  const set = (id, val, cls) => {
+    const span = document.getElementById(id);
+    if (!span) return;
+    span.textContent = val;
+    span.className = cls || '';
+  };
+
+  set('ss-total',   s.total ?? '—');
+  set('ss-winrate', s.win_rate != null ? (s.win_rate * 100).toFixed(1) + '%' : '—',
+      s.win_rate >= 0.5 ? 'up' : 'dn');
+  const pnlStr = s.total_pnl != null ? (s.total_pnl >= 0 ? '+' : '') + '$' + s.total_pnl.toFixed(2) : '—';
+  set('ss-pnl',     pnlStr, s.total_pnl >= 0 ? 'up' : 'dn');
+  set('ss-avgwin',  s.avg_win  != null ? '+$' + s.avg_win.toFixed(2)  : '—', 'up');
+  set('ss-avgloss', s.avg_loss != null ? '$'  + s.avg_loss.toFixed(2) : '—', 'dn');
+  set('ss-pf',      s.profit_factor != null ? s.profit_factor.toFixed(2) : '—',
+      s.profit_factor >= 1 ? 'up' : 'dn');
+  set('ss-dd',      s.max_drawdown != null ? '$' + Math.abs(s.max_drawdown).toFixed(2) : '—', 'dn');
+  set('ss-filtered',s.filtered_count ?? '—');
+  set('ss-bars',    s.bars_used ?? '—');
+}
+
+function _clearStrategySummary() {
+  const el = document.getElementById('strategy-summary');
+  if (el) el.style.display = 'none';
+}
+
+// ── Trade table rendering ─────────────────────────────────────────────────────
+
+function _renderStrategyTrades(trades) {
+  const tbody = document.getElementById('strat-trades-tbody');
+  if (!tbody) return;
+
+  if (!trades || !trades.length) {
+    tbody.innerHTML = '<tr><td colspan="11"><div class="empty-table">No trades</div></td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = trades.map((t, idx) => {
+    const isFiltered = t.context_pass === 0;
+    const rowClass   = isFiltered ? 'bt-filtered'
+                     : t.outcome === 'win'  ? 'bt-win'
+                     : t.outcome === 'loss' ? 'bt-loss'
+                     : 'bt-open';
+
+    const entryDt = t.entry_time ? new Date(t.entry_time * 1000).toLocaleString([], {
+      month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false,
+    }) : '—';
+
+    const dirArrow = t.direction === 'long'
+      ? '<span style="color:#26a69a">↑ Long</span>'
+      : '<span style="color:#ef5350">↓ Short</span>';
+
+    const pnlStr = t.pnl != null
+      ? `<span class="${t.pnl >= 0 ? 'up' : 'down'}">${t.pnl >= 0 ? '+' : ''}$${t.pnl.toFixed(2)}</span>`
+      : '—';
+    const outcomeStr = isFiltered ? '<span style="opacity:.5">filtered</span>'
+      : t.outcome === 'win'  ? '<span class="up">Win</span>'
+      : t.outcome === 'loss' ? '<span class="down">Loss</span>'
+      : '<span style="color:#64b5f6">Open</span>';
+
+    const ctxStr = isFiltered
+      ? `<span style="color:#ff9800" title="${t.context_reason || ''}">⛔ ${t.context_reason || 'blocked'}</span>`
+      : '<span style="color:#26a69a">✓</span>';
+
+    const locateBtn = `<button class="mc-btn" onclick="stratLocateTrade(${t.entry_time})" title="Scroll chart to trade" style="font-size:11px;padding:1px 6px;background:none;border:1px solid var(--border);border-radius:3px;cursor:pointer">Locate</button>`;
+
+    return `<tr class="${rowClass}" data-trade-idx="${idx}">
+      <td>${entryDt}</td>
+      <td>${dirArrow}</td>
+      <td>${t.entry_price?.toFixed(2) ?? '—'}</td>
+      <td>${t.exit_price != null ? t.exit_price.toFixed(2) : '—'}</td>
+      <td>${t.stop_price?.toFixed(2) ?? '—'}</td>
+      <td>${t.target_price?.toFixed(2) ?? '—'}</td>
+      <td>${(t.signal_ibs * 100).toFixed(1)}%</td>
+      <td>${outcomeStr}</td>
+      <td>${pnlStr}</td>
+      <td>${ctxStr}</td>
+      <td>${locateBtn}</td>
+    </tr>`;
+  }).join('');
+}
+
+function _clearStrategyTrades() {
+  const tbody = document.getElementById('strat-trades-tbody');
+  if (tbody) tbody.innerHTML = '<tr><td colspan="11"><div class="empty-table">Run a backtest to see results</div></td></tr>';
+}
+
+// ── Locate trade on chart ─────────────────────────────────────────────────────
+
+function stratLocateTrade(entry_time) {
+  if (!_widget || !entry_time) return;
+  try {
+    const chart = _widget.activeChart();
+    chart.setVisibleRange({
+      from: entry_time - 60 * 30,    // 30min before entry
+      to:   entry_time + 60 * 60,    // 1h after entry
+    });
+  } catch (e) {
+    console.warn('[Strategy] stratLocateTrade error:', e);
+  }
+}
+
+// ── Chart markers ─────────────────────────────────────────────────────────────
+
+function _clearBacktestMarkers() {
+  if (!_widget) return;
+  try {
+    const chart = _widget.activeChart();
+    for (const id of _stratMarkerShapes) {
+      try { chart.removeEntity(id); } catch (_) {}
+    }
+  } catch (_) {}
+  _stratMarkerShapes = [];
+}
+
+function _drawBacktestMarkers(trades) {
+  _clearBacktestMarkers();
+  if (!_widget || !trades) return;
+
+  try {
+    const chart = _widget.activeChart();
+    for (const t of trades) {
+      if (!t.entry_time) continue;
+      const isFiltered = t.context_pass === 0;
+      const isLong = t.direction === 'long';
+
+      // Entry shape
+      const entryColor = isFiltered ? '#888888'
+        : isLong ? '#26a69a' : '#ef5350';
+      const entryText = isFiltered
+        ? (isLong ? '↑?' : '↓?')
+        : (isLong ? '↑' : '↓');
+
+      try {
+        const entryId = chart.createExecutionShape()
+          .setTime(t.entry_time)
+          .setDirection(isLong ? 'buy' : 'sell')
+          .setPrice(t.entry_price)
+          .setArrowColor(entryColor)
+          .setArrowHeight(12)
+          .setArrowSpacing(2)
+          .setFont('12px sans-serif')
+          .setTextColor(entryColor)
+          .setText(isFiltered ? (isLong ? '↑?' : '↓?') : '')
+          .getShapeId();
+        if (entryId) _stratMarkerShapes.push(entryId);
+      } catch (_) {}
+
+      // Exit shape (only for closed trades)
+      if (!isFiltered && t.exit_time && t.exit_price != null) {
+        const exitColor = t.outcome === 'win' ? '#26a69a'
+          : t.outcome === 'loss' ? '#ef5350' : '#64b5f6';
+        try {
+          const exitId = chart.createExecutionShape()
+            .setTime(t.exit_time)
+            .setDirection(isLong ? 'sell' : 'buy')
+            .setPrice(t.exit_price)
+            .setArrowColor(exitColor)
+            .setArrowHeight(10)
+            .setArrowSpacing(2)
+            .setFont('11px sans-serif')
+            .setTextColor(exitColor)
+            .setText(t.outcome === 'win' ? '✓' : t.outcome === 'loss' ? '✗' : '')
+            .getShapeId();
+          if (exitId) _stratMarkerShapes.push(exitId);
+        } catch (_) {}
+      }
+    }
+  } catch (e) {
+    console.warn('[Strategy] _drawBacktestMarkers error:', e);
+  }
 }

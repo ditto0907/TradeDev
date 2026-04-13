@@ -100,6 +100,46 @@ def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_mca_sym_tf "
             "ON market_cycle_analyses (symbol, timeframe)"
         )
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS strategy_backtests (
+                id           TEXT PRIMARY KEY,
+                symbol       TEXT    NOT NULL,
+                timeframe    TEXT    NOT NULL,
+                from_ts      INTEGER NOT NULL,
+                to_ts        INTEGER NOT NULL,
+                created_at   TEXT    NOT NULL,
+                params_json  TEXT    NOT NULL DEFAULT '{}',
+                summary_json TEXT    NOT NULL DEFAULT '{}',
+                trade_count  INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS strategy_trades (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                backtest_id    TEXT    NOT NULL,
+                symbol         TEXT    NOT NULL,
+                timeframe      TEXT    NOT NULL,
+                direction      TEXT    NOT NULL,
+                entry_time     INTEGER NOT NULL,
+                entry_price    REAL    NOT NULL,
+                exit_time      INTEGER,
+                exit_price     REAL,
+                stop_price     REAL    NOT NULL,
+                target_price   REAL    NOT NULL,
+                pnl            REAL,
+                outcome        TEXT    NOT NULL DEFAULT 'open',
+                bars_held      INTEGER NOT NULL DEFAULT 0,
+                signal_ibs     REAL    NOT NULL,
+                context_pass   INTEGER NOT NULL DEFAULT 1,
+                context_reason TEXT    NOT NULL DEFAULT '',
+                created_at     TEXT    NOT NULL,
+                FOREIGN KEY (backtest_id) REFERENCES strategy_backtests(id) ON DELETE CASCADE
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_st_backtest_id "
+            "ON strategy_trades (backtest_id)"
+        )
     logger.info("Database ready: %s", _DB_PATH)
 
 
@@ -365,3 +405,83 @@ def delete_analysis(analysis_id: int) -> bool:
             "DELETE FROM market_cycle_analyses WHERE id=?", (analysis_id,),
         )
     return cur.rowcount > 0
+
+
+# ─── Strategy Backtest CRUD ──────────────────────────────────────────────────
+
+def save_backtest(backtest_id: str, symbol: str, timeframe: str,
+                  from_ts: int, to_ts: int, created_at: str,
+                  params_json: str, summary_json: str, trade_count: int) -> None:
+    """Insert or replace a backtest run record."""
+    with _conn() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO strategy_backtests "
+            "(id, symbol, timeframe, from_ts, to_ts, created_at, params_json, summary_json, trade_count) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (backtest_id, symbol, timeframe, from_ts, to_ts, created_at,
+             params_json, summary_json, trade_count),
+        )
+
+
+def get_all_backtests() -> List[dict]:
+    """Return all backtest run records, newest first."""
+    with _conn() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM strategy_backtests ORDER BY created_at DESC"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_backtest_by_id(backtest_id: str) -> Optional[dict]:
+    with _conn() as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM strategy_backtests WHERE id=?", (backtest_id,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def delete_backtest(backtest_id: str) -> bool:
+    """Delete a backtest and all its trades (CASCADE)."""
+    with _conn() as conn:
+        cur = conn.execute(
+            "DELETE FROM strategy_backtests WHERE id=?", (backtest_id,)
+        )
+    return cur.rowcount > 0
+
+
+def save_strategy_trades(trades: List[dict]) -> None:
+    """Bulk-insert trade records for a backtest run."""
+    if not trades:
+        return
+    rows = [
+        (
+            t["backtest_id"], t["symbol"], t["timeframe"], t["direction"],
+            t["entry_time"], t["entry_price"], t.get("exit_time"),
+            t.get("exit_price"), t["stop_price"], t["target_price"],
+            t.get("pnl"), t["outcome"], t["bars_held"], t["signal_ibs"],
+            t["context_pass"], t["context_reason"], t["created_at"],
+        )
+        for t in trades
+    ]
+    with _conn() as conn:
+        conn.executemany(
+            "INSERT INTO strategy_trades "
+            "(backtest_id, symbol, timeframe, direction, entry_time, entry_price, "
+            "exit_time, exit_price, stop_price, target_price, pnl, outcome, "
+            "bars_held, signal_ibs, context_pass, context_reason, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            rows,
+        )
+
+
+def get_trades_for_backtest(backtest_id: str) -> List[dict]:
+    """Return all trades for a backtest run, sorted by entry_time."""
+    with _conn() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM strategy_trades WHERE backtest_id=? ORDER BY entry_time",
+            (backtest_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]

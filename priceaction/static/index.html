@@ -776,6 +776,56 @@
       flex-shrink: 0;
     }
     #bottom-resize:hover, #bottom-resize:active { background: var(--blue); }
+
+    /* ── Strategy Backtest Tab ───────────────────────────────────────────────── */
+    #strategy-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 6px 12px;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+      flex-wrap: wrap;
+    }
+    #strategy-toolbar label { font-size: 11px; color: var(--text-dim); }
+    #strategy-toolbar input[type="number"] {
+      width: 64px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 3px;
+      padding: 3px 6px;
+      font-size: 12px;
+    }
+    #strategy-toolbar select {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--text);
+      border-radius: 3px;
+      padding: 3px 6px;
+      font-size: 12px;
+    }
+    #strategy-toolbar .sep { border-left: 1px solid var(--border); height: 18px; }
+    #strategy-summary {
+      display: flex;
+      gap: 18px;
+      align-items: center;
+      padding: 5px 12px;
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+      flex-wrap: wrap;
+    }
+    .strat-stat { font-size: 11px; color: var(--text-dim); }
+    .strat-stat span { font-size: 12px; font-weight: 500; color: var(--text); margin-left: 4px; }
+    .strat-stat span.up { color: var(--green); }
+    .strat-stat span.dn { color: var(--red); }
+    #pane-strategy { display: flex; flex-direction: column; }
+    #pane-strategy .btab-pane-scroll { flex: 1; overflow-y: auto; }
+    /* Trade row colors */
+    tr.bt-win td  { background: rgba(38,166,154,0.08); }
+    tr.bt-loss td { background: rgba(239,83,80,0.08); }
+    tr.bt-filtered td { opacity: 0.45; }
+    tr.bt-open td { background: rgba(33,150,243,0.08); }
   </style>
 </head>
 <body>
@@ -970,6 +1020,7 @@
       <div class="btab"        data-pane="order-history">Order History</div>
       <div class="btab"        data-pane="history">Trade History</div>
       <div class="btab"        data-pane="analysis">Analysis Log</div>
+      <div class="btab"        data-pane="strategy">Strategy</div>
       <button id="bottom-minimize" title="Minimize">▼</button>
     </div>
     <div id="bottom-content">
@@ -1081,6 +1132,70 @@
             <tr><td colspan="8"><div class="empty-table">No market cycle analyses</div></td></tr>
           </tbody>
         </table>
+      </div>
+
+      <!-- Strategy Backtest -->
+      <div class="btab-pane" id="pane-strategy" style="display:flex;flex-direction:column">
+        <!-- Toolbar -->
+        <div id="strategy-toolbar">
+          <label>IBS&nbsp;%
+            <input type="number" id="strat-ibs" value="70" min="50" max="99" step="1" style="width:56px">
+          </label>
+          <label><input type="checkbox" id="strat-ctx" checked> Context&nbsp;Filter</label>
+          <div class="sep"></div>
+          <label>From
+            <input type="date" id="strat-from" style="width:130px">
+          </label>
+          <label>To
+            <input type="date" id="strat-to" style="width:130px">
+          </label>
+          <div class="sep"></div>
+          <button class="mc-btn" id="strat-run-btn" onclick="runStrategyBacktest()" style="font-size:12px;padding:3px 10px;background:var(--blue);color:#fff;border:none;border-radius:3px;cursor:pointer">▶ Run Backtest</button>
+          <div class="sep"></div>
+          <label>History
+            <select id="strat-history-select" onchange="loadBacktestHistory(this.value)" style="max-width:220px">
+              <option value="">— select run —</option>
+            </select>
+          </label>
+          <button class="mc-btn mc-del" id="strat-del-btn" onclick="deleteCurrentBacktest()" title="Delete selected run" style="font-size:13px;margin-left:2px">✕</button>
+          <div class="sep"></div>
+          <label><input type="checkbox" id="strat-show-markers" onchange="toggleBacktestMarkers(this.checked)"> Show on Chart</label>
+        </div>
+        <!-- Summary bar -->
+        <div id="strategy-summary" style="display:none">
+          <div class="strat-stat">Trades<span id="ss-total">—</span></div>
+          <div class="strat-stat">Win Rate<span id="ss-winrate">—</span></div>
+          <div class="strat-stat">P&amp;L<span id="ss-pnl">—</span></div>
+          <div class="strat-stat">Avg Win<span id="ss-avgwin">—</span></div>
+          <div class="strat-stat">Avg Loss<span id="ss-avgloss">—</span></div>
+          <div class="strat-stat">Profit Factor<span id="ss-pf">—</span></div>
+          <div class="strat-stat">Max DD<span id="ss-dd">—</span></div>
+          <div class="strat-stat">Filtered<span id="ss-filtered">—</span></div>
+          <div class="strat-stat">Bars<span id="ss-bars">—</span></div>
+        </div>
+        <!-- Trades table -->
+        <div style="flex:1;overflow-y:auto">
+          <table class="data-table" id="strat-trades-table">
+            <thead>
+              <tr>
+                <th style="width:130px">Entry Time</th>
+                <th style="width:52px">Dir</th>
+                <th style="width:72px">Entry</th>
+                <th style="width:72px">Exit</th>
+                <th style="width:72px">Stop</th>
+                <th style="width:72px">Target</th>
+                <th style="width:48px">IBS</th>
+                <th style="width:60px">Outcome</th>
+                <th style="width:72px">P&amp;L</th>
+                <th style="width:180px">Context</th>
+                <th style="width:60px">Locate</th>
+              </tr>
+            </thead>
+            <tbody id="strat-trades-tbody">
+              <tr><td colspan="11"><div class="empty-table">Run a backtest to see results</div></td></tr>
+            </tbody>
+          </table>
+        </div>
       </div>
 
     </div><!-- /bottom-content -->
