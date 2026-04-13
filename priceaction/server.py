@@ -1300,6 +1300,9 @@ class BacktestRequest(BaseModel):
     rr_ratio:           float = 1.0
     use_context_filter: bool  = True
     max_stop_loss:      float = 200.0
+    session:            str   = "all"       # 'all' | 'rth' | 'eth'
+    time_filter:        str   = ""          # e.g. '10:00-12:00'
+    include_filtered:   bool  = True        # include SR-filtered trades in output
 
 
 @app.post("/api/strategy/backtest")
@@ -1314,6 +1317,9 @@ async def run_strategy_backtest(req: BacktestRequest):
             rr_ratio=req.rr_ratio,
             use_context_filter=req.use_context_filter,
             max_stop_loss=req.max_stop_loss,
+            session=req.session,
+            time_filter=req.time_filter,
+            include_filtered=req.include_filtered,
         )
         return result
     except Exception as e:

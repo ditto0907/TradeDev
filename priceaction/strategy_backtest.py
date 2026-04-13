@@ -21,8 +21,10 @@ import json
 import logging
 import math
 import uuid
-from datetime import datetime, timezone
-from typing import List, Optional
+from datetime import datetime, timezone, time as dtime
+from typing import List, Optional, Tuple
+
+import pytz
 
 import config
 import db
@@ -51,6 +53,68 @@ def _is_bullish(bar: dict) -> bool:
 
 def _is_bearish(bar: dict) -> bool:
     return bar["close"] <= bar["open"]
+
+
+# ─── Session / time-of-day filter helpers ─────────────────────────────────────
+
+def _parse_time_filter(time_filter: str) -> Optional[Tuple[dtime, dtime]]:
+    """Parse a time range string like '10:00-12:00' → (time(10,0), time(12,0))."""
+    if not time_filter or not time_filter.strip():
+        return None
+    parts = time_filter.strip().split("-")
+    if len(parts) != 2:
+        return None
+    try:
+        start = dtime(*[int(x) for x in parts[0].strip().split(":")])
+        end = dtime(*[int(x) for x in parts[1].strip().split(":")])
+        return (start, end)
+    except (ValueError, TypeError):
+        return None
+
+
+def _bar_in_session(bar_ts: int, session: str, symbol: str,
+                    time_range: Optional[Tuple[dtime, dtime]]) -> bool:
+    """
+    Check if a bar timestamp falls within the requested session and time range.
+
+    session: 'all' (ETH+RTH), 'rth' (regular trading hours only),
+             'eth' (extended hours only — outside RTH).
+    time_range: optional (start_time, end_time) filter in instrument local time.
+    """
+    if session == "all" and time_range is None:
+        return True
+
+    inst = config.INSTRUMENTS.get(symbol)
+    if not inst:
+        return True  # unknown instrument → allow all
+
+    tz_str = inst.get("timezone", "America/New_York")
+    try:
+        tz = pytz.timezone(tz_str)
+    except pytz.UnknownTimeZoneError:
+        return True
+
+    local_dt = datetime.fromtimestamp(bar_ts, tz=timezone.utc).astimezone(tz)
+    local_time = local_dt.time()
+
+    rth_start = dtime(*inst.get("rth_start", (9, 30)))
+    rth_end = dtime(*inst.get("rth_end", (16, 0)))
+
+    # Session filter
+    if session == "rth":
+        if not (rth_start <= local_time < rth_end):
+            return False
+    elif session == "eth":
+        if rth_start <= local_time < rth_end:
+            return False
+
+    # Time-of-day filter
+    if time_range is not None:
+        t_start, t_end = time_range
+        if not (t_start <= local_time < t_end):
+            return False
+
+    return True
 
 
 # ─── Context filter ───────────────────────────────────────────────────────────
@@ -107,12 +171,21 @@ def run_backtest(
     rr_ratio: float = 1.0,
     use_context_filter: bool = True,
     max_stop_loss: float = None,
+    session: str = "all",
+    time_filter: str = "",
+    include_filtered: bool = True,
 ) -> dict:
     """
     Run the IBS 2-bar strategy backtest over stored bars.
 
     Position sizing: contracts = floor(max_stop_loss / (stop_distance * tick_value)).
     If the stop distance is too large (contracts < 1), the signal is skipped.
+
+    Session control:
+      session: 'all' (ETH+RTH), 'rth' (regular hours only), 'eth' (extended hours only)
+      time_filter: e.g. '10:00-12:00' — only consider bars within this local-time window
+
+    include_filtered: when True, SR-filtered trades are included in output (for display toggle).
 
     Returns a dict:
     {
@@ -145,8 +218,12 @@ def run_backtest(
             "trades": [],
             "params": _build_params(symbol, timeframe, from_ts, to_ts,
                                     ibs_threshold, rr_ratio, use_context_filter,
-                                    max_stop_loss),
+                                    max_stop_loss, session, time_filter),
         }
+
+    # ── Parse session / time-of-day filter ────────────────────────────────────
+    session = (session or "all").lower()
+    time_range = _parse_time_filter(time_filter)
 
     actual_from = all_bars[0]["time"]
     actual_to   = all_bars[-1]["time"]
@@ -201,6 +278,10 @@ def run_backtest(
             continue
 
         # ── Check IBS signal on (bar1, bar2) ─────────────────────────────────
+        # Session / time-of-day filter: skip signal if bar2 is outside session
+        if not _bar_in_session(bar2["time"], session, symbol, time_range):
+            continue
+
         ibs2 = compute_ibs(bar2)
         direction = None
 
@@ -299,7 +380,7 @@ def run_backtest(
     # ── Persist to DB ─────────────────────────────────────────────────────────
     params = _build_params(symbol, timeframe, actual_from, actual_to,
                            ibs_threshold, rr_ratio, use_context_filter,
-                           max_stop_loss)
+                           max_stop_loss, session, time_filter or "")
     db.save_backtest(
         backtest_id=backtest_id,
         symbol=symbol,
@@ -388,7 +469,7 @@ def _empty_summary(bars_used: int, data_source: str) -> dict:
 
 def _build_params(symbol, timeframe, from_ts, to_ts,
                   ibs_threshold, rr_ratio, use_context_filter,
-                  max_stop_loss) -> dict:
+                  max_stop_loss, session="all", time_filter="") -> dict:
     return {
         "symbol":             symbol,
         "timeframe":          timeframe,
@@ -398,4 +479,6 @@ def _build_params(symbol, timeframe, from_ts, to_ts,
         "rr_ratio":           rr_ratio,
         "use_context_filter": use_context_filter,
         "max_stop_loss":      max_stop_loss,
+        "session":            session,
+        "time_filter":        time_filter,
     }
