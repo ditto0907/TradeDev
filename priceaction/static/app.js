@@ -2873,9 +2873,8 @@ function _renderStrategySummary(s, showFiltered) {
 
 function _recomputeSummary(trades, showFiltered) {
   // Recompute summary from trade list for the current filtered display mode
-  const visible = showFiltered ? trades : trades.filter(t => t.context_pass === 1);
-  const executed = visible.filter(t => t.context_pass === 1);
-  const filtered = visible.filter(t => t.context_pass === 0);
+  const executed = trades.filter(t => t.context_pass === 1);
+  const filteredAll = trades.filter(t => t.context_pass === 0);
   const closed = executed.filter(t => t.outcome === 'win' || t.outcome === 'loss');
   const wins = closed.filter(t => t.outcome === 'win');
   const losses = closed.filter(t => t.outcome === 'loss');
@@ -2894,7 +2893,7 @@ function _recomputeSummary(trades, showFiltered) {
     avg_loss: losses.length ? -grossLoss / losses.length : 0,
     profit_factor: grossLoss > 0 ? grossWin / grossLoss : (grossWin > 0 ? 999 : 0),
     max_drawdown: 0,
-    filtered_count: filtered.length,
+    filtered_count: filteredAll.length,
     bars_used: '—',
   };
 
@@ -3061,9 +3060,9 @@ function _drawBacktestMarkers(trades, showFiltered) {
 
         // Exit arrow is opposite of entry direction
         const exitLabel = isWin
-          ? (isLong ? 'Exit ✓ Target' : 'Exit ✓ Target')
+          ? 'Exit ✓ Target'
           : isLoss
-            ? (isLong ? 'Exit ✗ Stop' : 'Exit ✗ Stop')
+            ? 'Exit ✗ Stop'
             : 'Exit (open)';
 
         try {

@@ -65,10 +65,13 @@ def _parse_time_filter(time_filter: str) -> Optional[Tuple[dtime, dtime]]:
     if len(parts) != 2:
         return None
     try:
-        start = dtime(*[int(x) for x in parts[0].strip().split(":")])
-        end = dtime(*[int(x) for x in parts[1].strip().split(":")])
+        start_parts = [int(x) for x in parts[0].strip().split(":")]
+        end_parts = [int(x) for x in parts[1].strip().split(":")]
+        # Pad to (hour, minute) — accept "10", "10:00", or "10:00:00"
+        start = dtime(start_parts[0], start_parts[1] if len(start_parts) > 1 else 0)
+        end = dtime(end_parts[0], end_parts[1] if len(end_parts) > 1 else 0)
         return (start, end)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, IndexError):
         return None
 
 
