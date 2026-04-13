@@ -207,6 +207,8 @@ async def lifespan(app: FastAPI):
     if not ib_ok and not has_db_data:
         logger.info("Loading synthetic test data (500 bars)…")
         fetcher.bars["5min"] = generate_bars(n=500, bar_minutes=5)
+        db.insert_bars(MES_SYM, "5min", fetcher.bars["5min"])
+        logger.info("Saved %d synthetic bars to DB", len(fetcher.bars["5min"]))
 
     # ── Step 4: real-time subscription (independent of step 2 success) ────────
     if ib_ok:

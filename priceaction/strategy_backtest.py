@@ -134,7 +134,11 @@ def run_backtest(
     # ── Load bars from DB ──────────────────────────────────────────────────────
     all_bars = db.get_bars(symbol, timeframe, from_ts=from_ts, to_ts=to_ts)
     if len(all_bars) < 2:
-        logger.warning("Not enough bars to run backtest (%d bars)", len(all_bars))
+        logger.warning(
+            "Not enough bars to run backtest (%d bars) — "
+            "symbol=%s, timeframe=%s, from_ts=%s, to_ts=%s",
+            len(all_bars), symbol, timeframe, from_ts, to_ts,
+        )
         return {
             "backtest_id": None,
             "summary": _empty_summary(0, "db"),
