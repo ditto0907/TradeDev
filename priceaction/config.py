@@ -53,3 +53,9 @@ SR_MIN_TOUCHES = 2        # minimum touches to count as a level
 SR_MAX_LEVELS_PER_SIDE = 4   # keep only major levels per side
 SR_MAX_DISTANCE_PCT = 1.2    # ignore levels too far from current price
 ANALYSIS_BAR_SIZE = "5min"  # run analysis on 5-min bars
+
+# ─── IBS 2-Bar Strategy ───────────────────────────────────────────────────────
+IBS_THRESHOLD        = 0.70    # IBS ≥ threshold → long; IBS ≤ (1-threshold) → short
+IBS_SR_PROXIMITY_PCT = 0.30    # % distance to consider "near" an S/R level
+IBS_CONTEXT_LOOKBACK = 200     # rolling bars for S/R context (prevents look-ahead bias)
+MES_TICK_VALUE       = 5.0     # USD per point for MES ($5/pt)

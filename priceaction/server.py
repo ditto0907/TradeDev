@@ -27,6 +27,7 @@ from price_action_analyzer import PriceActionAnalyzer
 from order_manager import IBOrderManager
 from trade_log_parser import load_all_trades, parse_csv_content
 from test_data import generate_bars
+import strategy_backtest
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s")
@@ -1037,6 +1038,62 @@ async def get_chart_template(name: str):
 @app.delete("/api/chart_templates/{name}")
 async def delete_chart_template(name: str):
     db.remove_chart_template(name)
+    return {"ok": True}
+
+
+# ─── Strategy Backtest API ────────────────────────────────────────────────────
+
+class BacktestRequest(BaseModel):
+    symbol:             str   = "MES"
+    timeframe:          str   = "5min"
+    from_ts:            int   = 0
+    to_ts:              int   = 9_999_999_999
+    ibs_threshold:      float = 0.70
+    rr_ratio:           float = 1.0
+    use_context_filter: bool  = True
+
+
+@app.post("/api/strategy/backtest")
+async def run_strategy_backtest(req: BacktestRequest):
+    try:
+        result = strategy_backtest.run_backtest(
+            symbol=req.symbol,
+            timeframe=req.timeframe,
+            from_ts=req.from_ts,
+            to_ts=req.to_ts,
+            ibs_threshold=req.ibs_threshold,
+            rr_ratio=req.rr_ratio,
+            use_context_filter=req.use_context_filter,
+        )
+        return result
+    except Exception as e:
+        logger.error("Backtest error: %s", e, exc_info=True)
+        return JSONResponse({"error": "Backtest failed. Check server logs for details."}, status_code=500)
+
+
+@app.get("/api/strategy/backtests")
+async def list_backtests():
+    rows = db.get_all_backtests()
+    for r in rows:
+        r["params"]  = json.loads(r.pop("params_json",  "{}"))
+        r["summary"] = json.loads(r.pop("summary_json", "{}"))
+    return rows
+
+
+@app.get("/api/strategy/backtests/{backtest_id}/trades")
+async def get_backtest_trades(backtest_id: str):
+    row = db.get_backtest_by_id(backtest_id)
+    if row is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    trades = db.get_trades_for_backtest(backtest_id)
+    return {"backtest_id": backtest_id, "trades": trades}
+
+
+@app.delete("/api/strategy/backtests/{backtest_id}")
+async def delete_backtest(backtest_id: str):
+    ok = db.delete_backtest(backtest_id)
+    if not ok:
+        return JSONResponse({"error": "not found"}, status_code=404)
     return {"ok": True}
 
 
