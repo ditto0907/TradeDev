@@ -45,6 +45,7 @@ def init_db() -> None:
                 low       REAL    NOT NULL,
                 close     REAL    NOT NULL,
                 volume    REAL    NOT NULL,
+                source    TEXT    NOT NULL DEFAULT 'unknown',
                 PRIMARY KEY (symbol, timeframe, ts)
             )
         """)
@@ -52,6 +53,14 @@ def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_bars_sym_tf_ts "
             "ON bars (symbol, timeframe, ts)"
         )
+        # ── Migrate: add source column to existing databases ──────────────
+        cursor = conn.execute("PRAGMA table_info(bars)")
+        bar_columns = {row[1] for row in cursor.fetchall()}
+        if "source" not in bar_columns:
+            conn.execute(
+                "ALTER TABLE bars ADD COLUMN source TEXT NOT NULL DEFAULT 'unknown'"
+            )
+            logger.info("Migrated bars table: added 'source' column")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS chart_layouts (
                 id        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -151,20 +160,22 @@ def init_db() -> None:
     logger.info("Database ready: %s", _DB_PATH)
 
 
-def insert_bars(symbol: str, timeframe: str, bars: List[dict]) -> int:
+def insert_bars(symbol: str, timeframe: str, bars: List[dict],
+                source: str = "unknown") -> int:
     """Insert or replace bars. Returns number of rows upserted."""
     if not bars:
         return 0
     rows = [
         (symbol, timeframe,
-         b["time"], b["open"], b["high"], b["low"], b["close"], b["volume"])
+         b["time"], b["open"], b["high"], b["low"], b["close"], b["volume"],
+         b.get("source", source))
         for b in bars
     ]
     with _conn() as conn:
         conn.executemany(
             "INSERT OR REPLACE INTO bars "
-            "(symbol, timeframe, ts, open, high, low, close, volume) "
-            "VALUES (?,?,?,?,?,?,?,?)",
+            "(symbol, timeframe, ts, open, high, low, close, volume, source) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
             rows,
         )
     return len(rows)
@@ -179,7 +190,7 @@ def get_bars(
 ) -> List[dict]:
     """Return bars in [from_ts, to_ts] sorted ascending by timestamp."""
     sql = (
-        "SELECT ts, open, high, low, close, volume FROM bars "
+        "SELECT ts, open, high, low, close, volume, source FROM bars "
         "WHERE symbol=? AND timeframe=? AND ts>=? AND ts<=? "
         "ORDER BY ts"
     )
@@ -191,7 +202,8 @@ def get_bars(
         rows = conn.execute(sql, params).fetchall()
     return [
         {"time": r[0], "open": r[1], "high": r[2],
-         "low": r[3], "close": r[4], "volume": r[5]}
+         "low": r[3], "close": r[4], "volume": r[5],
+         "source": r[6] if len(r) > 6 else "unknown"}
         for r in rows
     ]
 

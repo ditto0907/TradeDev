@@ -99,7 +99,7 @@ def on_new_bar(bar_size_key: str, bar: dict):
     prev = _prev_completed_bar.get(prev_key)
     if prev is not None and bar["time"] > prev["time"]:
         # The previous bar just completed — persist it
-        db.insert_bars(symbol, bar_size_key, [prev])
+        db.insert_bars(symbol, bar_size_key, [prev], source="realtime")
         sheets.buffer_bar(bar_size_key, prev)
     _prev_completed_bar[prev_key] = dict(bar)
 
@@ -228,7 +228,8 @@ async def lifespan(app: FastAPI):
 
         # Persist the freshly fetched bars
         if fetcher.bars["5min"]:
-            saved = db.insert_bars(MES_SYM, "5min", fetcher.bars["5min"])
+            saved = db.insert_bars(MES_SYM, "5min", fetcher.bars["5min"],
+                                   source="ib_historical")
             logger.info("Saved %d 5min bars to DB", saved)
 
         ib_ok = True
@@ -294,7 +295,8 @@ async def lifespan(app: FastAPI):
                         if filter_since:
                             bars5 = [b for b in bars5 if b["time"] > filter_since]
                         if bars5:
-                            saved = db.insert_bars(sym_name, "5min", bars5)
+                            saved = db.insert_bars(sym_name, "5min", bars5,
+                                                   source="ib_historical")
                             logger.info("[%s] Saved %d new 5min bars to DB", sym_name, saved)
                         else:
                             logger.info("[%s] IB returned 0 new 5min bars", sym_name)
@@ -318,7 +320,8 @@ async def lifespan(app: FastAPI):
                 )
                 bars_1d = [_bar_to_dict(b) for b in raw_1d]
                 if bars_1d:
-                    saved_1d = db.insert_bars(sym_name, "1D", bars_1d)
+                    saved_1d = db.insert_bars(sym_name, "1D", bars_1d,
+                                              source="ib_historical")
                     logger.info("[%s] Saved %d 1D bars to DB", sym_name, saved_1d)
 
             except Exception as e:
@@ -328,7 +331,8 @@ async def lifespan(app: FastAPI):
     if not ib_ok and not has_db_data:
         logger.info("Loading synthetic test data (500 bars)…")
         fetcher.bars["5min"] = generate_bars(n=500, bar_minutes=5)
-        db.insert_bars(MES_SYM, "5min", fetcher.bars["5min"])
+        db.insert_bars(MES_SYM, "5min", fetcher.bars["5min"],
+                       source="synthetic")
         logger.info("Saved %d synthetic bars to DB", len(fetcher.bars["5min"]))
 
     # ── Step 4: real-time subscription (independent of step 2 success) ────────
@@ -379,7 +383,7 @@ async def lifespan(app: FastAPI):
     # Flush any in-progress bars to DB (keyed by (symbol, bar_size_key))
     for (sym, bsk), bar in _prev_completed_bar.items():
         if bar:
-            db.insert_bars(sym, bsk, [bar])
+            db.insert_bars(sym, bsk, [bar], source="realtime")
     sheets.flush_buffer()
     fetcher.unsubscribe_realtime()
     fetcher.disconnect()
@@ -639,7 +643,8 @@ async def get_history(
             try:
                 fetched = await fetcher.fetch_range(key, f_from, f_to, symbol=sym)
                 if fetched:
-                    saved = db.insert_bars(sym, key, fetched)
+                    saved = db.insert_bars(sym, key, fetched,
+                                           source="ib_historical")
                     logger.info(
                         "[%s/%s] IB fetch OK: %d bars fetched, %d saved to DB",
                         sym, key, len(fetched), saved,
@@ -975,6 +980,97 @@ async def skill_delete_analysis(analysis_id: int):
     await broadcast(msg)
 
     return {"success": True}
+
+
+# ─── Data Validation API ─────────────────────────────────────────────────────
+
+import data_validator
+
+
+@app.get("/api/data/validate")
+async def api_validate_bars(
+    symbol: str = "MES",
+    timeframe: str = "5min",
+    from_ts: Optional[int] = None,
+    to_ts: Optional[int] = None,
+    from_dt: Optional[str] = None,
+    to_dt: Optional[str] = None,
+):
+    """Validate DB bars against IB historical data for a time range.
+    Returns mismatches without fixing them."""
+    import pytz
+    from datetime import datetime as _dt
+    eastern = pytz.timezone("America/New_York")
+
+    # Convert datetime strings if provided
+    if from_dt and not from_ts:
+        from_ts = int(eastern.localize(
+            _dt.strptime(from_dt, "%Y-%m-%d %H:%M" if " " in from_dt else "%Y-%m-%d")
+        ).timestamp())
+    if to_dt and not to_ts:
+        to_ts = int(eastern.localize(
+            _dt.strptime(to_dt, "%Y-%m-%d %H:%M" if " " in to_dt else "%Y-%m-%d")
+        ).timestamp())
+
+    # Default: last 24 hours
+    if from_ts is None:
+        from_ts = int(time.time()) - 86400
+    if to_ts is None:
+        to_ts = int(time.time())
+
+    # Reuse server's IB connection via fetcher (avoids event-loop deadlocks)
+    f = fetcher if (fetcher._ib_ready and fetcher.ib and fetcher.ib.isConnected()) else None
+    result = await data_validator.validate_bars(symbol, timeframe, from_ts, to_ts, fetcher=f)
+    return result
+
+
+@app.post("/api/data/fix")
+async def api_fix_bars(
+    symbol: str = "MES",
+    timeframe: str = "5min",
+    from_ts: Optional[int] = None,
+    to_ts: Optional[int] = None,
+    from_dt: Optional[str] = None,
+    to_dt: Optional[str] = None,
+):
+    """Validate and fix DB bars: overwrite mismatched bars with IB data."""
+    import pytz
+    from datetime import datetime as _dt
+    eastern = pytz.timezone("America/New_York")
+
+    if from_dt and not from_ts:
+        from_ts = int(eastern.localize(
+            _dt.strptime(from_dt, "%Y-%m-%d %H:%M" if " " in from_dt else "%Y-%m-%d")
+        ).timestamp())
+    if to_dt and not to_ts:
+        to_ts = int(eastern.localize(
+            _dt.strptime(to_dt, "%Y-%m-%d %H:%M" if " " in to_dt else "%Y-%m-%d")
+        ).timestamp())
+
+    if from_ts is None:
+        from_ts = int(time.time()) - 86400
+    if to_ts is None:
+        to_ts = int(time.time())
+
+    f = fetcher if (fetcher._ib_ready and fetcher.ib and fetcher.ib.isConnected()) else None
+    result = await data_validator.fix_bars(symbol, timeframe, from_ts, to_ts, fetcher=f)
+    return result
+
+
+@app.post("/api/data/validate_all")
+async def api_validate_all(fix: bool = False):
+    """Scan all symbol/timeframe pairs in DB, validate against IB.
+    Set fix=true to auto-correct mismatches. This is a long-running operation."""
+    f = fetcher if (fetcher._ib_ready and fetcher.ib and fetcher.ib.isConnected()) else None
+    results = await data_validator.validate_all(fix=fix, fetcher=f)
+    total_mismatches = sum(r["total_mismatches"] for r in results)
+    total_fixed = sum(r.get("total_fixed", 0) for r in results)
+    return {
+        "pairs_checked": len(results),
+        "total_mismatches": total_mismatches,
+        "total_fixed": total_fixed,
+        "details": results,
+    }
 
 
 @app.get("/api/trades")
