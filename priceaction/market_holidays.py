@@ -31,9 +31,9 @@ def _easter(year: int) -> date:
     g = (b - f + 1) // 3
     h = (19 * a + b - d - g + 15) % 30
     i, k = divmod(c, 4)
-    l = (32 + 2 * e + 2 * i - h - k) % 7  # noqa: E741
-    m = (a + 11 * h + 22 * l) // 451
-    month, day = divmod(h + l - 7 * m + 114, 31)
+    leap_corr = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * leap_corr) // 451
+    month, day = divmod(h + leap_corr - 7 * m + 114, 31)
     return date(year, month, day + 1)
 
 
