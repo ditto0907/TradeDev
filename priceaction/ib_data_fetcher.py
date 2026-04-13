@@ -63,7 +63,7 @@ def _key_to_ib(key: str) -> tuple:
     return "5 mins", 300
 
 
-def _ib_duration(gap_sec: int) -> str:
+def ib_duration(gap_sec: int) -> str:
     """
     Convert a time gap (seconds) to an IB durationStr string.
     Supports up to 1 year — weeks/year strings allow fetching any
@@ -110,7 +110,10 @@ def _prev_contract_month(yyyymm: str, symbol: str = "MES") -> str:
     y = int(yyyymm[:4])
     m = int(yyyymm[4:])
     if m not in months:
-        # Find nearest month <= m
+        # When the contract month derived from a timestamp doesn't exactly match
+        # any month in the symbol's contract cycle (e.g. querying NK225MC with a
+        # month of 7 which isn't in its cycle), fall back to the nearest earlier
+        # contract month.
         prev = [q for q in months if q < m]
         if prev:
             return f"{y}{prev[-1]:02d}"
@@ -273,7 +276,7 @@ class IBDataFetcher:
         max_gap = 86_400 * 365
 
         if since_ts and (now - since_ts) <= max_gap:
-            duration_str = _ib_duration(now - since_ts)
+            duration_str = ib_duration(now - since_ts)
             logger.info("Fetching %s bars since %s (duration=%s)",
                         key, datetime.fromtimestamp(since_ts, tz=timezone.utc).isoformat(),
                         duration_str)
@@ -338,7 +341,7 @@ class IBDataFetcher:
         end_ts     = ((to_ts + interval - 1) // interval) * interval
         end_dt     = datetime.fromtimestamp(end_ts, tz=timezone.utc)
         end_str    = end_dt.strftime("%Y%m%d %H:%M:%S UTC")
-        dur_str    = _ib_duration(end_ts - start_ts)
+        dur_str    = ib_duration(end_ts - start_ts)
 
         inst = config.INSTRUMENTS.get(symbol)
 

@@ -57,6 +57,7 @@ _ws_clients:          List[WebSocket] = []
 _latest_analysis:     dict = {}
 _last_analysis_bar_ts: int = 0
 _prev_completed_bar:  dict = {"5min": None}  # for DB write on completion
+_db_coverage_task:    Optional[asyncio.Task] = None  # debug background task
 
 
 # ─── WebSocket Broadcast ──────────────────────────────────────────────────────
@@ -114,31 +115,32 @@ async def _db_coverage_loop():
     from datetime import datetime as _dt, timezone as _tz
     while True:
         try:
-            await asyncio.sleep(60)
             coverage = db.get_coverage()
             if not coverage:
                 _db_debug_logger.info("[DB Coverage] No bars in database yet")
-                continue
-            lines = ["[DB Coverage] ──────────────────────────────────"]
-            for c in coverage:
-                min_dt = _dt.fromtimestamp(c["min_ts"], tz=_tz.utc).strftime("%Y-%m-%d %H:%M") if c["min_ts"] else "N/A"
-                max_dt = _dt.fromtimestamp(c["max_ts"], tz=_tz.utc).strftime("%Y-%m-%d %H:%M") if c["max_ts"] else "N/A"
-                lines.append(
-                    f"  {c['symbol']:>10s} / {c['timeframe']:<5s}  "
-                    f"bars={c['count']:>6d}  "
-                    f"from={min_dt}  to={max_dt}"
-                )
-            lines.append("────────────────────────────────────────────────")
-            _db_debug_logger.info("\n".join(lines))
+            else:
+                lines = ["[DB Coverage] ──────────────────────────────────"]
+                for c in coverage:
+                    min_dt = _dt.fromtimestamp(c["min_ts"], tz=_tz.utc).strftime("%Y-%m-%d %H:%M") if c["min_ts"] else "N/A"
+                    max_dt = _dt.fromtimestamp(c["max_ts"], tz=_tz.utc).strftime("%Y-%m-%d %H:%M") if c["max_ts"] else "N/A"
+                    lines.append(
+                        f"  {c['symbol']:>10s} / {c['timeframe']:<5s}  "
+                        f"bars={c['count']:>6d}  "
+                        f"from={min_dt}  to={max_dt}"
+                    )
+                lines.append("────────────────────────────────────────────────")
+                _db_debug_logger.info("\n".join(lines))
+            await asyncio.sleep(60)
         except asyncio.CancelledError:
             break
         except Exception as e:
             _db_debug_logger.error("[DB Coverage] Error: %s", e)
+            await asyncio.sleep(60)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _order_mgr
+    global _order_mgr, _db_coverage_task
 
     logger.info("Starting up…")
 
@@ -207,8 +209,8 @@ async def lifespan(app: FastAPI):
                         import time as _time
                         gap_sec = int(_time.time()) - since_5m
                         if gap_sec >= 300:
-                            from ib_data_fetcher import _ib_duration
-                            dur_5m = _ib_duration(gap_sec)
+                            from ib_data_fetcher import ib_duration
+                            dur_5m = ib_duration(gap_sec)
                             logger.info("[%s] 5min gap %ds → fetching (duration=%s)", sym_name, gap_sec, dur_5m)
                             should_fetch_5m = True
                             filter_since = since_5m
