@@ -1146,6 +1146,17 @@
           </label>
           <label><input type="checkbox" id="strat-ctx" checked> Context&nbsp;Filter</label>
           <div class="sep"></div>
+          <label>Session
+            <select id="strat-session" style="width:64px">
+              <option value="all" selected>All</option>
+              <option value="rth">RTH</option>
+              <option value="eth">ETH</option>
+            </select>
+          </label>
+          <label>Time
+            <input type="text" id="strat-time-filter" placeholder="e.g. 10:00-12:00" style="width:110px;font-size:11px;padding:2px 4px;border:1px solid var(--border);border-radius:3px;background:var(--bg);color:var(--text)">
+          </label>
+          <div class="sep"></div>
           <label>From
             <input type="date" id="strat-from" style="width:130px">
           </label>
@@ -1163,6 +1174,7 @@
           <button class="mc-btn mc-del" id="strat-del-btn" onclick="deleteCurrentBacktest()" title="Delete selected run" style="font-size:13px;margin-left:2px">✕</button>
           <div class="sep"></div>
           <label><input type="checkbox" id="strat-show-markers" onchange="toggleBacktestMarkers(this.checked)"> Show on Chart</label>
+          <label><input type="checkbox" id="strat-show-filtered" checked onchange="toggleFilteredDisplay(this.checked)"> Show&nbsp;Filtered</label>
         </div>
         <!-- Summary bar -->
         <div id="strategy-summary" style="display:none">
