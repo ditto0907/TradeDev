@@ -232,6 +232,19 @@ def count_bars(symbol: str, timeframe: str) -> int:
         ).fetchone()[0]
 
 
+def get_coverage() -> List[dict]:
+    """Return min/max timestamps and bar count for every (symbol, timeframe) pair."""
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT symbol, timeframe, MIN(ts), MAX(ts), COUNT(*) "
+            "FROM bars GROUP BY symbol, timeframe ORDER BY symbol, timeframe"
+        ).fetchall()
+    return [
+        {"symbol": r[0], "timeframe": r[1], "min_ts": r[2], "max_ts": r[3], "count": r[4]}
+        for r in rows
+    ]
+
+
 # ─── Chart Layout CRUD ────────────────────────────────────────────────────────
 
 def get_all_charts() -> List[dict]:
