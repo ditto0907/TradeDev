@@ -38,6 +38,11 @@ datafeed_logger = logging.getLogger("datafeed")
 if DATAFEED_DEBUG:
     datafeed_logger.setLevel(logging.DEBUG)
 
+# Debug logger for DB coverage check (always logs at INFO level)
+_db_debug_logger = logging.getLogger("db_coverage")
+_db_debug_logger.setLevel(logging.INFO)
+
+
 BASE_DIR  = Path(__file__).parent
 MES_SYM   = "MES"   # symbol key used in DB
 
@@ -103,6 +108,34 @@ def on_new_bar(bar_size_key: str, bar: dict):
 
 # ─── Startup / Shutdown ───────────────────────────────────────────────────────
 
+
+async def _db_coverage_loop():
+    """Background task: log DB bar coverage for every symbol × timeframe every 60 s."""
+    from datetime import datetime as _dt, timezone as _tz
+    while True:
+        try:
+            await asyncio.sleep(60)
+            coverage = db.get_coverage()
+            if not coverage:
+                _db_debug_logger.info("[DB Coverage] No bars in database yet")
+                continue
+            lines = ["[DB Coverage] ──────────────────────────────────"]
+            for c in coverage:
+                min_dt = _dt.fromtimestamp(c["min_ts"], tz=_tz.utc).strftime("%Y-%m-%d %H:%M") if c["min_ts"] else "N/A"
+                max_dt = _dt.fromtimestamp(c["max_ts"], tz=_tz.utc).strftime("%Y-%m-%d %H:%M") if c["max_ts"] else "N/A"
+                lines.append(
+                    f"  {c['symbol']:>10s} / {c['timeframe']:<5s}  "
+                    f"bars={c['count']:>6d}  "
+                    f"from={min_dt}  to={max_dt}"
+                )
+            lines.append("────────────────────────────────────────────────")
+            _db_debug_logger.info("\n".join(lines))
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            _db_debug_logger.error("[DB Coverage] Error: %s", e)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _order_mgr
@@ -135,7 +168,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error("IB connect/history error: %s", e)
 
-    # ── Step 2b: prefetch extra symbols if DB is empty ───────────────────────
+    # ── Step 2b: prefetch extra symbols — incremental sync ──────────────────
     if ib_ok and fetcher.ib and fetcher.ib.isConnected():
         from ib_insync import ContFuture
 
@@ -161,22 +194,43 @@ async def lifespan(app: FastAPI):
                     continue
                 qc = qualified[0]
 
-                # ── 5min bars (skip if already populated) ─────────────────
+                # ── 5min bars (incremental: fetch only missing) ───────────
                 if sym_name != MES_SYM:  # MES 5min already fetched above
-                    existing_5m = db.get_bars(sym_name, "5min")
-                    if not existing_5m:
+                    since_5m = db.get_latest_ts(sym_name, "5min")
+                    should_fetch_5m = False
+                    if since_5m is None:
+                        logger.info("[%s] No 5min bars in DB — full fetch", sym_name)
+                        dur_5m = config.HISTORY_DURATION_5MIN
+                        should_fetch_5m = True
+                        filter_since = None
+                    else:
+                        import time as _time
+                        gap_sec = int(_time.time()) - since_5m
+                        if gap_sec >= 300:
+                            from ib_data_fetcher import _ib_duration
+                            dur_5m = _ib_duration(gap_sec)
+                            logger.info("[%s] 5min gap %ds → fetching (duration=%s)", sym_name, gap_sec, dur_5m)
+                            should_fetch_5m = True
+                            filter_since = since_5m
+                        else:
+                            logger.info("[%s] 5min bars up to date (gap %ds) — skip", sym_name, gap_sec)
+                    if should_fetch_5m:
                         raw = await asyncio.wait_for(
                             fetcher.ib.reqHistoricalDataAsync(
                                 qc, endDateTime="",
-                                durationStr=config.HISTORY_DURATION_5MIN,
+                                durationStr=dur_5m,
                                 barSizeSetting="5 mins", whatToShow="TRADES",
                                 useRTH=False, formatDate=2,
                             ), timeout=60.0,
                         )
                         bars5 = [_bar_to_dict(b) for b in raw]
+                        if filter_since:
+                            bars5 = [b for b in bars5 if b["time"] > filter_since]
                         if bars5:
-                            db.insert_bars(sym_name, "5min", bars5)
-                            logger.info("Prefetched %d 5min bars for %s", len(bars5), sym_name)
+                            saved = db.insert_bars(sym_name, "5min", bars5)
+                            logger.info("[%s] Saved %d new 5min bars to DB", sym_name, saved)
+                        else:
+                            logger.info("[%s] IB returned 0 new 5min bars", sym_name)
 
                 # ── 1D bars (always refresh to keep daily chart up to date) ─
                 since_1d = db.get_latest_ts(sym_name, "1D")
@@ -185,7 +239,7 @@ async def lifespan(app: FastAPI):
                     import time as _time
                     gap_days = (_time.time() - since_1d) / 86400
                     if gap_days < 1:
-                        logger.info("1D bars for %s are up to date — skip fetch", sym_name)
+                        logger.info("[%s] 1D bars up to date — skip fetch", sym_name)
                         continue
                 raw_1d = await asyncio.wait_for(
                     fetcher.ib.reqHistoricalDataAsync(
@@ -198,7 +252,7 @@ async def lifespan(app: FastAPI):
                 bars_1d = [_bar_to_dict(b) for b in raw_1d]
                 if bars_1d:
                     saved_1d = db.insert_bars(sym_name, "1D", bars_1d)
-                    logger.info("Prefetched %d 1D bars for %s", saved_1d, sym_name)
+                    logger.info("[%s] Saved %d 1D bars to DB", sym_name, saved_1d)
 
             except Exception as e:
                 logger.warning("Prefetch %s failed: %s", sym_name, e)
@@ -247,9 +301,13 @@ async def lifespan(app: FastAPI):
     if bars_5min:
         _latest_analysis = analyzer.get_analysis(bars_5min)
 
+    # ── Step 7: start debug DB-coverage background task ──────────────────────
+    _db_coverage_task = asyncio.create_task(_db_coverage_loop())
+
     yield   # ── server is running ────────────────────────────────────────────
 
     # ── Shutdown ──────────────────────────────────────────────────────────────
+    _db_coverage_task.cancel()
     logger.info("Shutting down…")
     # Flush any in-progress bars to DB
     bar = _prev_completed_bar.get("5min")
@@ -399,39 +457,50 @@ async def get_history(
     Serves bars from SQLite.  If countback bars aren't available in the DB
     for the requested range (e.g. chart scrolled past cached history), an
     on-demand fetch from IB is attempted and the result is saved to the DB.
+    Works for ALL supported symbols (MES, MNQ, NK225MC, MGC, …).
     """
     from ib_data_fetcher import resolution_to_key
     key  = resolution_to_key(resolution)
     sym  = symbol.upper()
-    bars = db.get_bars(sym, key, from_ts=from_ts, to_ts=to_ts)
 
-    # Auto-fetch from IB whenever the scroll goes before our earliest stored bar.
-    # Guard: only attempt when _ib_ready is True (contract resolved).
-    # Without this guard, a timed-out qualifyContractsAsync would cause every
-    # scroll request to hang for 30 s before returning empty.
-    earliest_db  = db.get_earliest_ts(sym, key)
-    needs_older  = (earliest_db is None or from_ts < earliest_db)
-    if needs_older and sym == MES_SYM:
+    # ── Step 1: Query existing bars from DB ──────────────────────────────────
+    bars = db.get_bars(sym, key, from_ts=from_ts, to_ts=to_ts)
+    earliest_db = db.get_earliest_ts(sym, key)
+    latest_db   = db.get_latest_ts(sym, key)
+    logger.info(
+        "[%s/%s] DB check: %d bars in range [%s→%s], DB coverage=[%s→%s]",
+        sym, key, len(bars), from_ts, to_ts, earliest_db, latest_db,
+    )
+
+    # ── Step 2: Auto-fetch from IB when DB has gaps ──────────────────────────
+    # Trigger when the requested range extends before our earliest stored bar.
+    needs_older = (earliest_db is None or from_ts < earliest_db)
+    if needs_older:
         if fetcher._ib_ready and fetcher.ib and fetcher.ib.isConnected():
-            # Use earliest_db as the end point so we fetch data BEFORE what we have
             fetch_end = earliest_db if earliest_db else to_ts
             logger.info(
-                "Scroll past DB boundary: auto-fetching %s bars from IB "
-                "(from=%s earliest_db=%s fetch_end=%s)", key, from_ts, earliest_db, fetch_end
+                "[%s/%s] Scroll past DB boundary → fetching from IB "
+                "(from=%s earliest_db=%s fetch_end=%s)",
+                sym, key, from_ts, earliest_db, fetch_end,
             )
             try:
-                fetched = await fetcher.fetch_range(key, from_ts, fetch_end)
+                fetched = await fetcher.fetch_range(key, from_ts, fetch_end, symbol=sym)
                 if fetched:
-                    db.insert_bars(sym, key, fetched)
+                    saved = db.insert_bars(sym, key, fetched)
                     bars = db.get_bars(sym, key, from_ts=from_ts, to_ts=to_ts)
-                    logger.info("Auto-fetched %d %s bars for scroll request", len(fetched), key)
+                    logger.info(
+                        "[%s/%s] IB auto-fetch OK: %d bars fetched, %d saved, %d total in range",
+                        sym, key, len(fetched), saved, len(bars),
+                    )
                 else:
-                    logger.info("IB returned 0 bars for %s range %s→%s", key, from_ts, fetch_end)
+                    logger.info("[%s/%s] IB returned 0 bars for range %s→%s",
+                                sym, key, from_ts, fetch_end)
             except Exception as e:
-                logger.warning("On-demand IB fetch failed: %s", e)
+                logger.warning("[%s/%s] On-demand IB fetch failed: %s", sym, key, e)
         else:
             logger.debug(
-                "Scroll past DB boundary for %s but IB not ready — skipping auto-fetch", key
+                "[%s/%s] Scroll past DB boundary but IB not ready — skipping auto-fetch",
+                sym, key,
             )
 
     # Final fallback: in-memory cache (only valid for the primary symbol MES)
@@ -556,21 +625,25 @@ async def skill_get_bars(
     from ib_data_fetcher import resolution_to_key
     from datetime import datetime as _dt
     import zoneinfo
+
+    key = resolution_to_key(resolution)
+    sym = symbol.upper()
+
+    # Determine the symbol's local timezone for datetime parsing
+    inst = config.INSTRUMENTS.get(sym)
+    sym_tz = zoneinfo.ZoneInfo(inst["timezone"]) if inst else zoneinfo.ZoneInfo("America/New_York")
     
     # Parse datetime strings if provided (takes priority over timestamps)
     if from_dt:
         try:
-            # Parse datetime string and convert to Unix timestamp
-            # Assume ET timezone for trading hours
-            et = zoneinfo.ZoneInfo("America/New_York")
             if len(from_dt) == 10:  # "YYYY-MM-DD" format
                 dt_obj = _dt.strptime(from_dt, "%Y-%m-%d")
             else:  # "YYYY-MM-DD HH:MM" format
                 dt_obj = _dt.strptime(from_dt, "%Y-%m-%d %H:%M")
-            # Create timezone-aware datetime in ET timezone
-            dt_obj_et = _dt(dt_obj.year, dt_obj.month, dt_obj.day,
-                           dt_obj.hour, dt_obj.minute, dt_obj.second, tzinfo=et)
-            from_ts = int(dt_obj_et.timestamp())
+            # Create timezone-aware datetime in the symbol's local timezone
+            dt_obj_local = _dt(dt_obj.year, dt_obj.month, dt_obj.day,
+                               dt_obj.hour, dt_obj.minute, dt_obj.second, tzinfo=sym_tz)
+            from_ts = int(dt_obj_local.timestamp())
         except ValueError as e:
             return JSONResponse(
                 {"error": f"Invalid from_dt format: {e}. Use 'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM'"},
@@ -581,16 +654,15 @@ async def skill_get_bars(
     
     if to_dt:
         try:
-            et = zoneinfo.ZoneInfo("America/New_York")
             if len(to_dt) == 10:  # "YYYY-MM-DD" format, use end of day
                 dt_obj = _dt.strptime(to_dt, "%Y-%m-%d")
-                dt_obj_et = _dt(dt_obj.year, dt_obj.month, dt_obj.day,
-                               23, 59, 59, tzinfo=et)
+                dt_obj_local = _dt(dt_obj.year, dt_obj.month, dt_obj.day,
+                                   23, 59, 59, tzinfo=sym_tz)
             else:  # "YYYY-MM-DD HH:MM" format
                 dt_obj = _dt.strptime(to_dt, "%Y-%m-%d %H:%M")
-                dt_obj_et = _dt(dt_obj.year, dt_obj.month, dt_obj.day,
-                               dt_obj.hour, dt_obj.minute, dt_obj.second, tzinfo=et)
-            to_ts = int(dt_obj_et.timestamp())
+                dt_obj_local = _dt(dt_obj.year, dt_obj.month, dt_obj.day,
+                                   dt_obj.hour, dt_obj.minute, dt_obj.second, tzinfo=sym_tz)
+            to_ts = int(dt_obj_local.timestamp())
         except ValueError as e:
             return JSONResponse(
                 {"error": f"Invalid to_dt format: {e}. Use 'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM'"},
@@ -598,9 +670,6 @@ async def skill_get_bars(
             )
     elif to_ts is None:
         to_ts = 9_999_999_999
-    
-    key = resolution_to_key(resolution)
-    sym = symbol.upper()
     
     # Debug logging
     logger.info(f"skill_get_bars: sym={sym}, key={key}, from_ts={from_ts}, to_ts={to_ts}")
@@ -612,13 +681,26 @@ async def skill_get_bars(
     if session.upper() == "RTH" and key in ("5min", "1min", "3min", "15min", "30min", "60min"):
         from datetime import datetime as _dt, timezone as _tz, timedelta as _td
         import zoneinfo
-        et = zoneinfo.ZoneInfo("America/New_York")
+
+        # Use per-symbol timezone and RTH window from INSTRUMENTS
+        inst = config.INSTRUMENTS.get(sym)
+        if inst:
+            tz = zoneinfo.ZoneInfo(inst["timezone"])
+            rth_start = inst["rth_start"]  # (hour, minute)
+            rth_end   = inst["rth_end"]
+        else:
+            tz = zoneinfo.ZoneInfo("America/New_York")
+            rth_start = (9, 30)
+            rth_end   = (16, 0)
+
+        start_min = rth_start[0] * 60 + rth_start[1]
+        end_min   = rth_end[0]   * 60 + rth_end[1]
+
         filtered = []
         for b in bars:
-            dt = _dt.fromtimestamp(b["time"], tz=_tz.utc).astimezone(et)
-            # RTH: 09:30 - 16:00 ET
+            dt = _dt.fromtimestamp(b["time"], tz=_tz.utc).astimezone(tz)
             t = dt.hour * 60 + dt.minute
-            if 570 <= t < 960:        # 9:30=570  16:00=960
+            if start_min <= t < end_min:
                 filtered.append(b)
         bars = filtered
 

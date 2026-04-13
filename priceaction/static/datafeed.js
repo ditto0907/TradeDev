@@ -25,13 +25,17 @@ class MESDatafeed {
   // ── searchSymbols ──────────────────────────────────────────────────────────
 
   searchSymbols(userInput, exchange, symbolType, onResult) {
-    onResult([{
-      symbol: 'MES',
-      full_name: 'CME:MES',
-      description: 'Micro E-mini S&P 500 Futures',
-      exchange: 'CME',
-      type: 'futures',
-    }]);
+    const allSymbols = [
+      { symbol: 'MES',     full_name: 'CME:MES',       description: 'Micro E-mini S&P 500 Futures',   exchange: 'CME',   type: 'futures' },
+      { symbol: 'MNQ',     full_name: 'CME:MNQ',       description: 'Micro E-mini Nasdaq-100 Futures', exchange: 'CME',   type: 'futures' },
+      { symbol: 'NK225MC', full_name: 'OSE:NK225MC',   description: 'Micro Nikkei 225 Futures',        exchange: 'OSE',   type: 'futures' },
+      { symbol: 'MGC',     full_name: 'COMEX:MGC',     description: 'Micro Gold Futures',              exchange: 'COMEX', type: 'futures' },
+    ];
+    const q = (userInput || '').toUpperCase();
+    const filtered = q
+      ? allSymbols.filter(s => s.symbol.includes(q) || s.description.toUpperCase().includes(q))
+      : allSymbols;
+    onResult(filtered);
   }
 
   // ── resolveSymbol ──────────────────────────────────────────────────────────
