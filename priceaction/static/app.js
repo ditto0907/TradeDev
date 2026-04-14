@@ -3082,7 +3082,130 @@ function _drawBacktestMarkers(trades, showFiltered) {
   }
 }
 
-// ── Data Validation Tab ───────────────────────────────────────────────────────
+// ── Data Validation (validate DB against IB, fix missing bars) ────────────────
+
+function _dvParams() {
+  const symbol = document.getElementById('dv-symbol')?.value || 'MES';
+  const timeframe = document.getElementById('dv-timeframe')?.value || '5min';
+  const fromEl = document.getElementById('dv-from');
+  const toEl = document.getElementById('dv-to');
+  const params = new URLSearchParams({ symbol, timeframe });
+  if (fromEl?.value) params.set('from_dt', fromEl.value);
+  if (toEl?.value) params.set('to_dt', toEl.value);
+  return { symbol, timeframe, params };
+}
+
+function _renderValidationResult(data, isFixed) {
+  const thead = document.getElementById('dv-thead');
+  thead.innerHTML = '<tr><th>Time</th><th>Status</th><th>DB OHLC</th><th>IB OHLC</th><th>Diffs</th></tr>';
+
+  const summary = document.getElementById('dv-summary');
+  summary.style.display = '';
+  const fixedInfo = isFixed ? ` | <span style="color:var(--green)">Fixed: ${data.fixed_count ?? data.ib_only_inserted ?? 0}</span>` : '';
+  summary.innerHTML =
+    `<span>${data.symbol}/${data.timeframe}</span>` +
+    ` — DB: <span style="color:var(--text)">${data.db_count}</span>` +
+    ` | IB: <span style="color:var(--text)">${data.ib_count}</span>` +
+    ` | <span style="color:var(--orange)">Mismatches: ${data.mismatch_count}</span>` +
+    ` | <span style="color:var(--red)">Missing in DB: ${data.ib_only_count ?? data.ib_only_inserted ?? 0}</span>` +
+    fixedInfo;
+
+  const tbody = document.getElementById('dv-tbody');
+  const rows = [];
+
+  // Show mismatches
+  if (data.mismatches?.length) {
+    data.mismatches.forEach(m => {
+      const dt = new Date(m.time * 1000).toLocaleString();
+      const dbBar = m.db;
+      const ibBar = m.ib;
+      const diffFields = Object.keys(m.diffs || {}).join(', ');
+      rows.push(`<tr>
+        <td>${dt}</td>
+        <td class="down">⚠ Mismatch</td>
+        <td>O:${dbBar.open} H:${dbBar.high} L:${dbBar.low} C:${dbBar.close}</td>
+        <td>O:${ibBar.open} H:${ibBar.high} L:${ibBar.low} C:${ibBar.close}</td>
+        <td>${diffFields}</td>
+      </tr>`);
+    });
+  }
+
+  // Show bars missing from DB (IB only)
+  const ibOnly = data.ib_only || [];
+  if (ibOnly.length) {
+    ibOnly.forEach(b => {
+      const dt = new Date(b.time * 1000).toLocaleString();
+      rows.push(`<tr>
+        <td>${dt}</td>
+        <td class="down">❌ Missing in DB</td>
+        <td>—</td>
+        <td>O:${b.open} H:${b.high} L:${b.low} C:${b.close}</td>
+        <td>${isFixed ? '✅ Fixed' : 'Need fix'}</td>
+      </tr>`);
+    });
+  }
+
+  if (!rows.length) {
+    tbody.innerHTML = '';
+  } else {
+    tbody.innerHTML = rows.join('');
+  }
+}
+
+async function runDataValidate() {
+  const { params } = _dvParams();
+  const summary = document.getElementById('dv-summary');
+  const tbody = document.getElementById('dv-tbody');
+  summary.style.display = '';
+  summary.innerHTML = '⏳ Validating against IB…';
+  tbody.innerHTML = '';
+
+  try {
+    const res = await fetch(`/api/data/validate?${params}`);
+    const data = await res.json();
+    _renderValidationResult(data, false);
+  } catch (e) {
+    showToast('Validation failed: ' + e.message, 'error');
+    summary.innerHTML = '❌ Validation failed';
+  }
+}
+
+async function runDataFix() {
+  const { symbol, timeframe, params } = _dvParams();
+  if (!confirm(`This will overwrite mismatched bars and insert missing bars for ${symbol}/${timeframe} from IB. Continue?`)) return;
+
+  const summary = document.getElementById('dv-summary');
+  const tbody = document.getElementById('dv-tbody');
+  summary.style.display = '';
+  summary.innerHTML = '⏳ Validating & fixing against IB…';
+  tbody.innerHTML = '';
+
+  try {
+    const res = await fetch(`/api/data/fix?${params}`, { method: 'POST' });
+    const data = await res.json();
+    _renderValidationResult(data, true);
+    showToast(`Fixed ${data.fixed_count ?? 0} bars for ${symbol}/${timeframe}`, 'ok');
+  } catch (e) {
+    showToast('Fix failed: ' + e.message, 'error');
+    summary.innerHTML = '❌ Fix failed';
+  }
+}
+
+async function runDeleteRealtimeBars() {
+  if (!confirm('Delete ALL realtime-assembled bars from the database?\nYou can re-fill missing data using Validate & Fix.')) return;
+
+  try {
+    const res = await fetch('/api/data/delete_by_source?source=realtime', { method: 'POST' });
+    const data = await res.json();
+    showToast(`Deleted ${data.deleted} realtime bars`, 'ok');
+
+    const summary = document.getElementById('dv-summary');
+    summary.style.display = '';
+    summary.innerHTML = `🗑 Deleted <span style="color:var(--red)">${data.deleted}</span> realtime bars from database`;
+  } catch (e) {
+    showToast('Delete failed: ' + e.message, 'error');
+  }
+}
 
 async function runGapCheck() {
   const symbol = document.getElementById('dv-symbol')?.value || 'MES';

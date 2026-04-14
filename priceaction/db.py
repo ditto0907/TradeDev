@@ -244,6 +244,15 @@ def count_bars(symbol: str, timeframe: str) -> int:
         ).fetchone()[0]
 
 
+def delete_bars_by_source(source: str) -> int:
+    """Delete all bars with the given source. Returns count deleted."""
+    with _conn() as conn:
+        cursor = conn.execute(
+            "DELETE FROM bars WHERE source=?", (source,)
+        )
+        return cursor.rowcount
+
+
 def get_coverage() -> List[dict]:
     """Return min/max timestamps and bar count for every (symbol, timeframe) pair."""
     with _conn() as conn:
