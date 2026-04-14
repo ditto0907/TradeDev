@@ -203,6 +203,100 @@ async def _db_coverage_loop():
             await asyncio.sleep(60)
 
 
+async def _prefetch_extra_symbols(fetcher, ib_ok):
+    """Prefetch extra symbols in the background (non-blocking)."""
+    if not (ib_ok and fetcher.ib and fetcher.ib.isConnected()):
+        return
+    from ib_insync import ContFuture
+
+    # All symbols to prefetch (primary + extras)
+    all_symbols = [
+        {"symbol": MES_SYM, "ib_symbol": config.MES_SYMBOL,
+         "exchange": config.MES_EXCHANGE, "currency": config.MES_CURRENCY},
+    ] + config.EXTRA_SYMBOLS
+
+    for sym_cfg in all_symbols:
+        sym_name = sym_cfg["symbol"]
+        contract = ContFuture(
+            symbol=sym_cfg.get("ib_symbol", sym_name),
+            exchange=sym_cfg["exchange"],
+            currency=sym_cfg["currency"],
+        )
+        try:
+            qualified = await asyncio.wait_for(
+                fetcher.ib.qualifyContractsAsync(contract), timeout=30.0,
+            )
+            if not qualified:
+                logger.warning("IB returned no contract for %s — skipping", sym_name)
+                continue
+            qc = qualified[0]
+
+            # ── 5min bars (incremental: fetch only missing) ───────────
+            if sym_name != MES_SYM:  # MES 5min already fetched above
+                since_5m = db.get_latest_ts(sym_name, "5min")
+                should_fetch_5m = False
+                if since_5m is None:
+                    logger.info("[%s] No 5min bars in DB — full fetch", sym_name)
+                    dur_5m = config.HISTORY_DURATION_5MIN
+                    should_fetch_5m = True
+                    filter_since = None
+                else:
+                    import time as _time
+                    gap_sec = int(_time.time()) - since_5m
+                    if gap_sec >= 300:
+                        from ib_data_fetcher import ib_duration
+                        dur_5m = ib_duration(gap_sec)
+                        logger.info("[%s] 5min gap %ds → fetching (duration=%s)", sym_name, gap_sec, dur_5m)
+                        should_fetch_5m = True
+                        filter_since = since_5m
+                    else:
+                        logger.info("[%s] 5min bars up to date (gap %ds) — skip", sym_name, gap_sec)
+                if should_fetch_5m:
+                    raw = await asyncio.wait_for(
+                        fetcher.ib.reqHistoricalDataAsync(
+                            qc, endDateTime="",
+                            durationStr=dur_5m,
+                            barSizeSetting="5 mins", whatToShow="TRADES",
+                            useRTH=False, formatDate=2,
+                        ), timeout=60.0,
+                    )
+                    bars5 = [_bar_to_dict(b) for b in raw]
+                    if filter_since:
+                        bars5 = [b for b in bars5 if b["time"] > filter_since]
+                    if bars5:
+                        saved = db.insert_bars(sym_name, "5min", bars5,
+                                               source="ib_historical")
+                        logger.info("[%s] Saved %d new 5min bars to DB", sym_name, saved)
+                    else:
+                        logger.info("[%s] IB returned 0 new 5min bars", sym_name)
+
+            # ── 1D bars (always refresh to keep daily chart up to date) ─
+            since_1d = db.get_latest_ts(sym_name, "1D")
+            existing_1d = db.get_bars(sym_name, "1D")
+            if existing_1d and since_1d:
+                import time as _time
+                gap_days = (_time.time() - since_1d) / 86400
+                if gap_days < 1:
+                    logger.info("[%s] 1D bars up to date — skip fetch", sym_name)
+                    continue
+            raw_1d = await asyncio.wait_for(
+                fetcher.ib.reqHistoricalDataAsync(
+                    qc, endDateTime="",
+                    durationStr=config.HISTORY_DURATION_1D,
+                    barSizeSetting="1 day", whatToShow="TRADES",
+                    useRTH=True, formatDate=2,
+                ), timeout=60.0,
+            )
+            bars_1d = [_bar_to_dict(b) for b in raw_1d]
+            if bars_1d:
+                saved_1d = db.insert_bars(sym_name, "1D", bars_1d,
+                                          source="ib_historical")
+                logger.info("[%s] Saved %d 1D bars to DB", sym_name, saved_1d)
+
+        except Exception as e:
+            logger.warning("Prefetch %s failed: %s", sym_name, e)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _order_mgr, _db_coverage_task
@@ -236,96 +330,8 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error("IB connect/history error: %s", e)
 
-    # ── Step 2b: prefetch extra symbols — incremental sync ──────────────────
-    if ib_ok and fetcher.ib and fetcher.ib.isConnected():
-        from ib_insync import ContFuture
-
-        # All symbols to prefetch (primary + extras)
-        all_symbols = [
-            {"symbol": MES_SYM, "ib_symbol": config.MES_SYMBOL,
-             "exchange": config.MES_EXCHANGE, "currency": config.MES_CURRENCY},
-        ] + config.EXTRA_SYMBOLS
-
-        for sym_cfg in all_symbols:
-            sym_name = sym_cfg["symbol"]
-            contract = ContFuture(
-                symbol=sym_cfg.get("ib_symbol", sym_name),
-                exchange=sym_cfg["exchange"],
-                currency=sym_cfg["currency"],
-            )
-            try:
-                qualified = await asyncio.wait_for(
-                    fetcher.ib.qualifyContractsAsync(contract), timeout=30.0,
-                )
-                if not qualified:
-                    logger.warning("IB returned no contract for %s — skipping", sym_name)
-                    continue
-                qc = qualified[0]
-
-                # ── 5min bars (incremental: fetch only missing) ───────────
-                if sym_name != MES_SYM:  # MES 5min already fetched above
-                    since_5m = db.get_latest_ts(sym_name, "5min")
-                    should_fetch_5m = False
-                    if since_5m is None:
-                        logger.info("[%s] No 5min bars in DB — full fetch", sym_name)
-                        dur_5m = config.HISTORY_DURATION_5MIN
-                        should_fetch_5m = True
-                        filter_since = None
-                    else:
-                        import time as _time
-                        gap_sec = int(_time.time()) - since_5m
-                        if gap_sec >= 300:
-                            from ib_data_fetcher import ib_duration
-                            dur_5m = ib_duration(gap_sec)
-                            logger.info("[%s] 5min gap %ds → fetching (duration=%s)", sym_name, gap_sec, dur_5m)
-                            should_fetch_5m = True
-                            filter_since = since_5m
-                        else:
-                            logger.info("[%s] 5min bars up to date (gap %ds) — skip", sym_name, gap_sec)
-                    if should_fetch_5m:
-                        raw = await asyncio.wait_for(
-                            fetcher.ib.reqHistoricalDataAsync(
-                                qc, endDateTime="",
-                                durationStr=dur_5m,
-                                barSizeSetting="5 mins", whatToShow="TRADES",
-                                useRTH=False, formatDate=2,
-                            ), timeout=60.0,
-                        )
-                        bars5 = [_bar_to_dict(b) for b in raw]
-                        if filter_since:
-                            bars5 = [b for b in bars5 if b["time"] > filter_since]
-                        if bars5:
-                            saved = db.insert_bars(sym_name, "5min", bars5,
-                                                   source="ib_historical")
-                            logger.info("[%s] Saved %d new 5min bars to DB", sym_name, saved)
-                        else:
-                            logger.info("[%s] IB returned 0 new 5min bars", sym_name)
-
-                # ── 1D bars (always refresh to keep daily chart up to date) ─
-                since_1d = db.get_latest_ts(sym_name, "1D")
-                existing_1d = db.get_bars(sym_name, "1D")
-                if existing_1d and since_1d:
-                    import time as _time
-                    gap_days = (_time.time() - since_1d) / 86400
-                    if gap_days < 1:
-                        logger.info("[%s] 1D bars up to date — skip fetch", sym_name)
-                        continue
-                raw_1d = await asyncio.wait_for(
-                    fetcher.ib.reqHistoricalDataAsync(
-                        qc, endDateTime="",
-                        durationStr=config.HISTORY_DURATION_1D,
-                        barSizeSetting="1 day", whatToShow="TRADES",
-                        useRTH=True, formatDate=2,
-                    ), timeout=60.0,
-                )
-                bars_1d = [_bar_to_dict(b) for b in raw_1d]
-                if bars_1d:
-                    saved_1d = db.insert_bars(sym_name, "1D", bars_1d,
-                                              source="ib_historical")
-                    logger.info("[%s] Saved %d 1D bars to DB", sym_name, saved_1d)
-
-            except Exception as e:
-                logger.warning("Prefetch %s failed: %s", sym_name, e)
+    # ── Step 2b: prefetch extra symbols in background (non-blocking) ────────
+    asyncio.create_task(_prefetch_extra_symbols(fetcher, ib_ok))
 
     # ── Step 3: synthetic fallback only when NOTHING is available ─────────────
     if not ib_ok and not has_db_data:
@@ -1462,6 +1468,79 @@ async def delete_backtest(backtest_id: str):
     if not ok:
         return JSONResponse({"error": "not found"}, status_code=404)
     return {"ok": True}
+
+
+# ─── Data Validation ─────────────────────────────────────────────────────────
+
+@app.get("/api/data/gaps")
+async def api_data_gaps(
+    symbol: str = "MES",
+    timeframe: str = "5min",
+    from_ts: Optional[int] = None,
+    to_ts: Optional[int] = None,
+):
+    """Detect K-line continuity gaps for a symbol/timeframe."""
+    from ib_data_fetcher import _key_to_ib
+    try:
+        _, interval = _key_to_ib(timeframe)
+    except Exception:
+        interval = 300
+    gaps = db.find_gaps(symbol, timeframe, expected_interval=interval)
+    if from_ts:
+        gaps = [g for g in gaps if g["gap_end"] >= from_ts]
+    if to_ts:
+        gaps = [g for g in gaps if g["gap_start"] <= to_ts]
+    return {
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "total_gaps": len(gaps),
+        "weekday_gaps": len([g for g in gaps if not g["spans_weekend"] and not g.get("spans_holiday")]),
+        "weekend_gaps": len([g for g in gaps if g["spans_weekend"]]),
+        "holiday_gaps": len([g for g in gaps if g.get("spans_holiday") and not g["spans_weekend"]]),
+        "gaps": gaps,
+    }
+
+
+@app.get("/api/data/bars_by_source")
+async def api_bars_by_source(
+    source: str = "realtime",
+    symbol: Optional[str] = None,
+    timeframe: Optional[str] = None,
+    from_ts: Optional[int] = None,
+    to_ts: Optional[int] = None,
+    limit: int = 500,
+):
+    """Query bars by source (e.g. 'realtime' for auto-assembled bars)."""
+    sql = "SELECT symbol, timeframe, ts, open, high, low, close, volume, source FROM bars WHERE source=?"
+    params: list = [source]
+    if symbol:
+        sql += " AND symbol=?"
+        params.append(symbol)
+    if timeframe:
+        sql += " AND timeframe=?"
+        params.append(timeframe)
+    if from_ts:
+        sql += " AND ts>=?"
+        params.append(from_ts)
+    if to_ts:
+        sql += " AND ts<=?"
+        params.append(to_ts)
+    sql += " ORDER BY ts DESC LIMIT ?"
+    params.append(limit)
+
+    with db._conn() as conn:
+        rows = conn.execute(sql, params).fetchall()
+    bars = [
+        {"symbol": r[0], "timeframe": r[1], "time": r[2],
+         "open": r[3], "high": r[4], "low": r[5], "close": r[6],
+         "volume": r[7], "source": r[8]}
+        for r in rows
+    ]
+    with db._conn() as conn:
+        sources = [r[0] for r in conn.execute(
+            "SELECT DISTINCT source FROM bars ORDER BY source"
+        ).fetchall()]
+    return {"bars": bars, "total": len(bars), "available_sources": sources}
 
 
 # ─── WebSocket ────────────────────────────────────────────────────────────────

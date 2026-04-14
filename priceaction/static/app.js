@@ -2958,7 +2958,7 @@ function _renderStrategyTrades(trades, showFiltered) {
       ? `<span style="color:#ff9800" title="${t.context_reason || ''}">⛔ ${t.context_reason || 'blocked'}</span>`
       : '<span style="color:#26a69a">✓</span>';
 
-    const locateBtn = `<button class="mc-btn" onclick="stratLocateTrade(${t.entry_time})" title="Scroll chart to trade" style="font-size:11px;padding:1px 6px;background:none;border:1px solid var(--border);border-radius:3px;cursor:pointer">Locate</button>`;
+    const locateBtn = `<button class="mc-btn" onclick="stratLocateTrade(${t.entry_time},${t.exit_time || t.entry_time})" title="Scroll chart to trade" style="font-size:11px;padding:1px 6px;background:none;border:1px solid var(--border);border-radius:3px;cursor:pointer">Locate</button>`;
 
     return `<tr class="${rowClass}" data-trade-idx="${idx}">
       <td>${entryDt}</td>
@@ -2984,14 +2984,14 @@ function _clearStrategyTrades() {
 
 // ── Locate trade on chart ─────────────────────────────────────────────────────
 
-function stratLocateTrade(entry_time) {
+function stratLocateTrade(entry_time, exit_time) {
   if (!_widget || !entry_time) return;
   try {
     const chart = _widget.activeChart();
-    chart.setVisibleRange({
-      from: entry_time - 60 * 30,    // 30min before entry
-      to:   entry_time + 60 * 60,    // 1h after entry
-    });
+    // Same behavior as Trade History's locateTradeOnChart: 30min padding on each side
+    const from = entry_time - 1800;
+    const to = (exit_time || entry_time) + 1800;
+    chart.setVisibleRange({ from, to });
   } catch (e) {
     console.warn('[Strategy] stratLocateTrade error:', e);
   }
@@ -3079,5 +3079,123 @@ function _drawBacktestMarkers(trades, showFiltered) {
     }
   } catch (e) {
     console.warn('[Strategy] _drawBacktestMarkers error:', e);
+  }
+}
+
+// ── Data Validation Tab ───────────────────────────────────────────────────────
+
+async function runGapCheck() {
+  const symbol = document.getElementById('dv-symbol')?.value || 'MES';
+  const timeframe = document.getElementById('dv-timeframe')?.value || '5min';
+  const fromEl = document.getElementById('dv-from');
+  const toEl = document.getElementById('dv-to');
+
+  let url = `/api/data/gaps?symbol=${symbol}&timeframe=${timeframe}`;
+  if (fromEl?.value) {
+    url += `&from_ts=${Math.floor(new Date(fromEl.value).getTime() / 1000)}`;
+  }
+  if (toEl?.value) {
+    url += `&to_ts=${Math.floor(new Date(toEl.value + 'T23:59:59').getTime() / 1000)}`;
+  }
+
+  try {
+    const res = await fetch(url);
+    const data = await res.json();
+
+    const thead = document.getElementById('dv-thead');
+    thead.innerHTML = '<tr><th>Gap Start</th><th>Gap End</th><th>Duration</th><th>Type</th></tr>';
+
+    const summary = document.getElementById('dv-summary');
+    summary.style.display = '';
+    summary.innerHTML = `<span>${symbol}/${timeframe}</span>` +
+      ` — <span style="color:var(--text)">${data.total_gaps} gaps total</span>` +
+      ` | <span style="color:var(--orange)">${data.weekday_gaps} weekday</span>` +
+      ` | <span style="color:var(--text-dim)">${data.weekend_gaps} weekend</span>` +
+      ` | <span style="color:var(--text-dim)">${data.holiday_gaps} holiday</span>`;
+
+    const tbody = document.getElementById('dv-tbody');
+    if (!data.gaps || !data.gaps.length) {
+      tbody.innerHTML = '<tr><td colspan="4"><div class="empty-table">✅ No gaps detected</div></td></tr>';
+      return;
+    }
+
+    tbody.innerHTML = data.gaps.map(g => {
+      const start = new Date(g.gap_start * 1000).toLocaleString();
+      const end = new Date(g.gap_end * 1000).toLocaleString();
+      const hours = (g.gap_seconds / 3600).toFixed(1);
+      const isWeekday = !g.spans_weekend && !g.spans_holiday;
+      const type = g.spans_weekend ? 'Weekend' : g.spans_holiday ? 'Holiday' : 'Weekday';
+      const typeClass = isWeekday ? 'down' : '';
+      return `<tr>
+        <td>${start}</td>
+        <td>${end}</td>
+        <td>${hours}h (${g.gap_seconds}s)</td>
+        <td class="${typeClass}">${isWeekday ? '⚠ ' : ''}${type}</td>
+      </tr>`;
+    }).join('');
+  } catch (e) {
+    showToast('Gap check failed: ' + e.message, 'error');
+  }
+}
+
+async function runSourceQuery() {
+  const source = document.getElementById('dv-source')?.value || 'realtime';
+  const symbol = document.getElementById('dv-symbol')?.value || '';
+  const timeframe = document.getElementById('dv-timeframe')?.value || '';
+  const fromEl = document.getElementById('dv-from');
+  const toEl = document.getElementById('dv-to');
+
+  let url = `/api/data/bars_by_source?source=${encodeURIComponent(source)}`;
+  if (symbol) url += `&symbol=${symbol}`;
+  if (timeframe) url += `&timeframe=${timeframe}`;
+  if (fromEl?.value) {
+    url += `&from_ts=${Math.floor(new Date(fromEl.value).getTime() / 1000)}`;
+  }
+  if (toEl?.value) {
+    url += `&to_ts=${Math.floor(new Date(toEl.value + 'T23:59:59').getTime() / 1000)}`;
+  }
+
+  try {
+    const res = await fetch(url);
+    const data = await res.json();
+
+    const thead = document.getElementById('dv-thead');
+    thead.innerHTML = '<tr><th>Time</th><th>Symbol</th><th>TF</th><th>Open</th><th>High</th><th>Low</th><th>Close</th><th>Volume</th><th>Source</th></tr>';
+
+    const srcSelect = document.getElementById('dv-source');
+    if (data.available_sources && srcSelect) {
+      const current = srcSelect.value;
+      srcSelect.innerHTML = data.available_sources.map(s =>
+        `<option value="${s}" ${s === current ? 'selected' : ''}>${s}</option>`
+      ).join('');
+    }
+
+    const summary = document.getElementById('dv-summary');
+    summary.style.display = '';
+    summary.innerHTML = `Source: <span style="color:var(--text)">${source}</span>` +
+      ` — <span style="color:var(--text)">${data.total} bars found</span>`;
+
+    const tbody = document.getElementById('dv-tbody');
+    if (!data.bars || !data.bars.length) {
+      tbody.innerHTML = '<tr><td colspan="9"><div class="empty-table">No bars found for this source</div></td></tr>';
+      return;
+    }
+
+    tbody.innerHTML = data.bars.map(b => {
+      const dt = new Date(b.time * 1000).toLocaleString();
+      return `<tr>
+        <td>${dt}</td>
+        <td>${b.symbol}</td>
+        <td>${b.timeframe}</td>
+        <td>${b.open.toFixed(2)}</td>
+        <td>${b.high.toFixed(2)}</td>
+        <td>${b.low.toFixed(2)}</td>
+        <td>${b.close.toFixed(2)}</td>
+        <td>${Math.round(b.volume)}</td>
+        <td>${b.source}</td>
+      </tr>`;
+    }).join('');
+  } catch (e) {
+    showToast('Source query failed: ' + e.message, 'error');
   }
 }
