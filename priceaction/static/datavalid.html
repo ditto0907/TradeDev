@@ -592,8 +592,9 @@ function showToast(message, type) {
   requestAnimationFrame(() => el.classList.add('show'));
   setTimeout(() => {
     el.classList.remove('show');
-    el.addEventListener('transitionend', () => el.remove(), { once: true });
-    setTimeout(() => el.remove(), 500);
+    el.addEventListener('transitionend', () => { if (el.parentNode) el.remove(); }, { once: true });
+    // Fallback in case transitionend doesn't fire
+    setTimeout(() => { if (el.parentNode) el.remove(); }, 500);
   }, 3500);
 }
 
@@ -623,7 +624,7 @@ function fmtVol(v) {
 var _sortState = {};
 
 function initTableSort(tableId, data, renderFn) {
-  var thead = document.getElementById(tableId.replace('-table', '-thead') || tableId + '-thead');
+  var thead = document.getElementById(tableId.replace('-table', '-thead'));
   if (!thead) return;
   thead.querySelectorAll('th[data-col]').forEach(function(th) {
     th.addEventListener('click', function() {
