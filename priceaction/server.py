@@ -63,10 +63,6 @@ datafeed_logger = logging.getLogger("datafeed")
 if DATAFEED_DEBUG:
     datafeed_logger.setLevel(logging.DEBUG)
 
-# Debug logger for DB coverage check (always logs at INFO level)
-_db_debug_logger = logging.getLogger("db_coverage")
-_db_debug_logger.setLevel(logging.INFO)
-
 
 BASE_DIR  = Path(__file__).parent
 MES_SYM   = "MES"   # symbol key used in DB
@@ -82,7 +78,6 @@ _ws_clients:          List[WebSocket] = []
 _latest_analysis:     dict = {}
 _last_analysis_bar_ts: int = 0
 _prev_completed_bar:  dict = {}   # {(symbol, bar_size_key): bar_dict}
-_db_coverage_task:    Optional[asyncio.Task] = None  # debug background task
 
 # Cooldown map: avoid re-fetching from IB when market is closed / no data
 # {(symbol, db_key): expiry_unix_ts}
@@ -111,12 +106,11 @@ def on_new_bar(bar_size_key: str, bar: dict, symbol: str = None):
     """
     Called on every tick (reqMktData) or 5-second bar for any symbol.
 
-    Realtime bars are **NOT** persisted to DB — they are kept in-memory only
-    (_prev_completed_bar) and broadcast to WebSocket clients for live chart
-    updates.  The DB stores only IB historical data (fetched on startup or
-    on-demand).  This avoids tick-assembled bars corrupting the historical
-    record.  When a bar completes (timestamp advances), the previous bar is
-    simply discarded from memory; the next /api/history call will fill it
+    Realtime bars are persisted to a separate ``realtime_bars`` table so the
+    latest in-progress bar survives a server restart.  They are kept separate
+    from the ``bars`` table (IB historical data) to avoid corrupting the
+    historical record.  When a bar completes (timestamp advances), the previous
+    bar is discarded from memory; the next /api/history call will fill it
     from IB historical data.
 
     Re-runs analysis on new 5min bars and broadcasts bar+analysis.
@@ -135,6 +129,10 @@ def on_new_bar(bar_size_key: str, bar: dict, symbol: str = None):
         if symbol == MES_SYM:
             sheets.buffer_bar(bar_size_key, prev)
     _prev_completed_bar[prev_key] = dict(bar)
+
+    # Persist the in-progress realtime bar to its own table so it survives
+    # a server restart and the chart shows the latest bar immediately on reload.
+    db.upsert_realtime_bar(symbol, bar_size_key, bar)
 
     # Re-run price-action analysis only when a new 5min bar opens (MES only)
     analysis_updated = False
@@ -213,87 +211,6 @@ async def _fill_internal_gaps(sym: str, tf: str, fetcher_obj, max_age_days: int 
 
 
 # ─── Startup / Shutdown ───────────────────────────────────────────────────────
-
-
-async def _db_coverage_loop():
-    """Background task: log DB bar coverage and check data continuity every 60 s.
-
-    When DATAFEED_DEBUG is enabled, also scans every symbol × timeframe for
-    unexpected gaps (missing bars during trading hours).
-    """
-    from datetime import datetime as _dt, timezone as _tz
-    from ib_data_fetcher import _key_to_ib
-    while True:
-        try:
-            coverage = db.get_coverage()
-            if not coverage:
-                _db_debug_logger.info("[DB Coverage] No bars in database yet")
-            else:
-                lines = ["[DB Coverage] ──────────────────────────────────"]
-                for c in coverage:
-                    min_dt = _dt.fromtimestamp(c["min_ts"], tz=_tz.utc).strftime("%Y-%m-%d %H:%M") if c["min_ts"] else "N/A"
-                    max_dt = _dt.fromtimestamp(c["max_ts"], tz=_tz.utc).strftime("%Y-%m-%d %H:%M") if c["max_ts"] else "N/A"
-                    lines.append(
-                        f"  {c['symbol']:>10s} / {c['timeframe']:<5s}  "
-                        f"bars={c['count']:>6d}  "
-                        f"from={min_dt}  to={max_dt}"
-                    )
-                lines.append("────────────────────────────────────────────────")
-                _db_debug_logger.info("\n".join(lines))
-
-            # ── Data continuity check (debug mode only) ──────────────────────
-            if DATAFEED_DEBUG and coverage:
-                for c in coverage:
-                    sym = c["symbol"]
-                    tf  = c["timeframe"]
-                    try:
-                        _, interval = _key_to_ib(tf)
-                    except Exception:
-                        interval = 300  # fallback
-                    gaps = db.find_gaps(sym, tf, expected_interval=interval)
-                    if gaps:
-                        # Separate weekday (suspicious) gaps from weekend/holiday (expected) gaps
-                        weekday_gaps = [g for g in gaps if not g["spans_weekend"] and not g.get("spans_holiday")]
-                        weekend_gaps = [g for g in gaps if g["spans_weekend"]]
-                        holiday_gaps = [g for g in gaps if g.get("spans_holiday") and not g["spans_weekend"]]
-                        gap_lines = [
-                            f"[Continuity] {sym}/{tf}: "
-                            f"{len(gaps)} gap(s) total — "
-                            f"{len(weekday_gaps)} weekday, {len(weekend_gaps)} weekend, "
-                            f"{len(holiday_gaps)} holiday"
-                        ]
-                        for g in weekday_gaps[:10]:
-                            g_start = _dt.fromtimestamp(g["gap_start"], tz=_tz.utc).strftime("%Y-%m-%d %H:%M")
-                            g_end   = _dt.fromtimestamp(g["gap_end"],   tz=_tz.utc).strftime("%Y-%m-%d %H:%M")
-                            gap_lines.append(
-                                f"  ⚠ WEEKDAY GAP: {g_start} → {g_end} "
-                                f"({g['gap_seconds']}s / {g['gap_seconds']/3600:.1f}h)"
-                            )
-                        if len(weekday_gaps) > 10:
-                            gap_lines.append(f"  ... and {len(weekday_gaps) - 10} more weekday gaps")
-                        for g in holiday_gaps[:5]:
-                            g_start = _dt.fromtimestamp(g["gap_start"], tz=_tz.utc).strftime("%Y-%m-%d %H:%M")
-                            g_end   = _dt.fromtimestamp(g["gap_end"],   tz=_tz.utc).strftime("%Y-%m-%d %H:%M")
-                            gap_lines.append(
-                                f"  🏖 HOLIDAY GAP: {g_start} → {g_end} "
-                                f"({g['gap_seconds']}s / {g['gap_seconds']/3600:.1f}h)"
-                            )
-                        if weekday_gaps:
-                            _db_debug_logger.warning("\n".join(gap_lines))
-                        else:
-                            _db_debug_logger.debug(
-                                "[Continuity] %s/%s: %d weekend + %d holiday gaps (OK)",
-                                sym, tf, len(weekend_gaps), len(holiday_gaps),
-                            )
-                    else:
-                        _db_debug_logger.debug("[Continuity] %s/%s: OK (no gaps)", sym, tf)
-
-            await asyncio.sleep(60)
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            _db_debug_logger.error("[DB Coverage] Error: %s", e)
-            await asyncio.sleep(60)
 
 
 async def _prefetch_extra_symbols(fetcher, ib_ok):
@@ -473,7 +390,7 @@ async def _ib_background_init():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _order_mgr, _db_coverage_task
+    global _order_mgr
 
     logger.info("Starting up…")
 
@@ -484,14 +401,28 @@ async def lifespan(app: FastAPI):
         fetcher.bars["5min"] = stored[-config.MAX_BARS_IN_MEMORY:]
         logger.info("Loaded %d 5min bars from DB", len(fetcher.bars["5min"]))
 
-    # ── Step 2: initial price-action analysis from DB data ───────────────────
+    # ── Step 2: seed _prev_completed_bar from saved realtime bars (crash recovery)
+    from ib_data_fetcher import _key_to_ib as _k2ib
+    _now_ts = int(time.time())
+    for rt_row in db.get_all_realtime_bars():
+        rt_sym = rt_row["symbol"]
+        rt_tf  = rt_row["timeframe"]
+        rt_bar = {k: rt_row[k] for k in ("time", "open", "high", "low", "close", "volume")}
+        try:
+            _, _interval = _k2ib(rt_tf)
+        except Exception:
+            _interval = 300
+        # Only restore bars that are still within the current bar period
+        _current_bar_ts = (_now_ts // _interval) * _interval
+        if rt_bar["time"] == _current_bar_ts:
+            _prev_completed_bar[(rt_sym, rt_tf)] = rt_bar
+            logger.info("Restored realtime bar %s/%s ts=%s from DB", rt_sym, rt_tf, rt_bar["time"])
+
+    # ── Step 3: initial price-action analysis from DB data ───────────────────
     global _latest_analysis
     bars_5min = fetcher.get_bars("5min")
     if bars_5min:
         _latest_analysis = analyzer.get_analysis(bars_5min)
-
-    # ── Step 3: start debug DB-coverage background task ──────────────────────
-    _db_coverage_task = asyncio.create_task(_db_coverage_loop())
 
     # ── Step 4: IB connect + fetch + realtime in background (non-blocking) ───
     _ib_init_task = asyncio.create_task(_ib_background_init())
@@ -501,10 +432,7 @@ async def lifespan(app: FastAPI):
     yield   # ── server is running ────────────────────────────────────────────
 
     # ── Shutdown ──────────────────────────────────────────────────────────────
-    _db_coverage_task.cancel()
     logger.info("Shutting down…")
-    # Note: in-progress realtime bars are intentionally NOT flushed to DB.
-    # DB stores only IB historical data; realtime bars are ephemeral.
     sheets.flush_buffer()
     fetcher.unsubscribe_realtime()
     fetcher.disconnect()
@@ -848,9 +776,9 @@ async def get_history(
         return resp
 
     # ── Append in-progress realtime bar (if any) ────────────────────────────
-    # Realtime bars live only in memory (_prev_completed_bar); they are NOT
-    # stored in DB.  Append the latest tick-assembled bar so the chart shows
-    # the live candle.  It is only valid for the primary streaming symbol.
+    # The latest realtime bar lives in _prev_completed_bar (in-memory) and is
+    # also persisted to the realtime_bars table for crash-recovery.  It is
+    # stored separately from IB historical bars to avoid corrupting the record.
     rt_key = (sym, key)
     rt_bar = _prev_completed_bar.get(rt_key)
     if rt_bar and from_ts <= rt_bar["time"] <= to_ts:
@@ -1147,6 +1075,22 @@ async def skill_delete_analysis(analysis_id: int):
 import data_validator
 
 
+def _parse_dt_eastern(dt_str: str) -> int:
+    """Parse a datetime string and return a UTC Unix timestamp.
+
+    Accepted formats:
+      - ``YYYY-MM-DD``              (start of day in US/Eastern)
+      - ``YYYY-MM-DD HH:MM``        (space separator)
+      - ``YYYY-MM-DDTHH:MM``        (ISO 8601 / datetime-local format)
+    """
+    import pytz
+    from datetime import datetime as _dt
+    eastern = pytz.timezone("America/New_York")
+    s = dt_str.replace("T", " ")
+    fmt = "%Y-%m-%d %H:%M" if " " in s else "%Y-%m-%d"
+    return int(eastern.localize(_dt.strptime(s, fmt)).timestamp())
+
+
 @app.get("/api/data/validate")
 async def api_validate_bars(
     symbol: str = "MES",
@@ -1158,19 +1102,11 @@ async def api_validate_bars(
 ):
     """Validate DB bars against IB historical data for a time range.
     Returns mismatches without fixing them."""
-    import pytz
-    from datetime import datetime as _dt
-    eastern = pytz.timezone("America/New_York")
-
     # Convert datetime strings if provided
     if from_dt and not from_ts:
-        from_ts = int(eastern.localize(
-            _dt.strptime(from_dt, "%Y-%m-%d %H:%M" if " " in from_dt else "%Y-%m-%d")
-        ).timestamp())
+        from_ts = _parse_dt_eastern(from_dt)
     if to_dt and not to_ts:
-        to_ts = int(eastern.localize(
-            _dt.strptime(to_dt, "%Y-%m-%d %H:%M" if " " in to_dt else "%Y-%m-%d")
-        ).timestamp())
+        to_ts = _parse_dt_eastern(to_dt)
 
     # Default: last 24 hours
     if from_ts is None:
@@ -1194,18 +1130,10 @@ async def api_fix_bars(
     to_dt: Optional[str] = None,
 ):
     """Validate and fix DB bars: overwrite mismatched bars with IB data."""
-    import pytz
-    from datetime import datetime as _dt
-    eastern = pytz.timezone("America/New_York")
-
     if from_dt and not from_ts:
-        from_ts = int(eastern.localize(
-            _dt.strptime(from_dt, "%Y-%m-%d %H:%M" if " " in from_dt else "%Y-%m-%d")
-        ).timestamp())
+        from_ts = _parse_dt_eastern(from_dt)
     if to_dt and not to_ts:
-        to_ts = int(eastern.localize(
-            _dt.strptime(to_dt, "%Y-%m-%d %H:%M" if " " in to_dt else "%Y-%m-%d")
-        ).timestamp())
+        to_ts = _parse_dt_eastern(to_dt)
 
     if from_ts is None:
         from_ts = int(time.time()) - 86400
