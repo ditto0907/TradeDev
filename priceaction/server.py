@@ -107,9 +107,9 @@ async def broadcast(message: dict):
 
 # ─── New Bar / Tick Handler ───────────────────────────────────────────────────
 
-def on_new_bar(bar_size_key: str, bar: dict):
+def on_new_bar(bar_size_key: str, bar: dict, symbol: str = None):
     """
-    Called on every tick (reqMktData) or 5-second bar.
+    Called on every tick (reqMktData) or 5-second bar for any symbol.
 
     Realtime bars are **NOT** persisted to DB — they are kept in-memory only
     (_prev_completed_bar) and broadcast to WebSocket clients for live chart
@@ -123,24 +123,28 @@ def on_new_bar(bar_size_key: str, bar: dict):
     """
     global _latest_analysis, _last_analysis_bar_ts
 
-    symbol = MES_SYM
+    # Default to MES for backward compatibility with legacy single-symbol dispatch
+    if symbol is None:
+        symbol = MES_SYM
+
     prev_key = (symbol, bar_size_key)
     prev = _prev_completed_bar.get(prev_key)
     if prev is not None and bar["time"] > prev["time"]:
         # The previous bar just completed — buffer for Google Sheets only;
         # do NOT write to DB (IB historical is the source of truth).
-        sheets.buffer_bar(bar_size_key, prev)
+        if symbol == MES_SYM:
+            sheets.buffer_bar(bar_size_key, prev)
     _prev_completed_bar[prev_key] = dict(bar)
 
-    # Re-run price-action analysis only when a new 5min bar opens
+    # Re-run price-action analysis only when a new 5min bar opens (MES only)
     analysis_updated = False
-    if bar_size_key == "5min" and bar["time"] > _last_analysis_bar_ts:
+    if symbol == MES_SYM and bar_size_key == "5min" and bar["time"] > _last_analysis_bar_ts:
         _last_analysis_bar_ts = bar["time"]
         _latest_analysis = analyzer.get_analysis(fetcher.get_bars("5min"))
         analysis_updated = True
 
     asyncio.create_task(broadcast({
-        "type": "bar", "bar_size": bar_size_key, "bar": bar, "symbol": MES_SYM,
+        "type": "bar", "bar_size": bar_size_key, "bar": bar, "symbol": symbol,
     }))
     if analysis_updated:
         asyncio.create_task(broadcast({
@@ -434,8 +438,8 @@ async def _ib_background_init():
     if ib_ok:
         try:
             fetcher.add_new_bar_callback(on_new_bar)
-            await fetcher.subscribe_mktdata()
-            logger.info("IB real-time streaming started.")
+            await fetcher.subscribe_mktdata_all()
+            logger.info("IB real-time streaming started (all symbols).")
 
             _order_mgr = IBOrderManager(fetcher.ib, fetcher._contract)
 
@@ -569,6 +573,11 @@ if static_path.exists():
 @app.get("/")
 async def index():
     return FileResponse(str(static_path / "index.html"))
+
+
+@app.get("/datavalid")
+async def datavalid_page():
+    return FileResponse(str(static_path / "datavalid.html"))
 
 
 # ─── TradingView UDF REST Endpoints ──────────────────────────────────────────
@@ -1694,6 +1703,83 @@ async def api_delete_bars_by_source(source: str = "realtime"):
     deleted = db.delete_bars_by_source(source)
     logger.info("Deleted %d bars with source=%s", deleted, source)
     return {"deleted": deleted, "source": source}
+
+
+@app.get("/api/data/query")
+async def api_data_query(
+    symbol: Optional[str] = None,
+    timeframe: Optional[str] = None,
+    source: Optional[str] = None,
+    from_ts: Optional[int] = None,
+    to_ts: Optional[int] = None,
+    page: int = 1,
+    page_size: int = 50,
+):
+    """Paginated query of bars from DB with flexible filter conditions."""
+    where_clauses = []
+    params: list = []
+    if symbol:
+        where_clauses.append("symbol=?")
+        params.append(symbol)
+    if timeframe:
+        where_clauses.append("timeframe=?")
+        params.append(timeframe)
+    if source:
+        where_clauses.append("source=?")
+        params.append(source)
+    if from_ts:
+        where_clauses.append("ts>=?")
+        params.append(from_ts)
+    if to_ts:
+        where_clauses.append("ts<=?")
+        params.append(to_ts)
+
+    where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+
+    with db._conn() as conn:
+        # Total count
+        count_row = conn.execute(
+            f"SELECT COUNT(*) FROM bars{where_sql}", params
+        ).fetchone()
+        total = count_row[0]
+
+        # Paginated data
+        offset = (max(1, page) - 1) * page_size
+        data_sql = (
+            f"SELECT symbol, timeframe, ts, open, high, low, close, volume, source "
+            f"FROM bars{where_sql} ORDER BY ts DESC LIMIT ? OFFSET ?"
+        )
+        rows = conn.execute(data_sql, params + [page_size, offset]).fetchall()
+
+        # Available filter values
+        symbols = [r[0] for r in conn.execute(
+            "SELECT DISTINCT symbol FROM bars ORDER BY symbol"
+        ).fetchall()]
+        timeframes = [r[0] for r in conn.execute(
+            "SELECT DISTINCT timeframe FROM bars ORDER BY timeframe"
+        ).fetchall()]
+        sources = [r[0] for r in conn.execute(
+            "SELECT DISTINCT source FROM bars ORDER BY source"
+        ).fetchall()]
+
+    bars = [
+        {"symbol": r[0], "timeframe": r[1], "time": r[2],
+         "open": r[3], "high": r[4], "low": r[5], "close": r[6],
+         "volume": r[7], "source": r[8]}
+        for r in rows
+    ]
+    total_pages = max(1, (total + page_size - 1) // page_size)
+
+    return {
+        "bars": bars,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": total_pages,
+        "available_symbols": symbols,
+        "available_timeframes": timeframes,
+        "available_sources": sources,
+    }
 
 
 # ─── WebSocket ────────────────────────────────────────────────────────────────
