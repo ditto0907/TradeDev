@@ -110,21 +110,25 @@ async def broadcast(message: dict):
 def on_new_bar(bar_size_key: str, bar: dict):
     """
     Called on every tick (reqMktData) or 5-second bar.
-    Saves completed bars to DB (when timestamp advances), re-runs analysis
-    on new 5min bars, and broadcasts bar+analysis to WebSocket clients.
+
+    Realtime bars are **NOT** persisted to DB — they are kept in-memory only
+    (_prev_completed_bar) and broadcast to WebSocket clients for live chart
+    updates.  The DB stores only IB historical data (fetched on startup or
+    on-demand).  This avoids tick-assembled bars corrupting the historical
+    record.  When a bar completes (timestamp advances), the previous bar is
+    simply discarded from memory; the next /api/history call will fill it
+    from IB historical data.
+
+    Re-runs analysis on new 5min bars and broadcasts bar+analysis.
     """
     global _latest_analysis, _last_analysis_bar_ts
 
-    # Track completed bars per (symbol, bar_size_key).
-    # Real-time streaming is currently only wired for MES; when additional
-    # symbols get their own subscriptions the symbol can be passed through
-    # the callback and this will work without further changes.
     symbol = MES_SYM
     prev_key = (symbol, bar_size_key)
     prev = _prev_completed_bar.get(prev_key)
     if prev is not None and bar["time"] > prev["time"]:
-        # The previous bar just completed — persist it
-        db.insert_bars(symbol, bar_size_key, [prev], source="realtime")
+        # The previous bar just completed — buffer for Google Sheets only;
+        # do NOT write to DB (IB historical is the source of truth).
         sheets.buffer_bar(bar_size_key, prev)
     _prev_completed_bar[prev_key] = dict(bar)
 
@@ -142,6 +146,66 @@ def on_new_bar(bar_size_key: str, bar: dict):
         asyncio.create_task(broadcast({
             "type": "analysis", "data": _latest_analysis,
         }))
+
+
+async def _fill_internal_gaps(sym: str, tf: str, fetcher_obj, max_age_days: int = 7):
+    """Scan DB bars for internal gaps and fill them from IB.
+
+    Only scans bars within the last *max_age_days* to avoid re-fetching
+    ancient data.  Skips the daily maintenance break (17:00-18:00 ET) and
+    weekend closures automatically — IB simply returns 0 bars for those
+    periods.
+    """
+    from ib_data_fetcher import _key_to_ib
+    _, interval = _key_to_ib(tf)
+
+    cutoff_ts = int(time.time()) - max_age_days * 86400
+    bars = db.get_bars(sym, tf, from_ts=cutoff_ts)
+    if len(bars) < 2:
+        return
+
+    # Detect gaps > 2× expected interval
+    gaps = []
+    for i in range(1, len(bars)):
+        gap_sec = bars[i]["time"] - bars[i - 1]["time"]
+        if gap_sec > interval * 2:
+            gaps.append((bars[i - 1]["time"], bars[i]["time"], gap_sec))
+
+    if not gaps:
+        logger.info("[%s/%s] No internal gaps in last %d days", sym, tf, max_age_days)
+        return
+
+    logger.info("[%s/%s] Found %d internal gaps in last %d days — filling from IB",
+                sym, tf, len(gaps), max_age_days)
+
+    total_filled = 0
+    for from_ts, to_ts, gap_sec in gaps:
+        try:
+            ib_bars = await fetcher_obj.fetch_range(tf, from_ts, to_ts, symbol=sym)
+            if ib_bars:
+                # Only insert bars strictly inside the gap (not the boundary bars)
+                gap_bars = [b for b in ib_bars
+                            if from_ts < b["time"] < to_ts]
+                if gap_bars:
+                    saved = db.insert_bars(sym, tf, gap_bars, source="ib_historical")
+                    total_filled += saved
+                    logger.info("[%s/%s] Filled %d bars for gap %s→%s (%ds)",
+                                sym, tf, saved, from_ts, to_ts, gap_sec)
+                else:
+                    logger.debug("[%s/%s] Gap %s→%s (%ds) — IB has no interior bars (maintenance/holiday)",
+                                 sym, tf, from_ts, to_ts, gap_sec)
+            else:
+                logger.debug("[%s/%s] Gap %s→%s (%ds) — IB returned 0 bars",
+                             sym, tf, from_ts, to_ts, gap_sec)
+            await asyncio.sleep(2)  # IB pacing
+        except Exception as e:
+            logger.warning("[%s/%s] Gap fill failed %s→%s: %s",
+                           sym, tf, from_ts, to_ts, e)
+
+    if total_filled:
+        logger.info("[%s/%s] Gap fill complete: %d bars inserted", sym, tf, total_filled)
+    else:
+        logger.info("[%s/%s] Gap fill complete: no new bars needed", sym, tf)
 
 
 # ─── Startup / Shutdown ───────────────────────────────────────────────────────
@@ -318,6 +382,9 @@ async def _prefetch_extra_symbols(fetcher, ib_ok):
                                           source="ib_historical")
                 logger.info("[%s] Saved %d 1D bars to DB", sym_name, saved_1d)
 
+            # ── Fill internal gaps in 5min data ──────────────────────
+            await _fill_internal_gaps(sym_name, "5min", fetcher)
+
         except Exception as e:
             logger.warning("Prefetch %s failed: %s", sym_name, e)
 
@@ -344,6 +411,9 @@ async def _ib_background_init():
             saved = db.insert_bars(MES_SYM, "5min", fetcher.bars["5min"],
                                    source="ib_historical")
             logger.info("Saved %d 5min bars to DB", saved)
+
+        # Fill internal gaps in MES 5min data (e.g. server downtime)
+        await _fill_internal_gaps(MES_SYM, "5min", fetcher)
 
         ib_ok = True
     except Exception as e:
@@ -429,10 +499,8 @@ async def lifespan(app: FastAPI):
     # ── Shutdown ──────────────────────────────────────────────────────────────
     _db_coverage_task.cancel()
     logger.info("Shutting down…")
-    # Flush any in-progress bars to DB (keyed by (symbol, bar_size_key))
-    for (sym, bsk), bar in _prev_completed_bar.items():
-        if bar:
-            db.insert_bars(sym, bsk, [bar], source="realtime")
+    # Note: in-progress realtime bars are intentionally NOT flushed to DB.
+    # DB stores only IB historical data; realtime bars are ephemeral.
     sheets.flush_buffer()
     fetcher.unsubscribe_realtime()
     fetcher.disconnect()
@@ -731,6 +799,25 @@ async def get_history(
         bars = db.get_bars(sym, key, from_ts=from_ts, to_ts=to_ts)
         logger.info("[%s/%s] After IB fill: %d bars in range", sym, key, len(bars))
 
+    # ── Step 4: Detect & fill INTERNAL gaps in returned bars ─────────────────
+    # The left/right gap logic above only handles edges.  If the DB has holes
+    # in the middle (e.g. server was offline), trigger a background fill so
+    # the next request will have complete data.
+    if bars and len(bars) >= 2 and ib_ready:
+        _internal_gap_cooldown_key = f"internal_{sym}_{key}"
+        if now_ts >= _ib_fetch_cooldown.get(_internal_gap_cooldown_key, 0):
+            has_internal_gap = False
+            for i in range(1, len(bars)):
+                if bars[i]["time"] - bars[i - 1]["time"] > interval * 2:
+                    has_internal_gap = True
+                    break
+            if has_internal_gap:
+                logger.info("[%s/%s] Internal gaps detected — scheduling background fill",
+                            sym, key)
+                asyncio.create_task(_fill_internal_gaps(sym, key, fetcher, max_age_days=7))
+                # Set cooldown to avoid re-scheduling on every request
+                _ib_fetch_cooldown[_internal_gap_cooldown_key] = now_ts + 120
+
     # Final fallback: in-memory cache (only valid for the primary symbol MES)
     if not bars and sym == MES_SYM:
         bars = fetcher.get_bars(key, from_ts=from_ts, to_ts=to_ts)
@@ -750,6 +837,21 @@ async def get_history(
         if next_ts is not None:
             resp["nextTime"] = next_ts
         return resp
+
+    # ── Append in-progress realtime bar (if any) ────────────────────────────
+    # Realtime bars live only in memory (_prev_completed_bar); they are NOT
+    # stored in DB.  Append the latest tick-assembled bar so the chart shows
+    # the live candle.  It is only valid for the primary streaming symbol.
+    rt_key = (sym, key)
+    rt_bar = _prev_completed_bar.get(rt_key)
+    if rt_bar and from_ts <= rt_bar["time"] <= to_ts:
+        # Replace or append: if DB already has a bar at this timestamp
+        # (from a previous IB fetch), the realtime bar takes precedence
+        # for the most-recent candle because it has live updates.
+        if bars and bars[-1]["time"] == rt_bar["time"]:
+            bars[-1] = rt_bar
+        elif not bars or rt_bar["time"] > bars[-1]["time"]:
+            bars.append(rt_bar)
 
     return {
         "s": "ok",
@@ -1584,6 +1686,14 @@ async def api_bars_by_source(
             "SELECT DISTINCT source FROM bars ORDER BY source"
         ).fetchall()]
     return {"bars": bars, "total": len(bars), "available_sources": sources}
+
+
+@app.post("/api/data/delete_by_source")
+async def api_delete_bars_by_source(source: str = "realtime"):
+    """Delete all bars with a given source from the database."""
+    deleted = db.delete_bars_by_source(source)
+    logger.info("Deleted %d bars with source=%s", deleted, source)
+    return {"deleted": deleted, "source": source}
 
 
 # ─── WebSocket ────────────────────────────────────────────────────────────────
