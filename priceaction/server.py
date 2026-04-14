@@ -1715,7 +1715,9 @@ async def api_data_query(
     page: int = 1,
     page_size: int = 50,
 ):
-    """Paginated query of bars from DB with flexible filter conditions."""
+    """Paginated query of bars from DB with flexible filter conditions.
+    page_size is bounded to 1-500."""
+    page_size = min(max(1, page_size), 500)  # Bound page_size to 1-500
     where_clauses = []
     params: list = []
     if symbol:

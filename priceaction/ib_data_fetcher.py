@@ -539,6 +539,7 @@ class IBDataFetcher:
     async def subscribe_mktdata_all(self):
         """Subscribe to tick-level streaming for ALL configured symbols."""
         from ib_insync import ContFuture as _ContFuture
+        import db as _db
 
         # Subscribe MES first (uses cached contract)
         await self.subscribe_mktdata()
@@ -569,7 +570,6 @@ class IBDataFetcher:
                 }
 
                 # Seed rt_current from DB if available
-                import db as _db
                 db_bars = _db.get_bars(sym_name, "5min", limit=1)
                 if db_bars:
                     now_ts = int(time.time())
