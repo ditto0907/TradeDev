@@ -826,6 +826,33 @@
     tr.bt-loss td { background: rgba(239,83,80,0.08); }
     tr.bt-filtered td { opacity: 0.45; }
     tr.bt-open td { background: rgba(33,150,243,0.08); }
+
+    /* ── Table Sort & Filter ─────────────────────────────────────────────── */
+    .data-table th { cursor: pointer; user-select: none; }
+    .data-table th .sort-icon {
+      display: inline-block;
+      margin-left: 4px;
+      font-size: 9px;
+      opacity: 0.4;
+      vertical-align: middle;
+    }
+    .data-table th .sort-icon.asc::after { content: '▲'; }
+    .data-table th .sort-icon.desc::after { content: '▼'; }
+    .data-table th .sort-icon.none::after { content: '⇅'; }
+    .data-table th .col-filter {
+      display: block;
+      width: 100%;
+      margin-top: 3px;
+      padding: 2px 4px;
+      font-size: 10px;
+      background: var(--input-bg);
+      border: 1px solid var(--border);
+      border-radius: 2px;
+      color: var(--text);
+      outline: none;
+    }
+    .data-table th .col-filter:focus { border-color: var(--blue); }
+    .data-table th .col-filter::placeholder { color: var(--text-faint); }
   </style>
 </head>
 <body>
@@ -1021,6 +1048,7 @@
       <div class="btab"        data-pane="history">Trade History</div>
       <div class="btab"        data-pane="analysis">Analysis Log</div>
       <div class="btab"        data-pane="strategy">Strategy</div>
+      <div class="btab"        data-pane="data-valid">Data Valid</div>
       <button id="bottom-minimize" title="Minimize">▼</button>
     </div>
     <div id="bottom-content">
@@ -1216,6 +1244,60 @@
         </div>
       </div>
 
+      <!-- Data Validation -->
+      <div class="btab-pane" id="pane-data-valid" style="display:flex;flex-direction:column">
+        <!-- Toolbar -->
+        <div id="dv-toolbar" style="display:flex;align-items:center;gap:10px;padding:6px 12px;border-bottom:1px solid var(--border);flex-wrap:wrap">
+          <label style="font-size:11px;color:var(--text-dim)">Symbol
+            <select id="dv-symbol" style="background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:3px;padding:3px 6px;font-size:12px">
+              <option value="MES">MES</option>
+              <option value="MNQ">MNQ</option>
+              <option value="NK225MC">NK225MC</option>
+              <option value="MGC">MGC</option>
+            </select>
+          </label>
+          <label style="font-size:11px;color:var(--text-dim)">Timeframe
+            <select id="dv-timeframe" style="background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:3px;padding:3px 6px;font-size:12px">
+              <option value="5min">5min</option>
+              <option value="1D">1D</option>
+            </select>
+          </label>
+          <label style="font-size:11px;color:var(--text-dim)">From
+            <input type="date" id="dv-from" style="width:130px;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:3px;padding:3px 6px;font-size:12px">
+          </label>
+          <label style="font-size:11px;color:var(--text-dim)">To
+            <input type="date" id="dv-to" style="width:130px;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:3px;padding:3px 6px;font-size:12px">
+          </label>
+          <button onclick="runGapCheck()" style="font-size:12px;padding:3px 10px;background:var(--blue);color:#fff;border:none;border-radius:3px;cursor:pointer">🔍 Check Gaps</button>
+          <div style="border-left:1px solid var(--border);height:18px"></div>
+          <label style="font-size:11px;color:var(--text-dim)">Source
+            <select id="dv-source" style="background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:3px;padding:3px 6px;font-size:12px">
+              <option value="realtime">realtime</option>
+              <option value="ib_historical">ib_historical</option>
+              <option value="ib_validated">ib_validated</option>
+              <option value="synthetic">synthetic</option>
+              <option value="unknown">unknown</option>
+            </select>
+          </label>
+          <button onclick="runSourceQuery()" style="font-size:12px;padding:3px 10px;background:var(--blue);color:#fff;border:none;border-radius:3px;cursor:pointer">📋 Query by Source</button>
+        </div>
+        <!-- Summary bar -->
+        <div id="dv-summary" style="display:none;padding:5px 12px;border-bottom:1px solid var(--border);font-size:11px;color:var(--text-dim)"></div>
+        <!-- Results table -->
+        <div style="flex:1;overflow-y:auto">
+          <table class="data-table" id="dv-table">
+            <thead id="dv-thead">
+              <tr>
+                <th>Gap Start</th><th>Gap End</th><th>Duration</th><th>Type</th>
+              </tr>
+            </thead>
+            <tbody id="dv-tbody">
+              <tr><td colspan="4"><div class="empty-table">Select parameters and run a check</div></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
     </div><!-- /bottom-content -->
   </div><!-- /bottom -->
 
@@ -1310,6 +1392,125 @@
   // Re-init when tbody content changes (dynamic tables)
   const obs = new MutationObserver(() => initAll());
   obs.observe(document.body, { childList: true, subtree: true });
+})();
+
+// ── Table Sort & Filter ─────────────────────────────────────────────────────
+(function() {
+  function initTableSortFilter(table) {
+    if (table.dataset.sortInit) return;
+    table.dataset.sortInit = '1';
+
+    const thead = table.querySelector('thead');
+    if (!thead) return;
+
+    const ths = thead.querySelectorAll('th');
+    if (!ths.length) return;
+
+    let sortCol = -1;
+    let sortDir = 'none';
+
+    ths.forEach((th, colIdx) => {
+      const icon = document.createElement('span');
+      icon.className = 'sort-icon none';
+      th.appendChild(icon);
+
+      const filter = document.createElement('input');
+      filter.className = 'col-filter';
+      filter.type = 'text';
+      filter.placeholder = 'Filter…';
+      filter.onclick = function(e) { e.stopPropagation(); };
+      filter.oninput = function() { applyFilters(table); };
+      th.appendChild(filter);
+
+      th.addEventListener('click', function(e) {
+        if (e.target.classList.contains('col-filter') || e.target.classList.contains('col-resize')) return;
+        if (sortCol === colIdx) {
+          sortDir = sortDir === 'asc' ? 'desc' : sortDir === 'desc' ? 'none' : 'asc';
+        } else {
+          sortCol = colIdx;
+          sortDir = 'asc';
+        }
+        ths.forEach((h, i) => {
+          const si = h.querySelector('.sort-icon');
+          if (si) si.className = 'sort-icon ' + (i === sortCol ? sortDir : 'none');
+        });
+        applySort(table, sortCol, sortDir);
+      });
+    });
+  }
+
+  function applySort(table, colIdx, dir) {
+    const tbody = table.querySelector('tbody');
+    if (!tbody) return;
+    const rows = Array.from(tbody.querySelectorAll('tr'));
+    const sortable = rows.filter(r =>
+      !r.classList.contains('trade-file-header') &&
+      !r.querySelector('.empty-table') &&
+      r.children.length > 1
+    );
+    if (dir === 'none' || sortable.length < 2) return;
+
+    sortable.sort((a, b) => {
+      const aCell = a.children[colIdx];
+      const bCell = b.children[colIdx];
+      if (!aCell || !bCell) return 0;
+      let aVal = (aCell.textContent || '').trim();
+      let bVal = (bCell.textContent || '').trim();
+      const aNum = parseFloat(aVal.replace(/[^0-9.\-]/g, ''));
+      const bNum = parseFloat(bVal.replace(/[^0-9.\-]/g, ''));
+      if (!isNaN(aNum) && !isNaN(bNum)) {
+        return dir === 'asc' ? aNum - bNum : bNum - aNum;
+      }
+      return dir === 'asc' ? aVal.localeCompare(bVal) : bVal.localeCompare(aVal);
+    });
+
+    sortable.forEach(r => tbody.appendChild(r));
+  }
+
+  function applyFilters(table) {
+    const thead = table.querySelector('thead');
+    const tbody = table.querySelector('tbody');
+    if (!thead || !tbody) return;
+
+    const filters = Array.from(thead.querySelectorAll('.col-filter')).map(f => f.value.toLowerCase());
+    const rows = tbody.querySelectorAll('tr');
+
+    rows.forEach(row => {
+      if (row.classList.contains('trade-file-header') || row.querySelector('.empty-table')) {
+        row.style.display = '';
+        return;
+      }
+      const cells = row.children;
+      let match = true;
+      for (let i = 0; i < filters.length && i < cells.length; i++) {
+        if (filters[i] && !(cells[i].textContent || '').toLowerCase().includes(filters[i])) {
+          match = false;
+          break;
+        }
+      }
+      row.style.display = match ? '' : 'none';
+    });
+  }
+
+  function initAll() {
+    document.querySelectorAll('.data-table').forEach(initTableSortFilter);
+  }
+
+  const observer = new MutationObserver(mutations => {
+    for (const m of mutations) {
+      if (m.target.tagName === 'THEAD' || m.target.closest?.('thead')) {
+        const table = m.target.closest('.data-table');
+        if (table) {
+          delete table.dataset.sortInit;
+          initTableSortFilter(table);
+        }
+      }
+    }
+    document.querySelectorAll('.data-table:not([data-sort-init])').forEach(initTableSortFilter);
+  });
+  observer.observe(document.body, { childList: true, subtree: true });
+
+  document.addEventListener('DOMContentLoaded', initAll);
 })();
 </script>
 
