@@ -613,6 +613,8 @@
 
     .btab-pane { display: none; height: 100%; overflow-y: auto; }
     .btab-pane.active { display: block; }
+    .btab-pane.btab-flex { flex-direction: column; }
+    .btab-pane.btab-flex.active { display: flex; }
     .btab-pane::-webkit-scrollbar { width: 4px; }
     .btab-pane::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
 
@@ -819,7 +821,6 @@
     .strat-stat span { font-size: 12px; font-weight: 500; color: var(--text); margin-left: 4px; }
     .strat-stat span.up { color: var(--green); }
     .strat-stat span.dn { color: var(--red); }
-    #pane-strategy { display: flex; flex-direction: column; }
     #pane-strategy .btab-pane-scroll { flex: 1; overflow-y: auto; }
     /* Trade row colors */
     tr.bt-win td  { background: rgba(38,166,154,0.08); }
@@ -828,10 +829,11 @@
     tr.bt-open td { background: rgba(33,150,243,0.08); }
 
     /* ── Table Sort & Filter ─────────────────────────────────────────────── */
-    .data-table th { cursor: pointer; user-select: none; }
+    .data-table th { cursor: pointer; user-select: none; position: relative; }
+    .data-table th .th-content { display: flex; align-items: center; gap: 2px; }
     .data-table th .sort-icon {
       display: inline-block;
-      margin-left: 4px;
+      margin-left: 2px;
       font-size: 9px;
       opacity: 0.4;
       vertical-align: middle;
@@ -839,8 +841,24 @@
     .data-table th .sort-icon.asc::after { content: '▲'; }
     .data-table th .sort-icon.desc::after { content: '▼'; }
     .data-table th .sort-icon.none::after { content: '⇅'; }
+    .data-table th .filter-icon {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 16px;
+      height: 16px;
+      margin-left: 2px;
+      font-size: 10px;
+      opacity: 0.35;
+      cursor: pointer;
+      border-radius: 2px;
+      vertical-align: middle;
+      flex-shrink: 0;
+    }
+    .data-table th .filter-icon:hover { opacity: 0.8; background: rgba(255,255,255,0.08); }
+    .data-table th .filter-icon.active { opacity: 1; color: var(--blue); }
     .data-table th .col-filter {
-      display: block;
+      display: none;
       width: 100%;
       margin-top: 3px;
       padding: 2px 4px;
@@ -851,6 +869,7 @@
       color: var(--text);
       outline: none;
     }
+    .data-table th .col-filter.show { display: block; }
     .data-table th .col-filter:focus { border-color: var(--blue); }
     .data-table th .col-filter::placeholder { color: var(--text-faint); }
   </style>
@@ -1163,7 +1182,7 @@
       </div>
 
       <!-- Strategy Backtest -->
-      <div class="btab-pane" id="pane-strategy" style="display:flex;flex-direction:column">
+      <div class="btab-pane btab-flex" id="pane-strategy">
         <!-- Toolbar -->
         <div id="strategy-toolbar">
           <label>IBS&nbsp;%
@@ -1245,7 +1264,7 @@
       </div>
 
       <!-- Data Validation -->
-      <div class="btab-pane" id="pane-data-valid" style="display:flex;flex-direction:column">
+      <div class="btab-pane btab-flex" id="pane-data-valid">
         <!-- Toolbar -->
         <div id="dv-toolbar" style="display:flex;align-items:center;gap:10px;padding:6px 12px;border-bottom:1px solid var(--border);flex-wrap:wrap">
           <label style="font-size:11px;color:var(--text-dim)">Symbol
@@ -1389,8 +1408,14 @@
     document.querySelectorAll('.data-table').forEach(initTableResize);
   }
   document.addEventListener('DOMContentLoaded', initAll);
-  // Re-init when tbody content changes (dynamic tables)
-  const obs = new MutationObserver(() => initAll());
+  // Re-init when new tables are added, but skip mutations caused by initTableResize itself
+  let _resizeMutating = false;
+  const obs = new MutationObserver(() => {
+    if (_resizeMutating) return;
+    _resizeMutating = true;
+    initAll();
+    _resizeMutating = false;
+  });
   obs.observe(document.body, { childList: true, subtree: true });
 })();
 
@@ -1414,16 +1439,43 @@
       icon.className = 'sort-icon none';
       th.appendChild(icon);
 
+      // Filter icon (🔍) — click to toggle filter input
+      const filterIcon = document.createElement('span');
+      filterIcon.className = 'filter-icon';
+      filterIcon.textContent = '🔍';
+      filterIcon.title = 'Filter this column';
+      filterIcon.onclick = function(e) {
+        e.stopPropagation();
+        const filterInput = th.querySelector('.col-filter');
+        if (filterInput) {
+          const isVisible = filterInput.classList.toggle('show');
+          filterIcon.classList.toggle('active', isVisible);
+          if (isVisible) {
+            filterInput.focus();
+          } else {
+            filterInput.value = '';
+            applyFilters(table);
+          }
+        }
+      };
+      th.appendChild(filterIcon);
+
       const filter = document.createElement('input');
       filter.className = 'col-filter';
       filter.type = 'text';
       filter.placeholder = 'Filter…';
       filter.onclick = function(e) { e.stopPropagation(); };
-      filter.oninput = function() { applyFilters(table); };
+      filter.oninput = function() {
+        applyFilters(table);
+        // Update icon active state based on whether filter has value
+        filterIcon.classList.toggle('active', !!filter.value);
+      };
       th.appendChild(filter);
 
       th.addEventListener('click', function(e) {
-        if (e.target.classList.contains('col-filter') || e.target.classList.contains('col-resize')) return;
+        if (e.target.classList.contains('col-filter') ||
+            e.target.classList.contains('col-resize') ||
+            e.target.classList.contains('filter-icon')) return;
         if (sortCol === colIdx) {
           sortDir = sortDir === 'asc' ? 'desc' : sortDir === 'desc' ? 'none' : 'asc';
         } else {
@@ -1496,17 +1548,13 @@
     document.querySelectorAll('.data-table').forEach(initTableSortFilter);
   }
 
+  let _sortMutating = false;
   const observer = new MutationObserver(mutations => {
-    for (const m of mutations) {
-      if (m.target.tagName === 'THEAD' || m.target.closest?.('thead')) {
-        const table = m.target.closest('.data-table');
-        if (table) {
-          delete table.dataset.sortInit;
-          initTableSortFilter(table);
-        }
-      }
-    }
+    if (_sortMutating) return;
+    _sortMutating = true;
+    // Only init tables that haven't been initialized yet (new tables added to DOM)
     document.querySelectorAll('.data-table:not([data-sort-init])').forEach(initTableSortFilter);
+    _sortMutating = false;
   });
   observer.observe(document.body, { childList: true, subtree: true });
 

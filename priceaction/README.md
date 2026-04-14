@@ -25,6 +25,8 @@ graph TB
         TLP["trade_log_parser.py<br/>交易日志解析"]
         TD["test_data.py<br/>模拟数据生成"]
         CFG["config.py<br/>配置"]
+        DV2["data_validator.py<br/>数据校验"]
+        SB2["strategy_backtest.py<br/>策略回测"]
     end
 
     subgraph IB["Interactive Brokers"]
@@ -162,6 +164,8 @@ graph LR
 | Order History | 全部订单历史 | 启动加载 `GET /api/orders?all=true` |
 | Trade History | 历史交易日志 (CSV 来源) | 启动加载 `GET /api/trades` |
 | Analysis Log | 市场周期分析记录，支持显隐切换与删除 | `GET /api/skill/analyses` + WebSocket 实时推送 |
+| Strategy | IBS 2-Bar 策略回测：可调参数 (IBS%/最大止损/上下文过滤/Session时段)，摘要统计 + 交易表格 + 图表定位 | `POST /api/strategy/backtest` |
+| Data Valid | 数据校验工具：Gap 检测、Source 查询、IB 数据对比。工具栏含品种/周期/日期选择器、Gap Check & Source Query 按钮 | `GET /api/data/gaps` / `GET /api/data/validate` |
 
 ### 1.7 市场周期分析模块 (Market Cycle Analysis)
 
@@ -306,7 +310,36 @@ curl "http://localhost:8000/api/skill/bars?symbol=MNQ&resolution=5&session=RTH&f
 # 返回19根5分钟bar（09:30, 09:35, ..., 11:00）
 ```
 
-### 2.6 WebSocket
+### 2.6 Strategy Backtest API
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/api/strategy/backtest` | Run IBS strategy backtest |
+| GET | `/api/strategy/backtests` | List saved backtest runs |
+| GET | `/api/strategy/backtests/{id}/trades` | Get trades for a backtest |
+| DELETE | `/api/strategy/backtests/{id}` | Delete a backtest run |
+
+### 2.7 Data Validation API
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/data/validate` | Validate DB bars against IB data |
+| POST | `/api/data/fix` | Fix mismatched bars with IB data |
+| POST | `/api/data/validate_all` | Scan all symbol/timeframe pairs |
+| GET | `/api/data/gaps` | Detect K-line continuity gaps |
+| GET | `/api/data/bars_by_source` | Query bars by source tag |
+
+### 2.8 Trade History API
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/trades` | Get parsed trade logs |
+| GET | `/api/trades/files` | List trade CSV files |
+| GET | `/api/trades/file/{filename}` | Parse specific CSV file |
+| POST | `/api/trades/upload` | Upload trade CSV |
+| DELETE | `/api/trades/file/{filename}` | Delete trade CSV |
+
+### 2.9 WebSocket
 
 | 端点 | 方向 | type | 说明 |
 |------|------|------|------|
@@ -327,16 +360,12 @@ graph TB
     subgraph 启动生命周期["server.py 启动流程"]
         direction TB
         S1["1. db.init_db()"]
-        S2["2. 加载 DB 中 MES 历史 bar"]
-        S3["3. 连接 IB TWS"]
-        S4["4. 增量获取 MES 缺失 bar"]
-        S5["5. 预取其他品种 (MNQ/NK225MC/MGC)"]
-        S6["6. 订阅实时行情 (reqMktData)"]
-        S7["7. 创建 OrderManager"]
-        S8["8. 绑定 orderStatusEvent"]
-        S9["9. Google Sheets 上传"]
-        S10["10. 初始 S/R 分析"]
-        S1 --> S2 --> S3 --> S4 --> S5 --> S6 --> S7 --> S8 --> S9 --> S10
+        S2["2. 加载 DB 中历史 bar 到内存"]
+        S3["3. 基于 DB 数据执行初始 S/R 分析"]
+        S4["4. 启动 DB 覆盖率监控"]
+        S5["5. (后台任务) IB 连接 + 增量获取 + 实时订阅 + Sheets 上传"]
+        S1 --> S2 --> S3 --> S4 --> S5
+        S4 -.->|"服务器开始响应请求"| S5
     end
 ```
 
@@ -360,6 +389,10 @@ graph LR
         TD2["test_data.py"]
         ILT["ib_log_translator.py"]
         CFG2["config.py"]
+        DV["data_validator.py"]
+        SB["strategy_backtest.py"]
+        MH["market_holidays.py"]
+        RV["run_validation.py"]
     end
 ```
 
@@ -375,6 +408,10 @@ graph LR
 | **模拟数据** | `test_data.py` | GBM 模型 + 日内波动率曲线 + 市场周期生成 |
 | **日志翻译** | `ib_log_translator.py` | IB 中文 Unicode 日志解码 |
 | **配置** | `config.py` | IB 连接、合约、分析参数、品种列表 |
+| **数据校验** | `data_validator.py` | DB 与 IB 数据对比校验，支持自动修复 |
+| **策略回测** | `strategy_backtest.py` | IBS 2-Bar 策略回测引擎 |
+| **市场假日** | `market_holidays.py` | 市场假日日历 (用于 gap 分析) |
+| **校验脚本** | `run_validation.py` | 独立数据校验脚本 |
 
 ### 3.2 行情数据流
 
@@ -488,6 +525,7 @@ erDiagram
         REAL low "最低价"
         REAL close "收盘价"
         REAL volume "成交量"
+        TEXT source "数据来源 (ib_historical, realtime, synthetic, ib_validated, unknown)"
     }
 
     chart_layouts {
@@ -527,6 +565,42 @@ erDiagram
         TEXT annotations "标注 JSON 数组"
         INTEGER active "是否显示 (0/1)"
     }
+
+    strategy_backtests {
+        INTEGER id PK "自增 ID"
+        TEXT symbol "品种"
+        TEXT timeframe "周期"
+        INTEGER from_ts "回测起始时间戳"
+        INTEGER to_ts "回测结束时间戳"
+        TEXT created_at "创建时间 ISO"
+        TEXT params_json "回测参数 JSON"
+        TEXT summary_json "摘要统计 JSON"
+        INTEGER trade_count "交易数量"
+    }
+
+    strategy_trades {
+        INTEGER id PK "自增 ID"
+        INTEGER backtest_id FK "关联 backtest ID"
+        TEXT symbol "品种"
+        TEXT timeframe "周期"
+        TEXT direction "方向 (long/short)"
+        INTEGER contracts "合约数量"
+        TEXT entry_time "入场时间"
+        REAL entry_price "入场价格"
+        TEXT exit_time "出场时间"
+        REAL exit_price "出场价格"
+        REAL stop_price "止损价格"
+        REAL target_price "目标价格"
+        REAL pnl "盈亏"
+        TEXT outcome "结果"
+        INTEGER bars_held "持仓 bar 数"
+        REAL signal_ibs "IBS 信号值"
+        INTEGER context_pass "上下文过滤通过 (0/1)"
+        TEXT context_reason "上下文过滤原因"
+        TEXT created_at "创建时间 ISO"
+    }
+
+    strategy_backtests ||--o{ strategy_trades : "has"
 ```
 
 ### 数据分类
@@ -539,6 +613,8 @@ erDiagram
 | **画线模板** | `drawing_templates` | 画线工具预设 | TradingView save_load_adapter |
 | **图表模板** | `chart_templates` | 完整图表样式预设 | TradingView save_load_adapter |
 | **市场周期分析** | `market_cycle_analyses` | LLM 分析结果 + 图表标注 | Skill API (LLM Agent) |
+| **策略回测** | `strategy_backtests` | IBS 2-Bar 回测运行记录 + 参数 + 摘要 | Strategy Backtest API |
+| **策略交易** | `strategy_trades` | 回测产生的逐笔交易明细 | Strategy Backtest API |
 
 ---
 
@@ -573,6 +649,27 @@ open http://localhost:8000
 ---
 
 ## 更新日志
+
+### 2026-04-14 — 系统优化 & 数据校验增强
+
+**新功能**：
+- ✅ 服务端日志文件：按小时归集到 `log/` 目录，保留7天 (168个小时文件)
+- ✅ IB 数据拉取移至后台任务：服务器 DB 加载完即可响应请求 (~100ms 启动)
+- ✅ Data Validation Tab 完整修复：Gap 检查、Source 查询、IB 数据对比
+- ✅ 表格筛选图标：所有底部面板表格通过 🔍 图标切换列筛选
+- ✅ Strategy Backtest Tab：IBS 2-Bar 策略回测，支持参数调整 & 图表定位
+- ✅ 数据流文档 (dataflow.md)：详细时序图、流程图、架构图
+
+**修复**：
+- 🐛 Data Valid Tab 显示异常：修复 CSS `display:flex` 内联样式与 `.btab-pane` class 冲突
+- 🐛 MutationObserver 无限循环：Column Resize 和 Sort/Filter 观察器添加 `_resizeMutating` / `_sortMutating` 防护
+- 🐛 Sort/Filter 观察器优化：仅初始化未处理的新表格 (`data-table:not([data-sort-init])`)
+
+**技术改进**：
+- 使用 `TimedRotatingFileHandler(when="H")` 实现按小时日志轮转
+- 启动流程重构：DB 加载 → 立即 yield → IB 异步初始化
+- `.btab-flex` CSS class 替代内联 `display:flex` 避免显隐冲突
+- 筛选图标采用点击切换模式，输入框隐藏/显示，有内容时图标高亮
 
 ### 2026-04-12 — Skill API & Market Cycle Analysis 增强
 

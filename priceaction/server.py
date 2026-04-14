@@ -8,8 +8,10 @@ Start with:
 import asyncio
 import json
 import logging
+import logging.handlers
 import os
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
@@ -29,8 +31,31 @@ from trade_log_parser import load_all_trades, parse_csv_content
 from test_data import generate_bars
 import strategy_backtest
 
+# ─── Logging Setup ─────────────────────────────────────────────────────────────
+# Console handler (existing behavior)
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s")
+
+# Hourly rotating file handler in priceaction/log/
+_LOG_DIR = Path(__file__).parent / "log"
+_LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+_file_handler = logging.handlers.TimedRotatingFileHandler(
+    filename=str(_LOG_DIR / "server.log"),
+    when="H",             # rotate every hour
+    interval=1,
+    backupCount=168,      # keep 7 days of hourly logs (24 * 7)
+    encoding="utf-8",
+    utc=True,
+)
+_file_handler.setLevel(logging.INFO)
+_file_handler.setFormatter(logging.Formatter(
+    "%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+))
+_file_handler.suffix = "%Y%m%d_%H"
+logging.getLogger().addHandler(_file_handler)
+
 logger = logging.getLogger(__name__)
 
 DATAFEED_DEBUG = os.environ.get("DATAFEED_DEBUG", "0") == "1"
@@ -297,23 +322,17 @@ async def _prefetch_extra_symbols(fetcher, ib_ok):
             logger.warning("Prefetch %s failed: %s", sym_name, e)
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    global _order_mgr, _db_coverage_task
-
-    logger.info("Starting up…")
-
-    # ── Step 1: init DB and load historical bars from it ─────────────────────
-    db.init_db()
-    stored = db.get_bars(MES_SYM, "5min")
-    if stored:
-        fetcher.bars["5min"] = stored[-config.MAX_BARS_IN_MEMORY:]
-        logger.info("Loaded %d 5min bars from DB", len(fetcher.bars["5min"]))
+async def _ib_background_init():
+    """Background task: connect to IB, fetch missing bars, subscribe to real-time.
+    
+    Runs after the server is already serving requests (DB data available).
+    This keeps startup to ~100ms (DB load only) while IB work happens async.
+    """
+    global _order_mgr
 
     has_db_data = bool(fetcher.bars.get("5min"))
-
-    # ── Step 2: connect to IB and fetch only the bars we're missing ───────────
     ib_ok = False
+
     try:
         await fetcher.connect()
 
@@ -330,10 +349,10 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error("IB connect/history error: %s", e)
 
-    # ── Step 2b: prefetch extra symbols in background (non-blocking) ────────
+    # Prefetch extra symbols in background (non-blocking)
     asyncio.create_task(_prefetch_extra_symbols(fetcher, ib_ok))
 
-    # ── Step 3: synthetic fallback only when NOTHING is available ─────────────
+    # Synthetic fallback only when NOTHING is available
     if not ib_ok and not has_db_data:
         logger.info("Loading synthetic test data (500 bars)…")
         fetcher.bars["5min"] = generate_bars(n=500, bar_minutes=5)
@@ -341,23 +360,20 @@ async def lifespan(app: FastAPI):
                        source="synthetic")
         logger.info("Saved %d synthetic bars to DB", len(fetcher.bars["5min"]))
 
-    # ── Step 4: real-time subscription (independent of step 2 success) ────────
+    # Real-time subscription
     if ib_ok:
         try:
             fetcher.add_new_bar_callback(on_new_bar)
-            await fetcher.subscribe_mktdata()   # swap for subscribe_realtime() for 5s bars
+            await fetcher.subscribe_mktdata()
             logger.info("IB real-time streaming started.")
 
-            # Create order manager with the qualified contract
             _order_mgr = IBOrderManager(fetcher.ib, fetcher._contract)
 
-            # Wire order-status events → WebSocket broadcast + bracket auto-cancel
             def _on_order_status(trade):
                 asyncio.create_task(broadcast({
                     "type":  "order_update",
                     "order": IBOrderManager._trade_to_dict(trade),
                 }))
-                # Auto-cancel bracket siblings when any member is cancelled
                 status = trade.orderStatus.status
                 if status in ("Cancelled", "ApiCancelled", "Inactive"):
                     oid = trade.order.orderId
@@ -368,18 +384,45 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning("IB real-time subscription failed: %s", e)
 
-    # ── Step 5: Google Sheets ─────────────────────────────────────────────────
+    # Google Sheets
     if sheets.authenticate():
         sheets.initial_upload(fetcher.get_bars("5min"))
 
-    # ── Step 6: initial price-action analysis ─────────────────────────────────
+    # Initial price-action analysis
     global _latest_analysis
     bars_5min = fetcher.get_bars("5min")
     if bars_5min:
         _latest_analysis = analyzer.get_analysis(bars_5min)
 
-    # ── Step 7: start debug DB-coverage background task ──────────────────────
+    logger.info("IB background initialization complete.")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _order_mgr, _db_coverage_task
+
+    logger.info("Starting up…")
+
+    # ── Step 1: init DB and load historical bars (fast, ~100ms) ──────────────
+    db.init_db()
+    stored = db.get_bars(MES_SYM, "5min")
+    if stored:
+        fetcher.bars["5min"] = stored[-config.MAX_BARS_IN_MEMORY:]
+        logger.info("Loaded %d 5min bars from DB", len(fetcher.bars["5min"]))
+
+    # ── Step 2: initial price-action analysis from DB data ───────────────────
+    global _latest_analysis
+    bars_5min = fetcher.get_bars("5min")
+    if bars_5min:
+        _latest_analysis = analyzer.get_analysis(bars_5min)
+
+    # ── Step 3: start debug DB-coverage background task ──────────────────────
     _db_coverage_task = asyncio.create_task(_db_coverage_loop())
+
+    # ── Step 4: IB connect + fetch + realtime in background (non-blocking) ───
+    _ib_init_task = asyncio.create_task(_ib_background_init())
+
+    logger.info("Server ready to accept requests (DB-only mode).")
 
     yield   # ── server is running ────────────────────────────────────────────
 
