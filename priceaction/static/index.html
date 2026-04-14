@@ -84,12 +84,108 @@
     .status-dot.error { background: var(--red); }
 
     /* ── Main Layout ───────────────────────────────────────────────────────── */
+    /* Global wrapper: nav sidebar + page content */
+    #app-wrapper {
+      display: flex;
+      height: calc(100vh - 36px);
+    }
+
+    /* ── Left Navigation Sidebar ──────────────────────────────────────────── */
+    #nav-sidebar {
+      width: 48px;
+      background: var(--panel);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding-top: 8px;
+      gap: 4px;
+      flex-shrink: 0;
+      z-index: 50;
+    }
+    .nav-item {
+      width: 40px; height: 40px;
+      display: flex; align-items: center; justify-content: center;
+      border-radius: 6px;
+      cursor: pointer;
+      color: var(--text-dim);
+      transition: background 0.15s, color 0.15s;
+      border-left: 3px solid transparent;
+      position: relative;
+    }
+    .nav-item:hover { background: var(--panel-hover); color: var(--text); }
+    .nav-item.active { color: var(--blue); border-left-color: var(--blue); background: rgba(41,98,255,0.08); }
+    .nav-item svg { width: 20px; height: 20px; }
+    .nav-tooltip {
+      display: none;
+      position: absolute;
+      left: 48px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 4px 8px;
+      font-size: 11px;
+      white-space: nowrap;
+      z-index: 100;
+      color: var(--text);
+    }
+    .nav-item:hover .nav-tooltip { display: block; }
+
+    /* ── Right Settings Toolbar ────────────────────────────────────────────── */
+    #settings-toolbar {
+      width: 40px;
+      background: var(--panel);
+      border-left: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding-top: 8px;
+      gap: 4px;
+      flex-shrink: 0;
+    }
+    .settings-btn {
+      width: 32px; height: 32px;
+      display: flex; align-items: center; justify-content: center;
+      border-radius: 4px;
+      cursor: pointer;
+      color: var(--text-dim);
+      background: none;
+      border: none;
+      font-size: 14px;
+      transition: background 0.15s, color 0.15s;
+      position: relative;
+    }
+    .settings-btn:hover { background: var(--panel-hover); color: var(--text); }
+    .settings-btn.active { color: var(--blue); background: rgba(41,98,255,0.12); }
+    .settings-btn svg { width: 16px; height: 16px; }
+    .settings-tooltip {
+      display: none;
+      position: absolute;
+      right: 40px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 4px 8px;
+      font-size: 11px;
+      white-space: nowrap;
+      z-index: 100;
+      color: var(--text);
+    }
+    .settings-btn:hover .settings-tooltip { display: block; }
+
     #main {
       display: grid;
       grid-template-columns: var(--left-w) 1fr var(--right-w);
       grid-template-rows: 1fr var(--bottom-h);
-      height: calc(100vh - 36px);
+      flex: 1;
+      overflow: hidden;
     }
+    /* Collapsed states */
+    #main.watchlist-hidden { grid-template-columns: 0 1fr var(--right-w); }
+    #main.order-hidden     { grid-template-columns: var(--left-w) 1fr 0; }
+    #main.watchlist-hidden.order-hidden { grid-template-columns: 0 1fr 0; }
+    #main.watchlist-hidden #watchlist { display: none; }
+    #main.order-hidden #order-panel { display: none; }
 
     /* ── Left Panel — Watchlist ─────────────────────────────────────────────── */
     #watchlist {
@@ -168,7 +264,7 @@
     /* SR legend overlay — fixed so TradingView's iframe can't block it */
     #sr-legend {
       position: fixed;
-      top: 46px; left: 210px;   /* just below topbar, right of watchlist */
+      top: 46px; left: 258px;   /* just below topbar, right of nav-sidebar + watchlist */
       z-index: 9000;
       background: rgba(19,23,34,0.88);
       border: 1px solid var(--border);
@@ -888,6 +984,20 @@
 </div>
 
 <!-- ── MAIN GRID ───────────────────────────────────────────────────────────── -->
+<div id="app-wrapper">
+
+  <!-- Left Navigation Sidebar -->
+  <div id="nav-sidebar">
+    <a class="nav-item active" href="/" title="Trade">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18"/><path d="M7 16l4-8 4 4 4-8"/></svg>
+      <span class="nav-tooltip">Trade</span>
+    </a>
+    <a class="nav-item" href="/datavalid" title="Data Valid">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
+      <span class="nav-tooltip">Data Valid</span>
+    </a>
+  </div>
+
 <div id="main">
 
   <!-- LEFT: Watchlist -->
@@ -1067,7 +1177,6 @@
       <div class="btab"        data-pane="history">Trade History</div>
       <div class="btab"        data-pane="analysis">Analysis Log</div>
       <div class="btab"        data-pane="strategy">Strategy</div>
-      <div class="btab"        data-pane="data-valid">Data Valid</div>
       <button id="bottom-minimize" title="Minimize">▼</button>
     </div>
     <div id="bottom-content">
@@ -1263,67 +1372,24 @@
         </div>
       </div>
 
-      <!-- Data Validation -->
-      <div class="btab-pane btab-flex" id="pane-data-valid">
-        <!-- Toolbar -->
-        <div id="dv-toolbar" style="display:flex;align-items:center;gap:10px;padding:6px 12px;border-bottom:1px solid var(--border);flex-wrap:wrap">
-          <label style="font-size:11px;color:var(--text-dim)">Symbol
-            <select id="dv-symbol" style="background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:3px;padding:3px 6px;font-size:12px">
-              <option value="MES">MES</option>
-              <option value="MNQ">MNQ</option>
-              <option value="NK225MC">NK225MC</option>
-              <option value="MGC">MGC</option>
-            </select>
-          </label>
-          <label style="font-size:11px;color:var(--text-dim)">Timeframe
-            <select id="dv-timeframe" style="background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:3px;padding:3px 6px;font-size:12px">
-              <option value="5min">5min</option>
-              <option value="1D">1D</option>
-            </select>
-          </label>
-          <label style="font-size:11px;color:var(--text-dim)">From
-            <input type="date" id="dv-from" style="width:130px;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:3px;padding:3px 6px;font-size:12px">
-          </label>
-          <label style="font-size:11px;color:var(--text-dim)">To
-            <input type="date" id="dv-to" style="width:130px;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:3px;padding:3px 6px;font-size:12px">
-          </label>
-          <button onclick="runGapCheck()" style="font-size:12px;padding:3px 10px;background:var(--blue);color:#fff;border:none;border-radius:3px;cursor:pointer">🔍 Check Gaps</button>
-          <button onclick="runDataValidate()" style="font-size:12px;padding:3px 10px;background:var(--blue);color:#fff;border:none;border-radius:3px;cursor:pointer">✅ Validate vs IB</button>
-          <button onclick="runDataFix()" style="font-size:12px;padding:3px 10px;background:var(--orange);color:#fff;border:none;border-radius:3px;cursor:pointer">🔧 Fix from IB</button>
-          <button onclick="runDeleteRealtimeBars()" style="font-size:12px;padding:3px 10px;background:var(--red);color:#fff;border:none;border-radius:3px;cursor:pointer">🗑 Delete Realtime Bars</button>
-          <div style="border-left:1px solid var(--border);height:18px"></div>
-          <label style="font-size:11px;color:var(--text-dim)">Source
-            <select id="dv-source" style="background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:3px;padding:3px 6px;font-size:12px">
-              <option value="realtime">realtime</option>
-              <option value="ib_historical">ib_historical</option>
-              <option value="ib_validated">ib_validated</option>
-              <option value="synthetic">synthetic</option>
-              <option value="unknown">unknown</option>
-            </select>
-          </label>
-          <button onclick="runSourceQuery()" style="font-size:12px;padding:3px 10px;background:var(--blue);color:#fff;border:none;border-radius:3px;cursor:pointer">📋 Query by Source</button>
-        </div>
-        <!-- Summary bar -->
-        <div id="dv-summary" style="display:none;padding:5px 12px;border-bottom:1px solid var(--border);font-size:11px;color:var(--text-dim)"></div>
-        <!-- Results table -->
-        <div style="flex:1;overflow-y:auto">
-          <table class="data-table" id="dv-table">
-            <thead id="dv-thead">
-              <tr>
-                <th>Gap Start</th><th>Gap End</th><th>Duration</th><th>Type</th>
-              </tr>
-            </thead>
-            <tbody id="dv-tbody">
-              <tr><td colspan="4"><div class="empty-table">Select parameters and run a check</div></td></tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-
     </div><!-- /bottom-content -->
   </div><!-- /bottom -->
 
 </div><!-- /main -->
+
+  <!-- Right Settings Toolbar -->
+  <div id="settings-toolbar">
+    <button class="settings-btn active" id="toggle-watchlist" onclick="togglePanel('watchlist')" title="Toggle Watchlist">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="7" height="18" rx="1"/><line x1="14" y1="7" x2="21" y2="7"/><line x1="14" y1="12" x2="21" y2="12"/><line x1="14" y1="17" x2="21" y2="17"/></svg>
+      <span class="settings-tooltip">Watchlist</span>
+    </button>
+    <button class="settings-btn active" id="toggle-order" onclick="togglePanel('order')" title="Toggle Order Entry">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 2v20M2 12h20"/><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+      <span class="settings-tooltip">Order Entry</span>
+    </button>
+  </div>
+
+</div><!-- /app-wrapper -->
 
 <!-- Summary Modal -->
 <div class="mc-modal-overlay" id="mc-modal-overlay" onclick="if(event.target===this)closeSummaryModal()">
