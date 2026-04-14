@@ -155,7 +155,8 @@ def _next_contract_month(yyyymm: str, symbol: str = "MES") -> str:
 
 class IBDataFetcher:
     """
-    Async wrapper around ib_insync for fetching and streaming MES OHLCV data.
+    Async wrapper around ib_insync for fetching and streaming OHLCV data
+    for multiple symbols (MES, MNQ, NK225MC, MGC, etc.).
 
     In-memory bar stores (self.bars) serve as a fast cache for the HTTP/WS
     layer.  The SQLite DB (db.py) is the durable store — managed by server.py.
@@ -164,17 +165,22 @@ class IBDataFetcher:
     def __init__(self):
         self.ib: Optional[IB] = None
         self.bars: Dict[str, List[dict]] = {"5min": []}
-        self._contract = None                        # cached qualified ContFuture
+        self._contract = None                        # cached qualified ContFuture (MES)
         self._contract_cache: Dict[str, object] = {}   # YYYYMM → qualified Future
         self._ib_ready: bool = False                 # True only after contract is resolved
         self._realtime_subscriptions: Dict[str, object] = {}
-        self._new_bar_callbacks: List[Callable[[str, dict], None]] = []
+        self._new_bar_callbacks: List[Callable] = []
         # Aggregated in-progress bars (built from ticks / 5s bars)
+        # Keyed by "symbol:bar_size_key" for multi-symbol, with "5min" as legacy key for MES
         self._rt_current: Dict[str, Optional[dict]] = {"5min": None}
-        # reqMktData tick state
+        # reqMktData tick state — per-symbol
+        self._tick_state: Dict[str, dict] = {}  # symbol → {prev_price, prev_size, last_broadcast}
+        # Legacy single-symbol tick state (kept for backward compat with MES)
         self._prev_tick_price: float = float("nan")
         self._prev_tick_size:  float = float("nan")
         self._last_tick_broadcast: float = 0.0
+        # Multi-symbol bars cache: symbol → {bar_size_key → [bars]}
+        self._symbol_bars: Dict[str, Dict[str, List[dict]]] = {}
 
     # ─── Connection ──────────────────────────────────────────────────────────
 
@@ -520,6 +526,7 @@ class IBDataFetcher:
         """
         Tick-level streaming via reqMktData — updates chart every ~250 ms.
         Seeds _rt_current from last historical bar to avoid a gap at startup.
+        Subscribes to MES only (legacy). Use subscribe_mktdata_all() for all symbols.
         """
         contract = await self._get_contract()
         self._seed_rt_current()
@@ -528,6 +535,72 @@ class IBDataFetcher:
         self._realtime_subscriptions["mktdata"] = ticker
         ticker.updateEvent += self._on_tick
         logger.info("Subscribed to market data ticks (≤250 ms chart updates)")
+
+    async def subscribe_mktdata_all(self):
+        """Subscribe to tick-level streaming for ALL configured symbols."""
+        from ib_insync import ContFuture as _ContFuture
+        import db as _db
+
+        # Subscribe MES first (uses cached contract)
+        await self.subscribe_mktdata()
+
+        # Subscribe extra symbols
+        for sym_cfg in config.EXTRA_SYMBOLS:
+            sym_name = sym_cfg["symbol"]
+            try:
+                contract = _ContFuture(
+                    symbol=sym_cfg.get("ib_symbol", sym_name),
+                    exchange=sym_cfg["exchange"],
+                    currency=sym_cfg["currency"],
+                )
+                qualified = await asyncio.wait_for(
+                    self.ib.qualifyContractsAsync(contract), timeout=30.0,
+                )
+                if not qualified:
+                    logger.warning("[%s] No contract for realtime — skipping", sym_name)
+                    continue
+
+                # Initialize per-symbol state
+                rt_key = f"{sym_name}:5min"
+                self._rt_current[rt_key] = None
+                self._tick_state[sym_name] = {
+                    "prev_price": float("nan"),
+                    "prev_size": float("nan"),
+                    "last_broadcast": 0.0,
+                }
+
+                # Seed rt_current from DB if available
+                db_bars = _db.get_bars(sym_name, "5min", limit=1)
+                if db_bars:
+                    now_ts = int(time.time())
+                    bar_ts = (now_ts // 300) * 300
+                    last = dict(db_bars[-1])
+                    if last["time"] == bar_ts:
+                        self._rt_current[rt_key] = last
+
+                # Initialize in-memory bars for symbol
+                if sym_name not in self._symbol_bars:
+                    self._symbol_bars[sym_name] = {"5min": []}
+                    # Load recent bars from DB
+                    recent = _db.get_bars(sym_name, "5min")
+                    if recent:
+                        self._symbol_bars[sym_name]["5min"] = recent[-config.MAX_BARS_IN_MEMORY:]
+
+                ticker = self.ib.reqMktData(qualified[0], "", False, False)
+                sub_key = f"mktdata_{sym_name}"
+                self._realtime_subscriptions[sub_key] = ticker
+
+                # Create per-symbol tick handler
+                def make_handler(symbol):
+                    def handler(t):
+                        self._on_tick_multi(t, symbol)
+                    return handler
+
+                ticker.updateEvent += make_handler(sym_name)
+                logger.info("[%s] Subscribed to market data ticks", sym_name)
+
+            except Exception as e:
+                logger.warning("[%s] Realtime subscription failed: %s", sym_name, e)
 
     def _seed_rt_current(self):
         """Pre-fill _rt_current from last historical bar to avoid startup gap."""
@@ -584,9 +657,60 @@ class IBDataFetcher:
             if cur:
                 self._dispatch(key, cur)
 
+    def _on_tick_multi(self, ticker, symbol: str):
+        """Tick handler for non-MES symbols."""
+        price = ticker.last
+        size  = ticker.lastSize
+        if price is None or math.isnan(price) or price <= 0:
+            return
+        if size is None or math.isnan(size):
+            size = 0.0
+
+        state = self._tick_state.get(symbol, {})
+        prev_price = state.get("prev_price", float("nan"))
+        prev_size = state.get("prev_size", float("nan"))
+
+        vol_delta = 0.0
+        if price != prev_price or size != prev_size:
+            vol_delta = float(size)
+            state["prev_price"] = price
+            state["prev_size"] = size
+
+        wall_ts = int(time.time())
+        rt_key = f"{symbol}:5min"
+        interval = 300
+        bar_ts = (wall_ts // interval) * interval
+        cur = self._rt_current.get(rt_key)
+
+        sym_bars = self._symbol_bars.get(symbol, {}).get("5min", [])
+
+        if cur is None or bar_ts > cur["time"]:
+            if cur is not None:
+                self._append_bar_multi(symbol, "5min", cur)
+                self._dispatch_multi(symbol, "5min", cur)
+            cur = {"time": bar_ts, "open": price, "high": price,
+                   "low": price, "close": price, "volume": vol_delta}
+            self._rt_current[rt_key] = cur
+            self._append_bar_multi(symbol, "5min", cur)
+        else:
+            cur["high"]    = max(cur["high"], price)
+            cur["low"]     = min(cur["low"],  price)
+            cur["close"]   = price
+            cur["volume"] += vol_delta
+            if sym_bars and sym_bars[-1]["time"] == bar_ts:
+                sym_bars[-1] = cur
+
+        now = time.monotonic()
+        last_broadcast = state.get("last_broadcast", 0.0)
+        if now - last_broadcast >= self._TICK_BROADCAST_INTERVAL:
+            state["last_broadcast"] = now
+            cur = self._rt_current.get(rt_key)
+            if cur:
+                self._dispatch_multi(symbol, "5min", cur)
+
     # ─── Shared helpers ───────────────────────────────────────────────────────
 
-    def add_new_bar_callback(self, callback: Callable[[str, dict], None]):
+    def add_new_bar_callback(self, callback: Callable):
         self._new_bar_callbacks.append(callback)
 
     def _dispatch(self, key: str, bar: dict):
@@ -596,8 +720,47 @@ class IBDataFetcher:
             except Exception as exc:
                 logger.error("Callback error: %s", exc)
 
+    def _dispatch_multi(self, symbol: str, key: str, bar: dict):
+        """Dispatch bar update with symbol info for multi-symbol callbacks."""
+        for cb in self._new_bar_callbacks:
+            try:
+                cb(key, dict(bar), symbol=symbol)
+            except Exception as exc:
+                logger.error("Callback error for %s: %s", symbol, exc)
+
     def _append_bar(self, key: str, bar: dict):
         bars = self.bars[key]
+        if bars and bars[-1]["time"] == bar["time"]:
+            bars[-1] = bar
+            return
+
+        if not bars or bar["time"] > bars[-1]["time"]:
+            bars.append(bar)
+        else:
+            inserted = False
+            for idx, existing in enumerate(bars):
+                if existing["time"] == bar["time"]:
+                    bars[idx] = bar
+                    inserted = True
+                    break
+                if existing["time"] > bar["time"]:
+                    bars.insert(idx, bar)
+                    inserted = True
+                    break
+            if not inserted:
+                bars.append(bar)
+
+        if len(bars) > config.MAX_BARS_IN_MEMORY:
+            bars.pop(0)
+
+    def _append_bar_multi(self, symbol: str, key: str, bar: dict):
+        """Append bar to per-symbol in-memory store."""
+        if symbol not in self._symbol_bars:
+            self._symbol_bars[symbol] = {}
+        if key not in self._symbol_bars[symbol]:
+            self._symbol_bars[symbol][key] = []
+        bars = self._symbol_bars[symbol][key]
+
         if bars and bars[-1]["time"] == bar["time"]:
             bars[-1] = bar
             return
@@ -630,12 +793,13 @@ class IBDataFetcher:
                 self.ib.cancelRealTimeBars(rt)
             except Exception as e:
                 logger.warning("Error cancelling real-time bars: %s", e)
-        mktdata = self._realtime_subscriptions.get("mktdata")
-        if mktdata is not None:
-            try:
-                self.ib.cancelMktData(mktdata)
-            except Exception as e:
-                logger.warning("Error cancelling market data: %s", e)
+        # Cancel all mktdata subscriptions (MES + extra symbols)
+        for sub_key, ticker in list(self._realtime_subscriptions.items()):
+            if sub_key.startswith("mktdata"):
+                try:
+                    self.ib.cancelMktData(ticker)
+                except Exception as e:
+                    logger.warning("Error cancelling market data %s: %s", sub_key, e)
         self._realtime_subscriptions.clear()
         logger.info("Real-time subscriptions cancelled")
 
@@ -646,6 +810,23 @@ class IBDataFetcher:
         to_ts: Optional[int]   = None,
     ) -> List[dict]:
         bars = self.bars.get(bar_size_key, [])
+        if from_ts is not None:
+            bars = [b for b in bars if b["time"] >= from_ts]
+        if to_ts is not None:
+            bars = [b for b in bars if b["time"] <= to_ts]
+        return bars
+
+    def get_bars_for_symbol(
+        self,
+        symbol: str,
+        bar_size_key: str,
+        from_ts: Optional[int] = None,
+        to_ts: Optional[int]   = None,
+    ) -> List[dict]:
+        """Get in-memory bars for a specific symbol."""
+        if symbol == "MES":
+            return self.get_bars(bar_size_key, from_ts, to_ts)
+        bars = self._symbol_bars.get(symbol, {}).get(bar_size_key, [])
         if from_ts is not None:
             bars = [b for b in bars if b["time"] >= from_ts]
         if to_ts is not None:

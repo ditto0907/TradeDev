@@ -1,0 +1,1143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>TradeDev — Data Validation</title>
+<style>
+/* ── Variables ─────────────────────────────────────────────────────────────── */
+:root {
+  --bg:         #131722;
+  --panel:      #1e222d;
+  --border:     #2a2e39;
+  --text:       #d1d4dc;
+  --text-dim:   #787b86;
+  --text-faint: #4c505c;
+  --green:      #26a69a;
+  --green-bg:   #0d2b2a;
+  --red:        #ef5350;
+  --red-bg:     #2c1616;
+  --blue:       #2962ff;
+  --orange:     #ff9800;
+  --input-bg:   #0e1015;
+  --nav-w:      48px;
+  --topbar-h:   36px;
+}
+
+/* ── Reset ─────────────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; overflow: hidden; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen,
+               Ubuntu, Cantarell, 'Helvetica Neue', sans-serif;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--bg);
+  display: flex;
+}
+
+/* ── Left Navigation Sidebar ───────────────────────────────────────────────── */
+#nav-sidebar {
+  width: var(--nav-w);
+  min-width: var(--nav-w);
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding-top: 8px;
+  gap: 4px;
+  z-index: 10;
+}
+.nav-btn {
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--text-dim);
+  border: none;
+  background: transparent;
+  position: relative;
+  transition: color .15s, background .15s;
+}
+.nav-btn:hover { color: var(--text); background: rgba(255,255,255,.05); }
+.nav-btn.active {
+  color: var(--blue);
+  background: rgba(41,98,255,.10);
+}
+.nav-btn.active::before {
+  content: '';
+  position: absolute;
+  left: -4px;
+  top: 8px;
+  bottom: 8px;
+  width: 3px;
+  border-radius: 0 2px 2px 0;
+  background: var(--blue);
+}
+.nav-btn svg { display: block; }
+
+/* ── Main Column ───────────────────────────────────────────────────────────── */
+#main-col {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  min-width: 0;
+}
+
+/* ── Top Bar ───────────────────────────────────────────────────────────────── */
+#topbar {
+  height: var(--topbar-h);
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  padding: 0 14px;
+  gap: 14px;
+  flex-shrink: 0;
+}
+.logo {
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: .5px;
+  color: var(--text);
+  white-space: nowrap;
+}
+.logo span { color: var(--blue); }
+.topbar-label {
+  font-size: 12px;
+  color: var(--text-dim);
+  padding-left: 10px;
+  border-left: 1px solid var(--border);
+}
+
+/* ── Content Tabs ──────────────────────────────────────────────────────────── */
+#content-area {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+#tab-bar {
+  display: flex;
+  gap: 0;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.dv-tab {
+  padding: 8px 18px;
+  font-size: 13px;
+  cursor: pointer;
+  color: var(--text-dim);
+  border-bottom: 2px solid transparent;
+  transition: color .15s, border-color .15s;
+  white-space: nowrap;
+  user-select: none;
+}
+.dv-tab:hover { color: var(--text); }
+.dv-tab.active {
+  color: var(--blue);
+  border-bottom-color: var(--blue);
+}
+
+/* ── Tab Panes ─────────────────────────────────────────────────────────────── */
+.dv-pane {
+  display: none;
+  flex: 1;
+  flex-direction: column;
+  overflow: hidden;
+}
+.dv-pane.active {
+  display: flex;
+}
+
+/* ── Filter Toolbar ────────────────────────────────────────────────────────── */
+.dv-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.dv-toolbar label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.dv-toolbar select,
+.dv-toolbar input[type="date"] {
+  background: var(--input-bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 12px;
+  font-family: inherit;
+  outline: none;
+  height: 28px;
+}
+.dv-toolbar select:focus,
+.dv-toolbar input[type="date"]:focus {
+  border-color: var(--blue);
+}
+.dv-toolbar input[type="date"]::-webkit-calendar-picker-indicator {
+  filter: invert(.7);
+}
+.dv-btn {
+  background: var(--input-bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  height: 28px;
+  white-space: nowrap;
+  transition: border-color .15s, background .15s;
+}
+.dv-btn:hover {
+  border-color: var(--blue);
+  background: rgba(41,98,255,.08);
+}
+.dv-btn.primary {
+  background: var(--blue);
+  color: #fff;
+  border-color: var(--blue);
+}
+.dv-btn.primary:hover {
+  background: #1b4fd4;
+}
+.dv-btn.danger {
+  border-color: var(--red);
+  color: var(--red);
+}
+.dv-btn.danger:hover {
+  background: var(--red-bg);
+}
+
+/* ── Summary Bar ───────────────────────────────────────────────────────────── */
+.dv-summary {
+  display: none;
+  padding: 6px 12px;
+  font-size: 12px;
+  background: rgba(41,98,255,.06);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  color: var(--text);
+}
+
+/* ── Data Table ────────────────────────────────────────────────────────────── */
+.dv-table-wrap {
+  flex: 1;
+  overflow: auto;
+}
+.dv-data-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: 12px;
+}
+.dv-data-table thead {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+.dv-data-table th {
+  background: var(--panel);
+  color: var(--text-dim);
+  font-weight: 600;
+  text-align: left;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  position: relative;
+}
+.dv-data-table th:hover { color: var(--text); }
+.dv-data-table th .sort-arrow {
+  font-size: 10px;
+  margin-left: 3px;
+  color: var(--text-faint);
+}
+.dv-data-table th .sort-arrow.active { color: var(--blue); }
+.dv-data-table td {
+  padding: 5px 10px;
+  border-bottom: 1px solid rgba(42,46,57,.4);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dv-data-table tbody tr:hover td { background: rgba(255,255,255,.02); }
+.dv-data-table .num {
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+  text-align: right;
+}
+.dv-data-table .up   { color: var(--green); }
+.dv-data-table .down { color: var(--red); }
+.dv-data-table .dim  { color: var(--text-dim); }
+.dv-data-table .warn { color: var(--orange); }
+
+.empty-msg {
+  padding: 40px;
+  text-align: center;
+  color: var(--text-faint);
+  font-size: 13px;
+}
+
+/* ── Pagination ────────────────────────────────────────────────────────────── */
+.dv-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text-dim);
+  flex-shrink: 0;
+  gap: 12px;
+}
+.dv-pagination .pg-info { white-space: nowrap; }
+.dv-pagination .pg-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.pg-btn {
+  background: var(--input-bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.pg-btn:hover { border-color: var(--blue); }
+.pg-btn:disabled {
+  opacity: .35;
+  cursor: default;
+  border-color: var(--border);
+}
+.pg-select {
+  background: var(--input-bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 3px 6px;
+  font-size: 12px;
+}
+
+/* ── Toast Notifications ───────────────────────────────────────────────────── */
+#toast-container {
+  position: fixed;
+  bottom: 16px;
+  right: 16px;
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 8px;
+  z-index: 99999;
+  pointer-events: none;
+}
+.toast {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 9px 16px;
+  font-size: 12px;
+  color: var(--text);
+  opacity: 0;
+  transform: translateX(30px);
+  transition: opacity .25s, transform .25s;
+  pointer-events: auto;
+  max-width: 380px;
+  word-break: break-word;
+}
+.toast.show {
+  opacity: 1;
+  transform: translateX(0);
+}
+.toast.toast-success { border-color: var(--green); color: var(--green); }
+.toast.toast-error   { border-color: var(--red);   color: var(--red); }
+.toast.toast-ok      { border-color: var(--green); color: var(--green); }
+.toast.toast-info    { border-color: var(--blue);  color: var(--text); }
+.toast.toast-warn    { border-color: var(--orange); color: var(--orange); }
+
+/* ── Scrollbar ─────────────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--text-faint); }
+</style>
+</head>
+<body>
+
+<!-- ── Left Navigation Sidebar ──────────────────────────────────────────── -->
+<nav id="nav-sidebar">
+  <a class="nav-btn" href="/" title="Trade">
+    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18"/><path d="M7 16l4-8 4 4 4-8"/></svg>
+  </a>
+  <a class="nav-btn active" href="/datavalid" title="Data Validation">
+    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
+  </a>
+</nav>
+
+<!-- ── Main Column ──────────────────────────────────────────────────────── -->
+<div id="main-col">
+
+  <!-- Top Bar -->
+  <div id="topbar">
+    <div class="logo">TRADE<span>DEV</span></div>
+    <div class="topbar-label">Data Validation</div>
+  </div>
+
+  <!-- Content Area -->
+  <div id="content-area">
+
+    <!-- Tab Bar -->
+    <div id="tab-bar">
+      <div class="dv-tab active" data-pane="query">📋 Data Query</div>
+      <div class="dv-tab" data-pane="validate">✅ Data Validate</div>
+      <div class="dv-tab" data-pane="fix">🔧 Data Fix</div>
+    </div>
+
+    <!-- ═══ Data Query Pane ══════════════════════════════════════════════ -->
+    <div class="dv-pane active" id="pane-query">
+      <div class="dv-toolbar">
+        <label>Symbol
+          <select id="q-symbol">
+            <option value="">All</option>
+            <option value="MES">MES</option>
+            <option value="MNQ">MNQ</option>
+            <option value="NK225MC">NK225MC</option>
+            <option value="MGC">MGC</option>
+          </select>
+        </label>
+        <label>Timeframe
+          <select id="q-timeframe">
+            <option value="">All</option>
+            <option value="5min">5min</option>
+            <option value="1D">1D</option>
+          </select>
+        </label>
+        <label>Source
+          <select id="q-source"><option value="">All</option></select>
+        </label>
+        <label>From <input type="date" id="q-from"/></label>
+        <label>To   <input type="date" id="q-to"/></label>
+        <button class="dv-btn primary" onclick="queryData()">🔍 Search</button>
+        <button class="dv-btn" onclick="resetQueryFilters()">Reset</button>
+      </div>
+      <div class="dv-table-wrap">
+        <table class="dv-data-table" id="q-table">
+          <thead id="q-thead">
+            <tr>
+              <th data-col="time" style="width:170px">Time <span class="sort-arrow">⇅</span></th>
+              <th data-col="symbol" style="width:80px">Symbol <span class="sort-arrow">⇅</span></th>
+              <th data-col="timeframe" style="width:80px">Timeframe <span class="sort-arrow">⇅</span></th>
+              <th data-col="open" style="width:90px">Open <span class="sort-arrow">⇅</span></th>
+              <th data-col="high" style="width:90px">High <span class="sort-arrow">⇅</span></th>
+              <th data-col="low" style="width:90px">Low <span class="sort-arrow">⇅</span></th>
+              <th data-col="close" style="width:90px">Close <span class="sort-arrow">⇅</span></th>
+              <th data-col="volume" style="width:80px">Volume <span class="sort-arrow">⇅</span></th>
+              <th data-col="source" style="width:110px">Source <span class="sort-arrow">⇅</span></th>
+            </tr>
+          </thead>
+          <tbody id="q-tbody">
+            <tr><td colspan="9"><div class="empty-msg">Use the filters above and click Search</div></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="dv-pagination" id="q-pagination" style="display:none">
+        <span class="pg-info" id="q-pg-info">Showing 0-0 of 0</span>
+        <div class="pg-controls">
+          <label>Page size
+            <select class="pg-select" id="q-page-size">
+              <option value="25">25</option>
+              <option value="50" selected>50</option>
+              <option value="100">100</option>
+            </select>
+          </label>
+          <button class="pg-btn" id="q-prev" disabled>◀ Prev</button>
+          <span id="q-pg-num" style="min-width:70px;text-align:center">Page 1 / 1</span>
+          <button class="pg-btn" id="q-next" disabled>Next ▶</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══ Data Validate Pane ═══════════════════════════════════════════ -->
+    <div class="dv-pane" id="pane-validate">
+      <div class="dv-toolbar">
+        <label>Symbol
+          <select id="v-symbol">
+            <option value="MES">MES</option>
+            <option value="MNQ">MNQ</option>
+            <option value="NK225MC">NK225MC</option>
+            <option value="MGC">MGC</option>
+          </select>
+        </label>
+        <label>Timeframe
+          <select id="v-timeframe">
+            <option value="5min">5min</option>
+            <option value="1D">1D</option>
+          </select>
+        </label>
+        <label>From <input type="date" id="v-from"/></label>
+        <label>To   <input type="date" id="v-to"/></label>
+        <button class="dv-btn" onclick="runGaps()">🔍 Check Gaps</button>
+        <button class="dv-btn" onclick="runValidate()">✅ Validate vs IB</button>
+        <button class="dv-btn" onclick="runSourceQuery()">📋 Query by Source</button>
+        <label>Source
+          <select id="v-source">
+            <option value="realtime">realtime</option>
+            <option value="ib_historical">ib_historical</option>
+            <option value="ib_validated">ib_validated</option>
+            <option value="synthetic">synthetic</option>
+          </select>
+        </label>
+      </div>
+      <div class="dv-summary" id="v-summary"></div>
+      <div class="dv-table-wrap">
+        <table class="dv-data-table" id="v-table">
+          <thead id="v-thead">
+            <tr><th colspan="4">Select an action above to begin</th></tr>
+          </thead>
+          <tbody id="v-tbody">
+            <tr><td colspan="4"><div class="empty-msg">Select parameters and run a check</div></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ═══ Data Fix Pane ════════════════════════════════════════════════ -->
+    <div class="dv-pane" id="pane-fix">
+      <div class="dv-toolbar">
+        <label>Symbol
+          <select id="f-symbol">
+            <option value="MES">MES</option>
+            <option value="MNQ">MNQ</option>
+            <option value="NK225MC">NK225MC</option>
+            <option value="MGC">MGC</option>
+          </select>
+        </label>
+        <label>Timeframe
+          <select id="f-timeframe">
+            <option value="5min">5min</option>
+            <option value="1D">1D</option>
+          </select>
+        </label>
+        <label>From <input type="date" id="f-from"/></label>
+        <label>To   <input type="date" id="f-to"/></label>
+        <button class="dv-btn" onclick="runFix()">🔧 Fix from IB</button>
+        <button class="dv-btn danger" onclick="runDeleteRealtime()">🗑 Delete Realtime Bars</button>
+        <button class="dv-btn" onclick="runValidateAll()">✅ Validate All</button>
+      </div>
+      <div class="dv-summary" id="f-summary"></div>
+      <div class="dv-table-wrap">
+        <table class="dv-data-table" id="f-table">
+          <thead id="f-thead">
+            <tr><th colspan="5">Select an action above to begin</th></tr>
+          </thead>
+          <tbody id="f-tbody">
+            <tr><td colspan="5"><div class="empty-msg">Select parameters and run a fix action</div></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  </div><!-- /content-area -->
+</div><!-- /main-col -->
+
+<!-- Toast container -->
+<div id="toast-container"></div>
+
+<script>
+/* ═══════════════════════════════════════════════════════════════════════════
+   TradeDev — Data Validation Page
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+// ── Tab switching ──────────────────────────────────────────────────────────
+document.querySelectorAll('.dv-tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.dv-tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.dv-pane').forEach(p => p.classList.remove('active'));
+    tab.classList.add('active');
+    const pane = document.getElementById('pane-' + tab.dataset.pane);
+    if (pane) pane.classList.add('active');
+  });
+});
+
+// ── Toast notifications ───────────────────────────────────────────────────
+function showToast(message, type) {
+  type = type || 'info';
+  const el = document.createElement('div');
+  el.className = 'toast toast-' + type;
+  el.textContent = message;
+  const container = document.getElementById('toast-container');
+  container.appendChild(el);
+  requestAnimationFrame(() => el.classList.add('show'));
+  setTimeout(() => {
+    el.classList.remove('show');
+    el.addEventListener('transitionend', () => { if (el.parentNode) el.remove(); }, { once: true });
+    // Fallback in case transitionend doesn't fire
+    setTimeout(() => { if (el.parentNode) el.remove(); }, 500);
+  }, 3500);
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+function dateToTs(dateStr, endOfDay) {
+  if (!dateStr) return null;
+  var d = new Date(dateStr + (endOfDay ? 'T23:59:59' : 'T00:00:00'));
+  return Math.floor(d.getTime() / 1000);
+}
+
+function tsToLocal(ts) {
+  return new Date(ts * 1000).toLocaleString();
+}
+
+function fmtNum(v) {
+  if (v == null) return '—';
+  var n = Number(v);
+  return isNaN(n) ? String(v) : n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 6 });
+}
+
+function fmtVol(v) {
+  if (v == null) return '—';
+  return Number(v).toLocaleString();
+}
+
+// ── Table sorting ─────────────────────────────────────────────────────────
+var _sortState = {};
+
+function initTableSort(tableId, data, renderFn) {
+  var thead = document.getElementById(tableId.replace('-table', '-thead'));
+  if (!thead) return;
+  thead.querySelectorAll('th[data-col]').forEach(function(th) {
+    th.addEventListener('click', function() {
+      var col = th.dataset.col;
+      var key = tableId + ':' + col;
+      var dir = _sortState[key] === 'asc' ? 'desc' : 'asc';
+
+      // Reset all arrows in this table
+      thead.querySelectorAll('.sort-arrow').forEach(function(s) {
+        s.textContent = '⇅';
+        s.classList.remove('active');
+      });
+      var arrow = th.querySelector('.sort-arrow');
+      if (arrow) {
+        arrow.textContent = dir === 'asc' ? '▲' : '▼';
+        arrow.classList.add('active');
+      }
+      _sortState[tableId + ':col'] = col;
+      _sortState[key] = dir;
+
+      data.sort(function(a, b) {
+        var va = a[col], vb = b[col];
+        if (va == null) return 1;
+        if (vb == null) return -1;
+        var na = Number(va), nb = Number(vb);
+        if (!isNaN(na) && !isNaN(nb)) {
+          return dir === 'asc' ? na - nb : nb - na;
+        }
+        return dir === 'asc'
+          ? String(va).localeCompare(String(vb))
+          : String(vb).localeCompare(String(va));
+      });
+      renderFn(data);
+    });
+  });
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   DATA QUERY TAB
+   ═══════════════════════════════════════════════════════════════════════════ */
+var _qPage = 1;
+var _qPageSize = 50;
+var _qData = [];
+
+// Populate source dropdown on load
+(function loadSources() {
+  fetch('/api/data/query?page=1&page_size=1')
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      var sel = document.getElementById('q-source');
+      (d.available_sources || []).forEach(function(s) {
+        var opt = document.createElement('option');
+        opt.value = s;
+        opt.textContent = s;
+        sel.appendChild(opt);
+      });
+    })
+    .catch(function() {});
+})();
+
+document.getElementById('q-page-size').addEventListener('change', function() {
+  _qPageSize = parseInt(this.value);
+  _qPage = 1;
+  queryData();
+});
+document.getElementById('q-prev').addEventListener('click', function() {
+  if (_qPage > 1) { _qPage--; queryData(); }
+});
+document.getElementById('q-next').addEventListener('click', function() {
+  _qPage++;
+  queryData();
+});
+
+function resetQueryFilters() {
+  document.getElementById('q-symbol').value = '';
+  document.getElementById('q-timeframe').value = '';
+  document.getElementById('q-source').value = '';
+  document.getElementById('q-from').value = '';
+  document.getElementById('q-to').value = '';
+  _qPage = 1;
+  document.getElementById('q-tbody').innerHTML =
+    '<tr><td colspan="9"><div class="empty-msg">Use the filters above and click Search</div></td></tr>';
+  document.getElementById('q-pagination').style.display = 'none';
+}
+
+function queryData() {
+  var symbol = document.getElementById('q-symbol').value;
+  var timeframe = document.getElementById('q-timeframe').value;
+  var source = document.getElementById('q-source').value;
+  var fromDate = document.getElementById('q-from').value;
+  var toDate = document.getElementById('q-to').value;
+
+  var params = new URLSearchParams();
+  if (symbol) params.set('symbol', symbol);
+  if (timeframe) params.set('timeframe', timeframe);
+  if (source) params.set('source', source);
+  var fromTs = dateToTs(fromDate, false);
+  var toTs = dateToTs(toDate, true);
+  if (fromTs) params.set('from_ts', fromTs);
+  if (toTs) params.set('to_ts', toTs);
+  params.set('page', _qPage);
+  params.set('page_size', _qPageSize);
+
+  var tbody = document.getElementById('q-tbody');
+  tbody.innerHTML = '<tr><td colspan="9"><div class="empty-msg">Loading…</div></td></tr>';
+
+  fetch('/api/data/query?' + params.toString())
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      _qData = data.bars || [];
+      _qPage = data.page;
+      var total = data.total;
+      var totalPages = data.total_pages;
+
+      // Populate dynamic source options
+      var srcSel = document.getElementById('q-source');
+      var curVal = srcSel.value;
+      var existing = new Set();
+      srcSel.querySelectorAll('option').forEach(function(o) { existing.add(o.value); });
+      (data.available_sources || []).forEach(function(s) {
+        if (!existing.has(s)) {
+          var opt = document.createElement('option');
+          opt.value = s; opt.textContent = s;
+          srcSel.appendChild(opt);
+        }
+      });
+      srcSel.value = curVal;
+
+      renderQueryTable(_qData);
+
+      // Pagination
+      var pgBar = document.getElementById('q-pagination');
+      pgBar.style.display = 'flex';
+      var start = ((_qPage - 1) * _qPageSize) + 1;
+      var end = Math.min(_qPage * _qPageSize, total);
+      document.getElementById('q-pg-info').textContent =
+        'Showing ' + (total > 0 ? start : 0) + '-' + end + ' of ' + total;
+      document.getElementById('q-pg-num').textContent =
+        'Page ' + _qPage + ' / ' + totalPages;
+      document.getElementById('q-prev').disabled = (_qPage <= 1);
+      document.getElementById('q-next').disabled = (_qPage >= totalPages);
+
+      initTableSort('q-table', _qData, renderQueryTable);
+    })
+    .catch(function(e) {
+      showToast('Query failed: ' + e.message, 'error');
+      tbody.innerHTML = '<tr><td colspan="9"><div class="empty-msg">Error loading data</div></td></tr>';
+    });
+}
+
+function renderQueryTable(bars) {
+  var tbody = document.getElementById('q-tbody');
+  if (!bars || bars.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="9"><div class="empty-msg">No data found</div></td></tr>';
+    return;
+  }
+  tbody.innerHTML = bars.map(function(b) {
+    return '<tr>'
+      + '<td>' + tsToLocal(b.time) + '</td>'
+      + '<td>' + (b.symbol || '') + '</td>'
+      + '<td>' + (b.timeframe || '') + '</td>'
+      + '<td class="num">' + fmtNum(b.open) + '</td>'
+      + '<td class="num">' + fmtNum(b.high) + '</td>'
+      + '<td class="num">' + fmtNum(b.low) + '</td>'
+      + '<td class="num">' + fmtNum(b.close) + '</td>'
+      + '<td class="num">' + fmtVol(b.volume) + '</td>'
+      + '<td class="dim">' + (b.source || '') + '</td>'
+      + '</tr>';
+  }).join('');
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   DATA VALIDATE TAB
+   ═══════════════════════════════════════════════════════════════════════════ */
+function _vParams() {
+  var symbol = document.getElementById('v-symbol').value;
+  var timeframe = document.getElementById('v-timeframe').value;
+  var p = new URLSearchParams({ symbol: symbol, timeframe: timeframe });
+  var from = document.getElementById('v-from').value;
+  var to = document.getElementById('v-to').value;
+  if (from) p.set('from_dt', from);
+  if (to) p.set('to_dt', to);
+  return { symbol: symbol, timeframe: timeframe, params: p };
+}
+
+// ── Check Gaps ─────────────────────────────────────────────────────────────
+function runGaps() {
+  var _ref = _vParams();
+  var symbol = _ref.symbol;
+  var timeframe = _ref.timeframe;
+  var fromDate = document.getElementById('v-from').value;
+  var toDate = document.getElementById('v-to').value;
+
+  var url = '/api/data/gaps?symbol=' + symbol + '&timeframe=' + timeframe;
+  var fromTs = dateToTs(fromDate, false);
+  var toTs = dateToTs(toDate, true);
+  if (fromTs) url += '&from_ts=' + fromTs;
+  if (toTs) url += '&to_ts=' + toTs;
+
+  var summary = document.getElementById('v-summary');
+  summary.style.display = '';
+  summary.innerHTML = '⏳ Checking gaps…';
+
+  fetch(url)
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      // Summary
+      summary.innerHTML =
+        '<span>' + data.symbol + '/' + data.timeframe + '</span>'
+        + ' — <span style="color:var(--text)">' + data.total_gaps + ' gaps total</span>'
+        + ' | <span style="color:var(--orange)">' + data.weekday_gaps + ' weekday</span>'
+        + ' | <span style="color:var(--text-dim)">' + data.weekend_gaps + ' weekend</span>'
+        + ' | <span style="color:var(--text-dim)">' + data.holiday_gaps + ' holiday</span>';
+
+      // Table
+      document.getElementById('v-thead').innerHTML =
+        '<tr>'
+        + '<th data-col="gap_start" style="width:200px">Gap Start <span class="sort-arrow">⇅</span></th>'
+        + '<th data-col="gap_end" style="width:200px">Gap End <span class="sort-arrow">⇅</span></th>'
+        + '<th data-col="gap_seconds" style="width:120px">Duration <span class="sort-arrow">⇅</span></th>'
+        + '<th data-col="type" style="width:120px">Type <span class="sort-arrow">⇅</span></th>'
+        + '</tr>';
+
+      var gaps = (data.gaps || []).map(function(g) {
+        g.type = g.spans_weekend ? 'Weekend' : g.spans_holiday ? 'Holiday' : 'Weekday';
+        return g;
+      });
+      renderGapsTable(gaps);
+      initTableSort('v-table', gaps, renderGapsTable);
+
+      showToast(data.total_gaps + ' gaps found', data.total_gaps > 0 ? 'warn' : 'success');
+    })
+    .catch(function(e) {
+      summary.innerHTML = '❌ ' + e.message;
+      showToast('Gap check failed: ' + e.message, 'error');
+    });
+}
+
+function renderGapsTable(gaps) {
+  var tbody = document.getElementById('v-tbody');
+  if (!gaps || gaps.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="4"><div class="empty-msg">No gaps found ✅</div></td></tr>';
+    return;
+  }
+  tbody.innerHTML = gaps.map(function(g) {
+    var cls = g.type === 'Weekday' ? 'warn' : 'dim';
+    return '<tr>'
+      + '<td>' + tsToLocal(g.gap_start) + '</td>'
+      + '<td>' + tsToLocal(g.gap_end) + '</td>'
+      + '<td class="num">' + (g.gap_seconds / 3600).toFixed(1) + 'h</td>'
+      + '<td class="' + cls + '">' + g.type + '</td>'
+      + '</tr>';
+  }).join('');
+}
+
+// ── Validate vs IB ─────────────────────────────────────────────────────────
+function runValidate() {
+  var _ref = _vParams();
+  var summary = document.getElementById('v-summary');
+  summary.style.display = '';
+  summary.innerHTML = '⏳ Validating against IB…';
+
+  fetch('/api/data/validate?' + _ref.params.toString())
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      _renderValidation(data, false, 'v');
+      showToast('Mismatches: ' + (data.mismatch_count || 0), data.mismatch_count ? 'warn' : 'success');
+    })
+    .catch(function(e) {
+      summary.innerHTML = '❌ ' + e.message;
+      showToast('Validate failed: ' + e.message, 'error');
+    });
+}
+
+function _renderValidation(data, isFixed, prefix) {
+  var summary = document.getElementById(prefix + '-summary');
+  summary.style.display = '';
+  summary.innerHTML =
+    '<span>' + (data.symbol || '') + '/' + (data.timeframe || '') + '</span>'
+    + ' — DB: <span style="color:var(--text)">' + (data.db_count || 0) + '</span>'
+    + ' | IB: <span style="color:var(--text)">' + (data.ib_count || 0) + '</span>'
+    + ' | <span style="color:var(--orange)">Mismatches: ' + (data.mismatch_count || 0) + '</span>'
+    + ' | <span style="color:var(--red)">Missing in DB: ' + (data.ib_only_count || 0) + '</span>';
+
+  var theadId = prefix + '-thead';
+  document.getElementById(theadId).innerHTML =
+    '<tr>'
+    + '<th style="width:170px">Time</th>'
+    + '<th style="width:100px">Status</th>'
+    + '<th style="width:220px">DB OHLC</th>'
+    + '<th style="width:220px">IB OHLC</th>'
+    + '<th style="width:140px">Diffs</th>'
+    + '</tr>';
+
+  var rows = [];
+  if (data.mismatches && data.mismatches.length) {
+    data.mismatches.forEach(function(m) {
+      rows.push('<tr>'
+        + '<td>' + tsToLocal(m.time) + '</td>'
+        + '<td class="down">⚠ Mismatch</td>'
+        + '<td class="num">O:' + fmtNum(m.db.open) + ' H:' + fmtNum(m.db.high)
+        + ' L:' + fmtNum(m.db.low) + ' C:' + fmtNum(m.db.close) + '</td>'
+        + '<td class="num">O:' + fmtNum(m.ib.open) + ' H:' + fmtNum(m.ib.high)
+        + ' L:' + fmtNum(m.ib.low) + ' C:' + fmtNum(m.ib.close) + '</td>'
+        + '<td class="warn">' + Object.keys(m.diffs || {}).join(', ') + '</td>'
+        + '</tr>');
+    });
+  }
+  var ibOnly = data.ib_only || [];
+  if (ibOnly.length) {
+    ibOnly.forEach(function(b) {
+      rows.push('<tr>'
+        + '<td>' + tsToLocal(b.time) + '</td>'
+        + '<td class="down">❌ Missing</td>'
+        + '<td>—</td>'
+        + '<td class="num">O:' + fmtNum(b.open) + ' H:' + fmtNum(b.high)
+        + ' L:' + fmtNum(b.low) + ' C:' + fmtNum(b.close) + '</td>'
+        + '<td>' + (isFixed ? '✅ Fixed' : 'Need fix') + '</td>'
+        + '</tr>');
+    });
+  }
+
+  var tbody = document.getElementById(prefix + '-tbody');
+  tbody.innerHTML = rows.length ? rows.join('')
+    : '<tr><td colspan="5"><div class="empty-msg">No mismatches — data is clean ✅</div></td></tr>';
+}
+
+// ── Query by Source ────────────────────────────────────────────────────────
+function runSourceQuery() {
+  var source = document.getElementById('v-source').value;
+  var _ref = _vParams();
+  var symbol = _ref.symbol;
+  var timeframe = _ref.timeframe;
+  var fromDate = document.getElementById('v-from').value;
+  var toDate = document.getElementById('v-to').value;
+
+  var url = '/api/data/bars_by_source?source=' + encodeURIComponent(source);
+  url += '&symbol=' + symbol + '&timeframe=' + timeframe;
+  var fromTs = dateToTs(fromDate, false);
+  var toTs = dateToTs(toDate, true);
+  if (fromTs) url += '&from_ts=' + fromTs;
+  if (toTs) url += '&to_ts=' + toTs;
+
+  var summary = document.getElementById('v-summary');
+  summary.style.display = '';
+  summary.innerHTML = '⏳ Querying source "' + source + '"…';
+
+  fetch(url)
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      summary.innerHTML = '<span>Source: ' + source + '</span>'
+        + ' — <span style="color:var(--text)">' + data.total + ' bars found</span>';
+
+      document.getElementById('v-thead').innerHTML =
+        '<tr>'
+        + '<th data-col="time" style="width:170px">Time <span class="sort-arrow">⇅</span></th>'
+        + '<th data-col="symbol" style="width:80px">Symbol <span class="sort-arrow">⇅</span></th>'
+        + '<th data-col="timeframe" style="width:80px">Timeframe <span class="sort-arrow">⇅</span></th>'
+        + '<th data-col="open" style="width:90px">Open <span class="sort-arrow">⇅</span></th>'
+        + '<th data-col="high" style="width:90px">High <span class="sort-arrow">⇅</span></th>'
+        + '<th data-col="low" style="width:90px">Low <span class="sort-arrow">⇅</span></th>'
+        + '<th data-col="close" style="width:90px">Close <span class="sort-arrow">⇅</span></th>'
+        + '<th data-col="volume" style="width:80px">Volume <span class="sort-arrow">⇅</span></th>'
+        + '<th data-col="source" style="width:100px">Source <span class="sort-arrow">⇅</span></th>'
+        + '</tr>';
+
+      var bars = data.bars || [];
+      renderSourceTable(bars);
+      initTableSort('v-table', bars, renderSourceTable);
+      showToast(data.total + ' bars from "' + source + '"', 'info');
+    })
+    .catch(function(e) {
+      summary.innerHTML = '❌ ' + e.message;
+      showToast('Source query failed: ' + e.message, 'error');
+    });
+}
+
+function renderSourceTable(bars) {
+  var tbody = document.getElementById('v-tbody');
+  if (!bars || bars.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="9"><div class="empty-msg">No bars found for this source</div></td></tr>';
+    return;
+  }
+  tbody.innerHTML = bars.map(function(b) {
+    return '<tr>'
+      + '<td>' + tsToLocal(b.time) + '</td>'
+      + '<td>' + (b.symbol || '') + '</td>'
+      + '<td>' + (b.timeframe || '') + '</td>'
+      + '<td class="num">' + fmtNum(b.open) + '</td>'
+      + '<td class="num">' + fmtNum(b.high) + '</td>'
+      + '<td class="num">' + fmtNum(b.low) + '</td>'
+      + '<td class="num">' + fmtNum(b.close) + '</td>'
+      + '<td class="num">' + fmtVol(b.volume) + '</td>'
+      + '<td class="dim">' + (b.source || '') + '</td>'
+      + '</tr>';
+  }).join('');
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   DATA FIX TAB
+   ═══════════════════════════════════════════════════════════════════════════ */
+function _fParams() {
+  var symbol = document.getElementById('f-symbol').value;
+  var timeframe = document.getElementById('f-timeframe').value;
+  var p = new URLSearchParams({ symbol: symbol, timeframe: timeframe });
+  var from = document.getElementById('f-from').value;
+  var to = document.getElementById('f-to').value;
+  if (from) p.set('from_dt', from);
+  if (to) p.set('to_dt', to);
+  return { symbol: symbol, timeframe: timeframe, params: p };
+}
+
+// ── Fix from IB ────────────────────────────────────────────────────────────
+function runFix() {
+  var _ref = _fParams();
+  if (!confirm('Fix bars for ' + _ref.symbol + '/' + _ref.timeframe + '? This will overwrite mismatched bars with IB data.')) return;
+
+  var summary = document.getElementById('f-summary');
+  summary.style.display = '';
+  summary.innerHTML = '⏳ Validating & fixing…';
+
+  fetch('/api/data/fix?' + _ref.params.toString(), { method: 'POST' })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      _renderValidation(data, true, 'f');
+      showToast('Fixed ' + (data.fixed_count || 0) + ' bars', 'success');
+    })
+    .catch(function(e) {
+      summary.innerHTML = '❌ ' + e.message;
+      showToast('Fix failed: ' + e.message, 'error');
+    });
+}
+
+// ── Delete Realtime Bars ───────────────────────────────────────────────────
+function runDeleteRealtime() {
+  if (!confirm('Delete ALL realtime bars from the database? This cannot be undone.')) return;
+
+  var summary = document.getElementById('f-summary');
+  summary.style.display = '';
+  summary.innerHTML = '⏳ Deleting realtime bars…';
+
+  fetch('/api/data/delete_by_source?source=realtime', { method: 'POST' })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      summary.innerHTML = '🗑 Deleted <span style="color:var(--red)">' + data.deleted + '</span> realtime bars';
+
+      document.getElementById('f-thead').innerHTML =
+        '<tr><th>Result</th></tr>';
+      document.getElementById('f-tbody').innerHTML =
+        '<tr><td>Deleted ' + data.deleted + ' bars with source="' + data.source + '"</td></tr>';
+
+      showToast('Deleted ' + data.deleted + ' realtime bars', 'success');
+    })
+    .catch(function(e) {
+      summary.innerHTML = '❌ ' + e.message;
+      showToast('Delete failed: ' + e.message, 'error');
+    });
+}
+
+// ── Validate All ───────────────────────────────────────────────────────────
+function runValidateAll() {
+  if (!confirm('Validate ALL symbol/timeframe pairs against IB? This may take a while.')) return;
+
+  var summary = document.getElementById('f-summary');
+  summary.style.display = '';
+  summary.innerHTML = '⏳ Validating all pairs… this may take a while';
+
+  fetch('/api/data/validate_all', { method: 'POST' })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      summary.innerHTML =
+        'Pairs checked: <span style="color:var(--text)">' + data.pairs_checked + '</span>'
+        + ' | Total mismatches: <span style="color:var(--orange)">' + data.total_mismatches + '</span>'
+        + ' | Fixed: <span style="color:var(--green)">' + data.total_fixed + '</span>';
+
+      document.getElementById('f-thead').innerHTML =
+        '<tr>'
+        + '<th style="width:100px">Symbol</th>'
+        + '<th style="width:100px">Timeframe</th>'
+        + '<th style="width:100px">DB Count</th>'
+        + '<th style="width:100px">IB Count</th>'
+        + '<th style="width:120px">Mismatches</th>'
+        + '<th style="width:100px">Fixed</th>'
+        + '</tr>';
+
+      var details = data.details || [];
+      var tbody = document.getElementById('f-tbody');
+      if (details.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="6"><div class="empty-msg">No pairs found in database</div></td></tr>';
+        return;
+      }
+      tbody.innerHTML = details.map(function(d) {
+        var mcls = d.total_mismatches > 0 ? 'warn' : 'up';
+        return '<tr>'
+          + '<td>' + (d.symbol || '') + '</td>'
+          + '<td>' + (d.timeframe || '') + '</td>'
+          + '<td class="num">' + (d.db_count || 0) + '</td>'
+          + '<td class="num">' + (d.ib_count || 0) + '</td>'
+          + '<td class="num ' + mcls + '">' + (d.total_mismatches || 0) + '</td>'
+          + '<td class="num">' + (d.total_fixed || 0) + '</td>'
+          + '</tr>';
+      }).join('');
+
+      showToast('Validated ' + data.pairs_checked + ' pairs', data.total_mismatches ? 'warn' : 'success');
+    })
+    .catch(function(e) {
+      summary.innerHTML = '❌ ' + e.message;
+      showToast('Validate all failed: ' + e.message, 'error');
+    });
+}
+</script>
+</body>
+</html>

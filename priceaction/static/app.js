@@ -81,6 +81,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // Refresh watchlist prices every 60s
   setInterval(fetchWatchlistPrices, 60000);
   initStrategyTab();
+  initPanelState();
 });
 
 // ── Save/Load Adapter (TradingView chart layout persistence) ──────────────────
@@ -1367,7 +1368,8 @@ function handlePriceMessage(event) {
 
   if (msg.type === 'bar' && msg.bar_size === '5min') {
     const barSymbol = msg.symbol || 'MES';
-    updateWatchlistMES(msg.bar.close);
+    // Update watchlist for all symbols
+    updateWatchlistPrice(barSymbol, msg.bar.close);
     if (barSymbol === (_currentSymbol || 'MES')) {
       updateTopbarOHLC(msg.bar);
       updateBidAsk(msg.bar.close);
@@ -1377,7 +1379,7 @@ function handlePriceMessage(event) {
   } else if (msg.type === 'snapshot' && msg.bars_5min?.length > 0) {
     const latest = msg.bars_5min[msg.bars_5min.length - 1];
     updateTopbarOHLC(latest);
-    updateWatchlistMES(latest.close);
+    updateWatchlistPrice('MES', latest.close);
     updateBidAsk(latest.close);
     _lastBar = latest;
     setWsStatus('live', 'Live');
@@ -1433,16 +1435,31 @@ function initWatchlistClick() {
   });
 }
 
-function updateWatchlistMES(price) {
-  const priceEl = document.getElementById('wl-mes-price');
-  const chgEl   = document.getElementById('wl-mes-chg');
+// Per-symbol open prices for watchlist change calculation
+let _symbolOpenPrices = {};
+
+function updateWatchlistPrice(symbol, price) {
+  const key = symbol.toLowerCase();
+  const priceEl = document.getElementById(`wl-${key}-price`);
+  const chgEl   = document.getElementById(`wl-${key}-chg`);
   if (priceEl) priceEl.textContent = price != null ? price.toFixed(2) : '—';
-  if (chgEl && _openPrice) {
-    const chg    = price - _openPrice;
-    const chgPct = (chg / _openPrice * 100).toFixed(2);
-    chgEl.textContent = `${chg >= 0 ? '+' : ''}${chgPct}%`;
-    chgEl.className   = `watch-change ${chg >= 0 ? 'up' : 'down'}`;
+  if (chgEl) {
+    const openPrice = _symbolOpenPrices[symbol];
+    if (openPrice && price != null) {
+      const chg    = price - openPrice;
+      const chgPct = (chg / openPrice * 100).toFixed(2);
+      chgEl.textContent = `${chg >= 0 ? '+' : ''}${chgPct}%`;
+      chgEl.className   = `watch-change ${chg >= 0 ? 'up' : 'down'}`;
+    }
   }
+  // Track open price
+  if (!_symbolOpenPrices[symbol] && price != null) {
+    _symbolOpenPrices[symbol] = price;
+  }
+}
+
+function updateWatchlistMES(price) {
+  updateWatchlistPrice('MES', price);
 }
 
 async function fetchWatchlistPrices() {
@@ -3082,243 +3099,42 @@ function _drawBacktestMarkers(trades, showFiltered) {
   }
 }
 
-// ── Data Validation (validate DB against IB, fix missing bars) ────────────────
+// ── Panel Toggle (Collapsible Watchlist & Order Entry) ─────────────────────────
 
-function _dvParams() {
-  const symbol = document.getElementById('dv-symbol')?.value || 'MES';
-  const timeframe = document.getElementById('dv-timeframe')?.value || '5min';
-  const fromEl = document.getElementById('dv-from');
-  const toEl = document.getElementById('dv-to');
-  const params = new URLSearchParams({ symbol, timeframe });
-  if (fromEl?.value) params.set('from_dt', fromEl.value);
-  if (toEl?.value) params.set('to_dt', toEl.value);
-  return { symbol, timeframe, params };
-}
-
-function _renderValidationResult(data, isFixed) {
-  const thead = document.getElementById('dv-thead');
-  thead.innerHTML = '<tr><th>Time</th><th>Status</th><th>DB OHLC</th><th>IB OHLC</th><th>Diffs</th></tr>';
-
-  const summary = document.getElementById('dv-summary');
-  summary.style.display = '';
-  const fixedInfo = isFixed ? ` | <span style="color:var(--green)">Fixed: ${data.fixed_count ?? data.ib_only_inserted ?? 0}</span>` : '';
-  summary.innerHTML =
-    `<span>${data.symbol}/${data.timeframe}</span>` +
-    ` — DB: <span style="color:var(--text)">${data.db_count}</span>` +
-    ` | IB: <span style="color:var(--text)">${data.ib_count}</span>` +
-    ` | <span style="color:var(--orange)">Mismatches: ${data.mismatch_count}</span>` +
-    ` | <span style="color:var(--red)">Missing in DB: ${data.ib_only_count ?? data.ib_only_inserted ?? 0}</span>` +
-    fixedInfo;
-
-  const tbody = document.getElementById('dv-tbody');
-  const rows = [];
-
-  // Show mismatches
-  if (data.mismatches?.length) {
-    data.mismatches.forEach(m => {
-      const dt = new Date(m.time * 1000).toLocaleString();
-      const dbBar = m.db;
-      const ibBar = m.ib;
-      const diffFields = Object.keys(m.diffs || {}).join(', ');
-      rows.push(`<tr>
-        <td>${dt}</td>
-        <td class="down">⚠ Mismatch</td>
-        <td>O:${dbBar.open} H:${dbBar.high} L:${dbBar.low} C:${dbBar.close}</td>
-        <td>O:${ibBar.open} H:${ibBar.high} L:${ibBar.low} C:${ibBar.close}</td>
-        <td>${diffFields}</td>
-      </tr>`);
-    });
+function initPanelState() {
+  const wlState = localStorage.getItem('panel_watchlist');
+  const orderState = localStorage.getItem('panel_order');
+  if (wlState === 'hidden') {
+    document.getElementById('main').classList.add('watchlist-hidden');
+    const btn = document.getElementById('toggle-watchlist');
+    if (btn) btn.classList.remove('active');
   }
-
-  // Show bars missing from DB (IB only)
-  const ibOnly = data.ib_only || [];
-  if (ibOnly.length) {
-    ibOnly.forEach(b => {
-      const dt = new Date(b.time * 1000).toLocaleString();
-      rows.push(`<tr>
-        <td>${dt}</td>
-        <td class="down">❌ Missing in DB</td>
-        <td>—</td>
-        <td>O:${b.open} H:${b.high} L:${b.low} C:${b.close}</td>
-        <td>${isFixed ? '✅ Fixed' : 'Need fix'}</td>
-      </tr>`);
-    });
-  }
-
-  if (!rows.length) {
-    tbody.innerHTML = '';
-  } else {
-    tbody.innerHTML = rows.join('');
+  if (orderState === 'hidden') {
+    document.getElementById('main').classList.add('order-hidden');
+    const btn = document.getElementById('toggle-order');
+    if (btn) btn.classList.remove('active');
   }
 }
 
-async function runDataValidate() {
-  const { params } = _dvParams();
-  const summary = document.getElementById('dv-summary');
-  const tbody = document.getElementById('dv-tbody');
-  summary.style.display = '';
-  summary.innerHTML = '⏳ Validating against IB…';
-  tbody.innerHTML = '';
+function togglePanel(panelName) {
+  const main = document.getElementById('main');
+  if (!main) return;
+  const cls = panelName === 'watchlist' ? 'watchlist-hidden' : 'order-hidden';
+  const btnId = panelName === 'watchlist' ? 'toggle-watchlist' : 'toggle-order';
+  const storageKey = 'panel_' + panelName;
+  const btn = document.getElementById(btnId);
 
-  try {
-    const res = await fetch(`/api/data/validate?${params}`);
-    const data = await res.json();
-    _renderValidationResult(data, false);
-  } catch (e) {
-    showToast('Validation failed: ' + e.message, 'error');
-    summary.innerHTML = '❌ Validation failed';
-  }
-}
-
-async function runDataFix() {
-  const { symbol, timeframe, params } = _dvParams();
-  if (!confirm(`This will overwrite mismatched bars and insert missing bars for ${symbol}/${timeframe} from IB. Continue?`)) return;
-
-  const summary = document.getElementById('dv-summary');
-  const tbody = document.getElementById('dv-tbody');
-  summary.style.display = '';
-  summary.innerHTML = '⏳ Validating & fixing against IB…';
-  tbody.innerHTML = '';
-
-  try {
-    const res = await fetch(`/api/data/fix?${params}`, { method: 'POST' });
-    const data = await res.json();
-    _renderValidationResult(data, true);
-    showToast(`Fixed ${data.fixed_count ?? 0} bars for ${symbol}/${timeframe}`, 'ok');
-  } catch (e) {
-    showToast('Fix failed: ' + e.message, 'error');
-    summary.innerHTML = '❌ Fix failed';
-  }
-}
-
-async function runDeleteRealtimeBars() {
-  if (!confirm('Delete ALL realtime-assembled bars from the database?\nYou can re-fill missing data using Validate & Fix.')) return;
-
-  try {
-    const res = await fetch('/api/data/delete_by_source?source=realtime', { method: 'POST' });
-    const data = await res.json();
-    showToast(`Deleted ${data.deleted} realtime bars`, 'ok');
-
-    const summary = document.getElementById('dv-summary');
-    summary.style.display = '';
-    summary.innerHTML = `🗑 Deleted <span style="color:var(--red)">${data.deleted}</span> realtime bars from database`;
-  } catch (e) {
-    showToast('Delete failed: ' + e.message, 'error');
-  }
-}
-
-async function runGapCheck() {
-  const symbol = document.getElementById('dv-symbol')?.value || 'MES';
-  const timeframe = document.getElementById('dv-timeframe')?.value || '5min';
-  const fromEl = document.getElementById('dv-from');
-  const toEl = document.getElementById('dv-to');
-
-  let url = `/api/data/gaps?symbol=${symbol}&timeframe=${timeframe}`;
-  if (fromEl?.value) {
-    url += `&from_ts=${Math.floor(new Date(fromEl.value).getTime() / 1000)}`;
-  }
-  if (toEl?.value) {
-    url += `&to_ts=${Math.floor(new Date(toEl.value + 'T23:59:59').getTime() / 1000)}`;
+  main.classList.toggle(cls);
+  const isHidden = main.classList.contains(cls);
+  localStorage.setItem(storageKey, isHidden ? 'hidden' : 'visible');
+  if (btn) {
+    btn.classList.toggle('active', !isHidden);
   }
 
-  try {
-    const res = await fetch(url);
-    const data = await res.json();
-
-    const thead = document.getElementById('dv-thead');
-    thead.innerHTML = '<tr><th>Gap Start</th><th>Gap End</th><th>Duration</th><th>Type</th></tr>';
-
-    const summary = document.getElementById('dv-summary');
-    summary.style.display = '';
-    summary.innerHTML = `<span>${symbol}/${timeframe}</span>` +
-      ` — <span style="color:var(--text)">${data.total_gaps} gaps total</span>` +
-      ` | <span style="color:var(--orange)">${data.weekday_gaps} weekday</span>` +
-      ` | <span style="color:var(--text-dim)">${data.weekend_gaps} weekend</span>` +
-      ` | <span style="color:var(--text-dim)">${data.holiday_gaps} holiday</span>`;
-
-    const tbody = document.getElementById('dv-tbody');
-    if (!data.gaps || !data.gaps.length) {
-      tbody.innerHTML = '<tr><td colspan="4"><div class="empty-table">✅ No gaps detected</div></td></tr>';
-      return;
-    }
-
-    tbody.innerHTML = data.gaps.map(g => {
-      const start = new Date(g.gap_start * 1000).toLocaleString();
-      const end = new Date(g.gap_end * 1000).toLocaleString();
-      const hours = (g.gap_seconds / 3600).toFixed(1);
-      const isWeekday = !g.spans_weekend && !g.spans_holiday;
-      const type = g.spans_weekend ? 'Weekend' : g.spans_holiday ? 'Holiday' : 'Weekday';
-      const typeClass = isWeekday ? 'down' : '';
-      return `<tr>
-        <td>${start}</td>
-        <td>${end}</td>
-        <td>${hours}h (${g.gap_seconds}s)</td>
-        <td class="${typeClass}">${isWeekday ? '⚠ ' : ''}${type}</td>
-      </tr>`;
-    }).join('');
-  } catch (e) {
-    showToast('Gap check failed: ' + e.message, 'error');
-  }
-}
-
-async function runSourceQuery() {
-  const source = document.getElementById('dv-source')?.value || 'realtime';
-  const symbol = document.getElementById('dv-symbol')?.value || '';
-  const timeframe = document.getElementById('dv-timeframe')?.value || '';
-  const fromEl = document.getElementById('dv-from');
-  const toEl = document.getElementById('dv-to');
-
-  let url = `/api/data/bars_by_source?source=${encodeURIComponent(source)}`;
-  if (symbol) url += `&symbol=${symbol}`;
-  if (timeframe) url += `&timeframe=${timeframe}`;
-  if (fromEl?.value) {
-    url += `&from_ts=${Math.floor(new Date(fromEl.value).getTime() / 1000)}`;
-  }
-  if (toEl?.value) {
-    url += `&to_ts=${Math.floor(new Date(toEl.value + 'T23:59:59').getTime() / 1000)}`;
-  }
-
-  try {
-    const res = await fetch(url);
-    const data = await res.json();
-
-    const thead = document.getElementById('dv-thead');
-    thead.innerHTML = '<tr><th>Time</th><th>Symbol</th><th>TF</th><th>Open</th><th>High</th><th>Low</th><th>Close</th><th>Volume</th><th>Source</th></tr>';
-
-    const srcSelect = document.getElementById('dv-source');
-    if (data.available_sources && srcSelect) {
-      const current = srcSelect.value;
-      srcSelect.innerHTML = data.available_sources.map(s =>
-        `<option value="${s}" ${s === current ? 'selected' : ''}>${s}</option>`
-      ).join('');
-    }
-
-    const summary = document.getElementById('dv-summary');
-    summary.style.display = '';
-    summary.innerHTML = `Source: <span style="color:var(--text)">${source}</span>` +
-      ` — <span style="color:var(--text)">${data.total} bars found</span>`;
-
-    const tbody = document.getElementById('dv-tbody');
-    if (!data.bars || !data.bars.length) {
-      tbody.innerHTML = '<tr><td colspan="9"><div class="empty-table">No bars found for this source</div></td></tr>';
-      return;
-    }
-
-    tbody.innerHTML = data.bars.map(b => {
-      const dt = new Date(b.time * 1000).toLocaleString();
-      return `<tr>
-        <td>${dt}</td>
-        <td>${b.symbol}</td>
-        <td>${b.timeframe}</td>
-        <td>${b.open.toFixed(2)}</td>
-        <td>${b.high.toFixed(2)}</td>
-        <td>${b.low.toFixed(2)}</td>
-        <td>${b.close.toFixed(2)}</td>
-        <td>${Math.round(b.volume)}</td>
-        <td>${b.source}</td>
-      </tr>`;
-    }).join('');
-  } catch (e) {
-    showToast('Source query failed: ' + e.message, 'error');
+  // Trigger chart resize after panel toggle
+  if (_widget) {
+    setTimeout(() => {
+      try { _widget.activeChart(); } catch (_) {}
+    }, 100);
   }
 }
