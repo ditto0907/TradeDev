@@ -176,7 +176,7 @@ body {
   white-space: nowrap;
 }
 .dv-toolbar select,
-.dv-toolbar input[type="date"] {
+.dv-toolbar input[type="datetime-local"] {
   background: var(--input-bg);
   color: var(--text);
   border: 1px solid var(--border);
@@ -188,10 +188,10 @@ body {
   height: 28px;
 }
 .dv-toolbar select:focus,
-.dv-toolbar input[type="date"]:focus {
+.dv-toolbar input[type="datetime-local"]:focus {
   border-color: var(--blue);
 }
-.dv-toolbar input[type="date"]::-webkit-calendar-picker-indicator {
+.dv-toolbar input[type="datetime-local"]::-webkit-calendar-picker-indicator {
   filter: invert(.7);
 }
 .dv-btn {
@@ -437,8 +437,8 @@ body {
         <label>Source
           <select id="q-source"><option value="">All</option></select>
         </label>
-        <label>From <input type="date" id="q-from"/></label>
-        <label>To   <input type="date" id="q-to"/></label>
+        <label>From <input type="datetime-local" id="q-from"/></label>
+        <label>To   <input type="datetime-local" id="q-to"/></label>
         <button class="dv-btn primary" onclick="queryData()">🔍 Search</button>
         <button class="dv-btn" onclick="resetQueryFilters()">Reset</button>
       </div>
@@ -496,8 +496,8 @@ body {
             <option value="1D">1D</option>
           </select>
         </label>
-        <label>From <input type="date" id="v-from"/></label>
-        <label>To   <input type="date" id="v-to"/></label>
+        <label>From <input type="datetime-local" id="v-from"/></label>
+        <label>To   <input type="datetime-local" id="v-to"/></label>
         <button class="dv-btn" onclick="runGaps()">🔍 Check Gaps</button>
         <button class="dv-btn" onclick="runValidate()">✅ Validate vs IB</button>
         <button class="dv-btn" onclick="runSourceQuery()">📋 Query by Source</button>
@@ -540,8 +540,8 @@ body {
             <option value="1D">1D</option>
           </select>
         </label>
-        <label>From <input type="date" id="f-from"/></label>
-        <label>To   <input type="date" id="f-to"/></label>
+        <label>From <input type="datetime-local" id="f-from"/></label>
+        <label>To   <input type="datetime-local" id="f-to"/></label>
         <button class="dv-btn" onclick="runFix()">🔧 Fix from IB</button>
         <button class="dv-btn danger" onclick="runDeleteRealtime()">🗑 Delete Realtime Bars</button>
         <button class="dv-btn" onclick="runValidateAll()">✅ Validate All</button>
@@ -601,7 +601,12 @@ function showToast(message, type) {
 // ── Helpers ────────────────────────────────────────────────────────────────
 function dateToTs(dateStr, endOfDay) {
   if (!dateStr) return null;
-  var d = new Date(dateStr + (endOfDay ? 'T23:59:59' : 'T00:00:00'));
+  // datetime-local format "YYYY-MM-DDTHH:MM" already has a time component;
+  // append ':00' for full seconds precision before parsing as local time.
+  // date-only format "YYYY-MM-DD" needs a time suffix based on endOfDay flag.
+  var d = dateStr.includes('T')
+    ? new Date(dateStr + ':00')
+    : new Date(dateStr + (endOfDay ? 'T23:59:59' : 'T00:00:00'));
   return Math.floor(d.getTime() / 1000);
 }
 

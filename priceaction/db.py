@@ -157,6 +157,21 @@ def init_db() -> None:
             conn.execute(
                 "ALTER TABLE strategy_trades ADD COLUMN contracts INTEGER NOT NULL DEFAULT 1"
             )
+        # ── Realtime bars table (one row per symbol/timeframe) ────────────────
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS realtime_bars (
+                symbol     TEXT    NOT NULL,
+                timeframe  TEXT    NOT NULL,
+                ts         INTEGER NOT NULL,
+                open       REAL    NOT NULL,
+                high       REAL    NOT NULL,
+                low        REAL    NOT NULL,
+                close      REAL    NOT NULL,
+                volume     REAL    NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (symbol, timeframe)
+            )
+        """)
     logger.info("Database ready: %s", _DB_PATH)
 
 
@@ -179,6 +194,39 @@ def insert_bars(symbol: str, timeframe: str, bars: List[dict],
             rows,
         )
     return len(rows)
+
+
+def upsert_realtime_bar(symbol: str, timeframe: str, bar: dict) -> None:
+    """Upsert the current in-progress realtime bar (one row per symbol/timeframe).
+
+    Stored in a separate table from IB historical bars so they never mix.
+    Used for crash-recovery: the server reloads this on startup so the chart
+    shows the latest forming bar without waiting for the first realtime tick.
+    """
+    import time as _time
+    with _conn() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO realtime_bars "
+            "(symbol, timeframe, ts, open, high, low, close, volume, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (symbol, timeframe,
+             bar["time"], bar["open"], bar["high"], bar["low"], bar["close"],
+             bar["volume"], int(_time.time())),
+        )
+
+
+def get_all_realtime_bars() -> List[dict]:
+    """Return all saved realtime bars (one per symbol/timeframe)."""
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT symbol, timeframe, ts, open, high, low, close, volume "
+            "FROM realtime_bars"
+        ).fetchall()
+    return [
+        {"symbol": r[0], "timeframe": r[1], "time": r[2],
+         "open": r[3], "high": r[4], "low": r[5], "close": r[6], "volume": r[7]}
+        for r in rows
+    ]
 
 
 def get_bars(
