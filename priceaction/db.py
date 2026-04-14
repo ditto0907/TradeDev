@@ -18,18 +18,82 @@ import sqlite3
 import logging
 from pathlib import Path
 from typing import List, Optional
+from queue import Queue, Empty
+from contextlib import contextmanager
+import threading
 
 logger = logging.getLogger(__name__)
 
 _DB_PATH = Path(__file__).parent / "data" / "tradedev.db"
 
+# ── Connection Pool ───────────────────────────────────────────────────────────
+# Reuse connections to avoid "too many open files" with high-frequency operations.
+# SQLite WAL mode allows multiple readers + one writer concurrently.
 
-def _conn() -> sqlite3.Connection:
+_pool: Queue = Queue(maxsize=10)
+_pool_lock = threading.Lock()
+_pool_initialized = False
+
+
+def _create_connection() -> sqlite3.Connection:
+    """Create a new database connection."""
     _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(_DB_PATH), check_same_thread=False)
+    conn = sqlite3.connect(str(_DB_PATH), check_same_thread=False, timeout=10.0)
     conn.execute("PRAGMA journal_mode=WAL")    # concurrent reads while writing
     conn.execute("PRAGMA synchronous=NORMAL")  # safe but faster than FULL
     return conn
+
+
+def _init_pool():
+    """Initialize connection pool with 5 connections."""
+    global _pool_initialized
+    with _pool_lock:
+        if _pool_initialized:
+            return
+        for _ in range(5):
+            try:
+                _pool.put(_create_connection(), block=False)
+            except Exception as e:
+                logger.warning("Failed to create pool connection: %s", e)
+        _pool_initialized = True
+        logger.info("DB connection pool initialized with %d connections", _pool.qsize())
+
+
+@contextmanager
+def _conn():
+    """Get a connection from pool (or create new if pool empty), return to pool after use."""
+    if not _pool_initialized:
+        _init_pool()
+    
+    conn = None
+    try:
+        # Try to get from pool (non-blocking)
+        conn = _pool.get(block=False)
+    except Empty:
+        # Pool empty, create temporary connection
+        logger.debug("Pool exhausted, creating temporary connection")
+        conn = _create_connection()
+        temp_conn = True
+    else:
+        temp_conn = False
+    
+    try:
+        yield conn
+        conn.commit()  # Auto-commit on successful exit
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        # Return to pool if it was from pool and pool not full
+        if not temp_conn:
+            try:
+                _pool.put(conn, block=False)
+            except:
+                # Pool full, close this connection
+                conn.close()
+        else:
+            # Temporary connection, close it
+            conn.close()
 
 
 def init_db() -> None:

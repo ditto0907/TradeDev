@@ -626,13 +626,25 @@ pip install -r requirements.txt
 
 # 2. 确保 IB TWS 在 127.0.0.1:7497 运行 (Paper Trading)
 
-# 3. 启动服务
-cd priceaction
-python3 -m uvicorn server:app --host 0.0.0.0 --port 8000 --loop asyncio
+# 3. 提高文件描述符限制（推荐，避免高频tick时资源耗尽）
+ulimit -n 10240
 
-# 4. 打开浏览器
+# 4. 启动服务（推荐使用启动脚本）
+cd priceaction
+./start_server.sh
+
+# 或手动启动：
+# python3 -m uvicorn server:app --host 0.0.0.0 --port 8000 --loop asyncio
+
+# 5. 打开浏览器
 open http://localhost:8000
 ```
+
+**性能优化建议**：
+- **文件描述符限制**：macOS默认限制256，多symbol高频tick会导致 "Too many open files" 错误
+  - 临时设置：`ulimit -n 10240`（当前终端会话有效）
+  - 永久设置：编辑 `/etc/launchd.conf` 添加 `limit maxfiles 10240 unlimited`
+- **SQLite连接池**：db.py已实现5连接池，自动复用连接，避免频繁创建/关闭
 
 ## 技术栈
 
@@ -659,17 +671,24 @@ open http://localhost:8000
 - ✅ 表格筛选图标：所有底部面板表格通过 🔍 图标切换列筛选
 - ✅ Strategy Backtest Tab：IBS 2-Bar 策略回测，支持参数调整 & 图表定位
 - ✅ 数据流文档 (dataflow.md)：详细时序图、流程图、架构图
+- ✅ **SQLite连接池**：实现5连接池复用，避免高频tick时"Too many open files"错误
+- ✅ **K线完整性修复**：完成的K线立即写入DB（`source=realtime_completed`），避免缺失最新完成K线
+- ✅ **Data Valid时间选择器**：非循环滚动（小时00-23停止，分钟00-55/5min停止）
 
 **修复**：
 - 🐛 Data Valid Tab 显示异常：修复 CSS `display:flex` 内联样式与 `.btab-pane` class 冲突
 - 🐛 MutationObserver 无限循环：Column Resize 和 Sort/Filter 观察器添加 `_resizeMutating` / `_sortMutating` 防护
 - 🐛 Sort/Filter 观察器优化：仅初始化未处理的新表格 (`data-table:not([data-sort-init])`)
+- 🐛 **资源泄漏修复**：SQLite连接池防止文件描述符耗尽（OSError: [Errno 24] Too many open files）
+- 🐛 **最新K线缺失**：K线完成时立即持久化，不再等待IB historical fetch延迟
 
 **技术改进**：
 - 使用 `TimedRotatingFileHandler(when="H")` 实现按小时日志轮转
 - 启动流程重构：DB 加载 → 立即 yield → IB 异步初始化
 - `.btab-flex` CSS class 替代内联 `display:flex` 避免显隐冲突
 - 筛选图标采用点击切换模式，输入框隐藏/显示，有内容时图标高亮
+- **db.py连接池**：`Queue(maxsize=10)` + 上下文管理器自动归还连接
+- **K线持久化策略**：实时完成K线（`realtime_completed`）→ IB历史覆盖（`ib_historical`）
 
 ### 2026-04-12 — Skill API & Market Cycle Analysis 增强
 

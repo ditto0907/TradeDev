@@ -176,7 +176,7 @@ body {
   white-space: nowrap;
 }
 .dv-toolbar select,
-.dv-toolbar input[type="datetime-local"] {
+.dv-toolbar input[type="date"] {
   background: var(--input-bg);
   color: var(--text);
   border: 1px solid var(--border);
@@ -188,11 +188,23 @@ body {
   height: 28px;
 }
 .dv-toolbar select:focus,
-.dv-toolbar input[type="datetime-local"]:focus {
+.dv-toolbar input[type="date"]:focus {
   border-color: var(--blue);
 }
-.dv-toolbar input[type="datetime-local"]::-webkit-calendar-picker-indicator {
+.dv-toolbar input[type="date"]::-webkit-calendar-picker-indicator {
   filter: invert(.7);
+}
+.dv-datetime {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+.dv-datetime input[type="date"] {
+  width: 130px;
+}
+.dv-datetime select {
+  width: 50px;
+  padding: 4px 4px;
 }
 .dv-btn {
   background: var(--input-bg);
@@ -437,8 +449,18 @@ body {
         <label>Source
           <select id="q-source"><option value="">All</option></select>
         </label>
-        <label>From <input type="datetime-local" id="q-from"/></label>
-        <label>To   <input type="datetime-local" id="q-to"/></label>
+        <label>From
+          <div class="dv-datetime">
+            <input type="date" id="q-from-date" min="2024-01-01"/>
+            <select id="q-from-hour"></select>:<select id="q-from-min"></select>
+          </div>
+        </label>
+        <label>To
+          <div class="dv-datetime">
+            <input type="date" id="q-to-date" min="2024-01-01"/>
+            <select id="q-to-hour"></select>:<select id="q-to-min"></select>
+          </div>
+        </label>
         <button class="dv-btn primary" onclick="queryData()">🔍 Search</button>
         <button class="dv-btn" onclick="resetQueryFilters()">Reset</button>
       </div>
@@ -496,19 +518,20 @@ body {
             <option value="1D">1D</option>
           </select>
         </label>
-        <label>From <input type="datetime-local" id="v-from"/></label>
-        <label>To   <input type="datetime-local" id="v-to"/></label>
+        <label>From
+          <div class="dv-datetime">
+            <input type="date" id="v-from-date" min="2024-01-01"/>
+            <select id="v-from-hour"></select>:<select id="v-from-min"></select>
+          </div>
+        </label>
+        <label>To
+          <div class="dv-datetime">
+            <input type="date" id="v-to-date" min="2024-01-01"/>
+            <select id="v-to-hour"></select>:<select id="v-to-min"></select>
+          </div>
+        </label>
         <button class="dv-btn" onclick="runGaps()">🔍 Check Gaps</button>
         <button class="dv-btn" onclick="runValidate()">✅ Validate vs IB</button>
-        <button class="dv-btn" onclick="runSourceQuery()">📋 Query by Source</button>
-        <label>Source
-          <select id="v-source">
-            <option value="realtime">realtime</option>
-            <option value="ib_historical">ib_historical</option>
-            <option value="ib_validated">ib_validated</option>
-            <option value="synthetic">synthetic</option>
-          </select>
-        </label>
       </div>
       <div class="dv-summary" id="v-summary"></div>
       <div class="dv-table-wrap">
@@ -540,11 +563,20 @@ body {
             <option value="1D">1D</option>
           </select>
         </label>
-        <label>From <input type="datetime-local" id="f-from"/></label>
-        <label>To   <input type="datetime-local" id="f-to"/></label>
+        <label>From
+          <div class="dv-datetime">
+            <input type="date" id="f-from-date" min="2024-01-01"/>
+            <select id="f-from-hour"></select>:<select id="f-from-min"></select>
+          </div>
+        </label>
+        <label>To
+          <div class="dv-datetime">
+            <input type="date" id="f-to-date" min="2024-01-01"/>
+            <select id="f-to-hour"></select>:<select id="f-to-min"></select>
+          </div>
+        </label>
         <button class="dv-btn" onclick="runFix()">🔧 Fix from IB</button>
         <button class="dv-btn danger" onclick="runDeleteRealtime()">🗑 Delete Realtime Bars</button>
-        <button class="dv-btn" onclick="runValidateAll()">✅ Validate All</button>
       </div>
       <div class="dv-summary" id="f-summary"></div>
       <div class="dv-table-wrap">
@@ -581,6 +613,35 @@ document.querySelectorAll('.dv-tab').forEach(tab => {
   });
 });
 
+// ── Initialize time selectors ─────────────────────────────────────────────
+function initTimeSelectors() {
+  var hourSelects = ['q-from-hour', 'q-to-hour', 'v-from-hour', 'v-to-hour', 'f-from-hour', 'f-to-hour'];
+  var minSelects = ['q-from-min', 'q-to-min', 'v-from-min', 'v-to-min', 'f-from-min', 'f-to-min'];
+  
+  // Populate hours (00-23, non-cyclic)
+  hourSelects.forEach(function(id) {
+    var sel = document.getElementById(id);
+    if (!sel) return;
+    sel.innerHTML = '<option value="">--</option>';
+    for (var h = 0; h < 24; h++) {
+      var hh = h < 10 ? '0' + h : '' + h;
+      sel.innerHTML += '<option value="' + hh + '">' + hh + '</option>';
+    }
+  });
+  
+  // Populate minutes (00, 05, 10, ..., 55, non-cyclic)
+  minSelects.forEach(function(id) {
+    var sel = document.getElementById(id);
+    if (!sel) return;
+    sel.innerHTML = '<option value="">--</option>';
+    for (var m = 0; m < 60; m += 5) {
+      var mm = m < 10 ? '0' + m : '' + m;
+      sel.innerHTML += '<option value="' + mm + '">' + mm + '</option>';
+    }
+  });
+}
+initTimeSelectors();
+
 // ── Toast notifications ───────────────────────────────────────────────────
 function showToast(message, type) {
   type = type || 'info';
@@ -599,6 +660,16 @@ function showToast(message, type) {
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
+function getCombinedDateTime(dateId, hourId, minId) {
+  var date = document.getElementById(dateId).value;
+  var hour = document.getElementById(hourId).value;
+  var min = document.getElementById(minId).value;
+  if (!date) return null;
+  var h = hour || '00';
+  var m = min || '00';
+  return date + 'T' + h + ':' + m;
+}
+
 function dateToTs(dateStr, endOfDay) {
   if (!dateStr) return null;
   // datetime-local format "YYYY-MM-DDTHH:MM" already has a time component;
@@ -708,8 +779,12 @@ function resetQueryFilters() {
   document.getElementById('q-symbol').value = '';
   document.getElementById('q-timeframe').value = '';
   document.getElementById('q-source').value = '';
-  document.getElementById('q-from').value = '';
-  document.getElementById('q-to').value = '';
+  document.getElementById('q-from-date').value = '';
+  document.getElementById('q-from-hour').value = '';
+  document.getElementById('q-from-min').value = '';
+  document.getElementById('q-to-date').value = '';
+  document.getElementById('q-to-hour').value = '';
+  document.getElementById('q-to-min').value = '';
   _qPage = 1;
   document.getElementById('q-tbody').innerHTML =
     '<tr><td colspan="9"><div class="empty-msg">Use the filters above and click Search</div></td></tr>';
@@ -720,8 +795,8 @@ function queryData() {
   var symbol = document.getElementById('q-symbol').value;
   var timeframe = document.getElementById('q-timeframe').value;
   var source = document.getElementById('q-source').value;
-  var fromDate = document.getElementById('q-from').value;
-  var toDate = document.getElementById('q-to').value;
+  var fromDate = getCombinedDateTime('q-from-date', 'q-from-hour', 'q-from-min');
+  var toDate = getCombinedDateTime('q-to-date', 'q-to-hour', 'q-to-min');
 
   var params = new URLSearchParams();
   if (symbol) params.set('symbol', symbol);
@@ -810,8 +885,8 @@ function _vParams() {
   var symbol = document.getElementById('v-symbol').value;
   var timeframe = document.getElementById('v-timeframe').value;
   var p = new URLSearchParams({ symbol: symbol, timeframe: timeframe });
-  var from = document.getElementById('v-from').value;
-  var to = document.getElementById('v-to').value;
+  var from = getCombinedDateTime('v-from-date', 'v-from-hour', 'v-from-min');
+  var to = getCombinedDateTime('v-to-date', 'v-to-hour', 'v-to-min');
   if (from) p.set('from_dt', from);
   if (to) p.set('to_dt', to);
   return { symbol: symbol, timeframe: timeframe, params: p };
@@ -822,8 +897,8 @@ function runGaps() {
   var _ref = _vParams();
   var symbol = _ref.symbol;
   var timeframe = _ref.timeframe;
-  var fromDate = document.getElementById('v-from').value;
-  var toDate = document.getElementById('v-to').value;
+  var fromDate = getCombinedDateTime('v-from-date', 'v-from-hour', 'v-from-min');
+  var toDate = getCombinedDateTime('v-to-date', 'v-to-hour', 'v-to-min');
 
   var url = '/api/data/gaps?symbol=' + symbol + '&timeframe=' + timeframe;
   var fromTs = dateToTs(fromDate, false);
@@ -959,76 +1034,7 @@ function _renderValidation(data, isFixed, prefix) {
     : '<tr><td colspan="5"><div class="empty-msg">No mismatches — data is clean ✅</div></td></tr>';
 }
 
-// ── Query by Source ────────────────────────────────────────────────────────
-function runSourceQuery() {
-  var source = document.getElementById('v-source').value;
-  var _ref = _vParams();
-  var symbol = _ref.symbol;
-  var timeframe = _ref.timeframe;
-  var fromDate = document.getElementById('v-from').value;
-  var toDate = document.getElementById('v-to').value;
 
-  var url = '/api/data/bars_by_source?source=' + encodeURIComponent(source);
-  url += '&symbol=' + symbol + '&timeframe=' + timeframe;
-  var fromTs = dateToTs(fromDate, false);
-  var toTs = dateToTs(toDate, true);
-  if (fromTs) url += '&from_ts=' + fromTs;
-  if (toTs) url += '&to_ts=' + toTs;
-
-  var summary = document.getElementById('v-summary');
-  summary.style.display = '';
-  summary.innerHTML = '⏳ Querying source "' + source + '"…';
-
-  fetch(url)
-    .then(function(r) { return r.json(); })
-    .then(function(data) {
-      summary.innerHTML = '<span>Source: ' + source + '</span>'
-        + ' — <span style="color:var(--text)">' + data.total + ' bars found</span>';
-
-      document.getElementById('v-thead').innerHTML =
-        '<tr>'
-        + '<th data-col="time" style="width:170px">Time <span class="sort-arrow">⇅</span></th>'
-        + '<th data-col="symbol" style="width:80px">Symbol <span class="sort-arrow">⇅</span></th>'
-        + '<th data-col="timeframe" style="width:80px">Timeframe <span class="sort-arrow">⇅</span></th>'
-        + '<th data-col="open" style="width:90px">Open <span class="sort-arrow">⇅</span></th>'
-        + '<th data-col="high" style="width:90px">High <span class="sort-arrow">⇅</span></th>'
-        + '<th data-col="low" style="width:90px">Low <span class="sort-arrow">⇅</span></th>'
-        + '<th data-col="close" style="width:90px">Close <span class="sort-arrow">⇅</span></th>'
-        + '<th data-col="volume" style="width:80px">Volume <span class="sort-arrow">⇅</span></th>'
-        + '<th data-col="source" style="width:100px">Source <span class="sort-arrow">⇅</span></th>'
-        + '</tr>';
-
-      var bars = data.bars || [];
-      renderSourceTable(bars);
-      initTableSort('v-table', bars, renderSourceTable);
-      showToast(data.total + ' bars from "' + source + '"', 'info');
-    })
-    .catch(function(e) {
-      summary.innerHTML = '❌ ' + e.message;
-      showToast('Source query failed: ' + e.message, 'error');
-    });
-}
-
-function renderSourceTable(bars) {
-  var tbody = document.getElementById('v-tbody');
-  if (!bars || bars.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="9"><div class="empty-msg">No bars found for this source</div></td></tr>';
-    return;
-  }
-  tbody.innerHTML = bars.map(function(b) {
-    return '<tr>'
-      + '<td>' + tsToLocal(b.time) + '</td>'
-      + '<td>' + (b.symbol || '') + '</td>'
-      + '<td>' + (b.timeframe || '') + '</td>'
-      + '<td class="num">' + fmtNum(b.open) + '</td>'
-      + '<td class="num">' + fmtNum(b.high) + '</td>'
-      + '<td class="num">' + fmtNum(b.low) + '</td>'
-      + '<td class="num">' + fmtNum(b.close) + '</td>'
-      + '<td class="num">' + fmtVol(b.volume) + '</td>'
-      + '<td class="dim">' + (b.source || '') + '</td>'
-      + '</tr>';
-  }).join('');
-}
 
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -1038,8 +1044,8 @@ function _fParams() {
   var symbol = document.getElementById('f-symbol').value;
   var timeframe = document.getElementById('f-timeframe').value;
   var p = new URLSearchParams({ symbol: symbol, timeframe: timeframe });
-  var from = document.getElementById('f-from').value;
-  var to = document.getElementById('f-to').value;
+  var from = getCombinedDateTime('f-from-date', 'f-from-hour', 'f-from-min');
+  var to = getCombinedDateTime('f-to-date', 'f-to-hour', 'f-to-min');
   if (from) p.set('from_dt', from);
   if (to) p.set('to_dt', to);
   return { symbol: symbol, timeframe: timeframe, params: p };

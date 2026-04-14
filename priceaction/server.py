@@ -124,15 +124,29 @@ def on_new_bar(bar_size_key: str, bar: dict, symbol: str = None):
     prev_key = (symbol, bar_size_key)
     prev = _prev_completed_bar.get(prev_key)
     if prev is not None and bar["time"] > prev["time"]:
-        # The previous bar just completed — buffer for Google Sheets only;
-        # do NOT write to DB (IB historical is the source of truth).
+        # The previous bar just completed — write it to DB immediately so
+        # getBars requests won't miss it while waiting for IB historical fetch.
+        # Use source="realtime_completed" so IB historical can overwrite later.
+        try:
+            db.insert_bars(symbol, bar_size_key, [prev], source="realtime_completed")
+            logger.debug("Completed bar written to DB: %s/%s ts=%s", symbol, bar_size_key, prev["time"])
+        except Exception as e:
+            logger.warning("Failed to write completed bar for %s/%s: %s", symbol, bar_size_key, e)
+        # Also buffer for Google Sheets
         if symbol == MES_SYM:
             sheets.buffer_bar(bar_size_key, prev)
     _prev_completed_bar[prev_key] = dict(bar)
 
     # Persist the in-progress realtime bar to its own table so it survives
     # a server restart and the chart shows the latest bar immediately on reload.
-    db.upsert_realtime_bar(symbol, bar_size_key, bar)
+    # Wrap in try-except to prevent SQLite concurrency errors from flooding logs.
+    try:
+        db.upsert_realtime_bar(symbol, bar_size_key, bar)
+    except Exception as e:
+        # Silently ignore DB errors in high-frequency callbacks — realtime_bars
+        # is only for crash recovery, occasional failures won't break functionality.
+        # Log at DEBUG level to avoid noise but still troubleshoot if needed.
+        logger.debug("Failed to upsert realtime bar for %s/%s: %s", symbol, bar_size_key, e)
 
     # Re-run price-action analysis only when a new 5min bar opens (MES only)
     analysis_updated = False
