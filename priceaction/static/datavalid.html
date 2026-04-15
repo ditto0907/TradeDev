@@ -382,6 +382,15 @@ body {
   border-radius: 4px;
 }
 ::-webkit-scrollbar-thumb:hover { background: var(--text-faint); }
+
+/* ── Checkbox column ─────────────────────────────────────────────────────── */
+.dv-data-table td input[type="checkbox"],
+.dv-data-table th input[type="checkbox"] {
+  cursor: pointer;
+  accent-color: var(--blue);
+  width: 14px;
+  height: 14px;
+}
 </style>
 </head>
 <body>
@@ -412,7 +421,6 @@ body {
     <div id="tab-bar">
       <div class="dv-tab active" data-pane="query">📋 Data Query</div>
       <div class="dv-tab" data-pane="validate">✅ Data Validate</div>
-      <div class="dv-tab" data-pane="fix">🔧 Data Fix</div>
     </div>
 
     <!-- ═══ Data Query Pane ══════════════════════════════════════════════ -->
@@ -508,54 +516,17 @@ body {
         </label>
         <button class="dv-btn" onclick="runGaps()">🔍 Check Gaps</button>
         <button class="dv-btn" onclick="runValidate()">✅ Validate vs IB</button>
+        <button class="dv-btn primary" id="v-fix-btn" style="display:none" onclick="runFix()">🔧 Data Fix</button>
+        <button class="dv-btn danger" style="margin-left:auto" onclick="runDeleteRealtime()">🗑 Delete Realtime Bars</button>
       </div>
       <div class="dv-summary" id="v-summary"></div>
       <div class="dv-table-wrap">
         <table class="dv-data-table" id="v-table">
           <thead id="v-thead">
-            <tr><th colspan="4">Select an action above to begin</th></tr>
+            <tr><th colspan="8">Select an action above to begin</th></tr>
           </thead>
           <tbody id="v-tbody">
-            <tr><td colspan="4"><div class="empty-msg">Select parameters and run a check</div></td></tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
-
-    <!-- ═══ Data Fix Pane ════════════════════════════════════════════════ -->
-    <div class="dv-pane" id="pane-fix">
-      <div class="dv-toolbar">
-        <label>Symbol
-          <select id="f-symbol">
-            <option value="MES">MES</option>
-            <option value="MNQ">MNQ</option>
-            <option value="NK225MC">NK225MC</option>
-            <option value="MGC">MGC</option>
-          </select>
-        </label>
-        <label>Timeframe
-          <select id="f-timeframe">
-            <option value="5min">5min</option>
-            <option value="1D">1D</option>
-          </select>
-        </label>
-        <label>From
-          <input type="datetime-local" id="f-from" min="2024-01-01T00:00"/>
-        </label>
-        <label>To
-          <input type="datetime-local" id="f-to" min="2024-01-01T00:00"/>
-        </label>
-        <button class="dv-btn" onclick="runFix()">🔧 Fix from IB</button>
-        <button class="dv-btn danger" onclick="runDeleteRealtime()">🗑 Delete Realtime Bars</button>
-      </div>
-      <div class="dv-summary" id="f-summary"></div>
-      <div class="dv-table-wrap">
-        <table class="dv-data-table" id="f-table">
-          <thead id="f-thead">
-            <tr><th colspan="5">Select an action above to begin</th></tr>
-          </thead>
-          <tbody id="f-tbody">
-            <tr><td colspan="5"><div class="empty-msg">Select parameters and run a fix action</div></td></tr>
+            <tr><td colspan="8"><div class="empty-msg">Select parameters and run a check</div></td></tr>
           </tbody>
         </table>
       </div>
@@ -595,7 +566,7 @@ function initDefaults() {
     + String(from30.getMonth() + 1).padStart(2, '0') + '-'
     + String(from30.getDate()).padStart(2, '0') + 'T00:00';
 
-  ['q', 'v', 'f'].forEach(function(p) {
+  ['q', 'v'].forEach(function(p) {
     var fromEl = document.getElementById(p + '-from');
     var toEl = document.getElementById(p + '-to');
     if (fromEl) fromEl.value = fromVal;
@@ -831,6 +802,11 @@ function renderQueryTable(bars) {
 /* ═══════════════════════════════════════════════════════════════════════════
    DATA VALIDATE TAB
    ═══════════════════════════════════════════════════════════════════════════ */
+
+// State preserved across validate → fix workflow
+var _vLastResult = null;   // last validate_bars response
+var _vFixedTs = new Set(); // timestamps already fixed in this session
+
 function _vParams() {
   var symbol = document.getElementById('v-symbol').value;
   var timeframe = document.getElementById('v-timeframe').value;
@@ -859,6 +835,8 @@ function runGaps() {
   var summary = document.getElementById('v-summary');
   summary.style.display = '';
   summary.innerHTML = '⏳ Checking gaps…';
+  document.getElementById('v-fix-btn').style.display = 'none';
+  _vLastResult = null;
 
   fetch(url)
     .then(function(r) { return r.json(); })
@@ -918,12 +896,18 @@ function runValidate() {
   var summary = document.getElementById('v-summary');
   summary.style.display = '';
   summary.innerHTML = '⏳ Validating against IB…';
+  document.getElementById('v-fix-btn').style.display = 'none';
+  _vLastResult = null;
+  _vFixedTs = new Set();
 
   fetch('/api/data/validate?' + _ref.params.toString())
     .then(function(r) { return r.json(); })
     .then(function(data) {
-      _renderValidation(data, false, 'v');
-      showToast('Mismatches: ' + (data.mismatch_count || 0), data.mismatch_count ? 'warn' : 'success');
+      _vLastResult = data;
+      _renderValidation(data);
+      var total = (data.mismatch_count || 0) + (data.ib_only_count || 0);
+      showToast('Mismatches: ' + (data.mismatch_count || 0) + '  Missing: ' + (data.ib_only_count || 0),
+                total ? 'warn' : 'success');
     })
     .catch(function(e) {
       summary.innerHTML = '❌ ' + e.message;
@@ -931,8 +915,9 @@ function runValidate() {
     });
 }
 
-function _renderValidation(data, isFixed, prefix) {
-  var summary = document.getElementById(prefix + '-summary');
+// ── Render validation results with checkboxes ─────────────────────────────
+function _renderValidation(data) {
+  var summary = document.getElementById('v-summary');
   summary.style.display = '';
   summary.innerHTML =
     '<span>' + (data.symbol || '') + '/' + (data.timeframe || '') + '</span>'
@@ -941,80 +926,154 @@ function _renderValidation(data, isFixed, prefix) {
     + ' | <span style="color:var(--orange)">Mismatches: ' + (data.mismatch_count || 0) + '</span>'
     + ' | <span style="color:var(--red)">Missing in DB: ' + (data.ib_only_count || 0) + '</span>';
 
-  var theadId = prefix + '-thead';
-  document.getElementById(theadId).innerHTML =
-    '<tr>'
-    + '<th style="width:170px">Time</th>'
-    + '<th style="width:100px">Status</th>'
-    + '<th style="width:220px">DB OHLC</th>'
-    + '<th style="width:220px">IB OHLC</th>'
-    + '<th style="width:140px">Diffs</th>'
-    + '</tr>';
-
   var rows = [];
-  if (data.mismatches && data.mismatches.length) {
-    data.mismatches.forEach(function(m) {
-      rows.push('<tr>'
-        + '<td>' + tsToLocal(m.time) + '</td>'
+  var mismatches = data.mismatches || [];
+  var ibOnly = data.ib_only || [];
+  var hasIssues = mismatches.length > 0 || ibOnly.length > 0;
+
+  if (hasIssues) {
+    // Header with select-all checkbox
+    document.getElementById('v-thead').innerHTML =
+      '<tr>'
+      + '<th style="width:32px"><input type="checkbox" id="v-chk-all" title="Select / deselect all" checked/></th>'
+      + '<th style="width:160px">Time</th>'
+      + '<th style="width:90px">Status</th>'
+      + '<th style="width:200px">DB OHLCV</th>'
+      + '<th style="width:200px">IB OHLCV</th>'
+      + '<th style="width:160px">Diffs</th>'
+      + '</tr>';
+
+    // Mismatch rows
+    mismatches.forEach(function(m) {
+      var alreadyFixed = _vFixedTs.has(m.time);
+      var diffKeys = Object.keys(m.diffs || {});
+      var dbVol = m.db ? fmtVol(m.db.volume) : '—';
+      var ibVol = m.ib ? fmtVol(m.ib.volume) : '—';
+      rows.push('<tr data-ts="' + m.time + '">'
+        + '<td><input type="checkbox" class="v-row-chk" data-ts="' + m.time + '"'
+        + (alreadyFixed ? '' : ' checked') + (alreadyFixed ? ' disabled' : '') + '/></td>'
+        + '<td>' + tsToLocal(m.time) + (alreadyFixed ? ' <span style="color:var(--green)">✅</span>' : '') + '</td>'
         + '<td class="down">⚠ Mismatch</td>'
-        + '<td class="num">O:' + fmtNum(m.db.open) + ' H:' + fmtNum(m.db.high)
-        + ' L:' + fmtNum(m.db.low) + ' C:' + fmtNum(m.db.close) + '</td>'
-        + '<td class="num">O:' + fmtNum(m.ib.open) + ' H:' + fmtNum(m.ib.high)
-        + ' L:' + fmtNum(m.ib.low) + ' C:' + fmtNum(m.ib.close) + '</td>'
-        + '<td class="warn">' + Object.keys(m.diffs || {}).join(', ') + '</td>'
+        + '<td class="num" style="font-size:11px">'
+        + 'O:' + fmtNum(m.db.open) + ' H:' + fmtNum(m.db.high)
+        + ' L:' + fmtNum(m.db.low) + ' C:' + fmtNum(m.db.close)
+        + ' V:' + dbVol + '</td>'
+        + '<td class="num" style="font-size:11px">'
+        + 'O:' + fmtNum(m.ib.open) + ' H:' + fmtNum(m.ib.high)
+        + ' L:' + fmtNum(m.ib.low) + ' C:' + fmtNum(m.ib.close)
+        + ' V:' + ibVol + '</td>'
+        + '<td class="warn">' + diffKeys.join(', ') + '</td>'
         + '</tr>');
     });
-  }
-  var ibOnly = data.ib_only || [];
-  if (ibOnly.length) {
+
+    // IB-only (missing) rows
     ibOnly.forEach(function(b) {
-      rows.push('<tr>'
-        + '<td>' + tsToLocal(b.time) + '</td>'
+      var alreadyFixed = _vFixedTs.has(b.time);
+      rows.push('<tr data-ts="' + b.time + '">'
+        + '<td><input type="checkbox" class="v-row-chk" data-ts="' + b.time + '"'
+        + (alreadyFixed ? '' : ' checked') + (alreadyFixed ? ' disabled' : '') + '/></td>'
+        + '<td>' + tsToLocal(b.time) + (alreadyFixed ? ' <span style="color:var(--green)">✅</span>' : '') + '</td>'
         + '<td class="down">❌ Missing</td>'
         + '<td>—</td>'
-        + '<td class="num">O:' + fmtNum(b.open) + ' H:' + fmtNum(b.high)
-        + ' L:' + fmtNum(b.low) + ' C:' + fmtNum(b.close) + '</td>'
-        + '<td>' + (isFixed ? '✅ Fixed' : 'Need fix') + '</td>'
+        + '<td class="num" style="font-size:11px">'
+        + 'O:' + fmtNum(b.open) + ' H:' + fmtNum(b.high)
+        + ' L:' + fmtNum(b.low) + ' C:' + fmtNum(b.close)
+        + ' V:' + fmtVol(b.volume) + '</td>'
+        + '<td class="dim">Need fix</td>'
         + '</tr>');
     });
+
+    document.getElementById('v-tbody').innerHTML = rows.join('');
+
+    // Wire up select-all checkbox
+    document.getElementById('v-chk-all').addEventListener('change', function() {
+      var checked = this.checked;
+      document.querySelectorAll('.v-row-chk:not([disabled])').forEach(function(c) {
+        c.checked = checked;
+      });
+    });
+
+    // Show Data Fix button
+    document.getElementById('v-fix-btn').style.display = '';
+
+  } else {
+    // No issues
+    document.getElementById('v-thead').innerHTML =
+      '<tr>'
+      + '<th style="width:160px">Time</th>'
+      + '<th style="width:90px">Status</th>'
+      + '<th style="width:200px">DB OHLCV</th>'
+      + '<th style="width:200px">IB OHLCV</th>'
+      + '<th style="width:160px">Diffs</th>'
+      + '</tr>';
+    document.getElementById('v-tbody').innerHTML =
+      '<tr><td colspan="5"><div class="empty-msg">No mismatches — data is clean ✅</div></td></tr>';
+    document.getElementById('v-fix-btn').style.display = 'none';
+  }
+}
+
+// ── Data Fix (selective — only checked rows) ───────────────────────────────
+function runFix() {
+  if (!_vLastResult) {
+    showToast('Run Validate first', 'warn');
+    return;
   }
 
-  var tbody = document.getElementById(prefix + '-tbody');
-  tbody.innerHTML = rows.length ? rows.join('')
-    : '<tr><td colspan="5"><div class="empty-msg">No mismatches — data is clean ✅</div></td></tr>';
-}
+  // Collect selected timestamps
+  var selectedTs = [];
+  document.querySelectorAll('.v-row-chk:checked').forEach(function(c) {
+    selectedTs.push(parseInt(c.dataset.ts));
+  });
 
+  if (selectedTs.length === 0) {
+    showToast('No rows selected', 'warn');
+    return;
+  }
 
+  var symbol = document.getElementById('v-symbol').value;
+  var timeframe = document.getElementById('v-timeframe').value;
+  var fromDate = document.getElementById('v-from').value;
+  var toDate = document.getElementById('v-to').value;
 
-
-/* ═══════════════════════════════════════════════════════════════════════════
-   DATA FIX TAB
-   ═══════════════════════════════════════════════════════════════════════════ */
-function _fParams() {
-  var symbol = document.getElementById('f-symbol').value;
-  var timeframe = document.getElementById('f-timeframe').value;
-  var p = new URLSearchParams({ symbol: symbol, timeframe: timeframe });
-  var from = document.getElementById('f-from').value;
-  var to = document.getElementById('f-to').value;
-  if (from) p.set('from_dt', from);
-  if (to) p.set('to_dt', to);
-  return { symbol: symbol, timeframe: timeframe, params: p };
-}
-
-// ── Fix from IB ────────────────────────────────────────────────────────────
-function runFix() {
-  var _ref = _fParams();
-  if (!confirm('Fix bars for ' + _ref.symbol + '/' + _ref.timeframe + '? This will overwrite mismatched bars with IB data.')) return;
-
-  var summary = document.getElementById('f-summary');
+  var summary = document.getElementById('v-summary');
   summary.style.display = '';
-  summary.innerHTML = '⏳ Validating & fixing…';
+  summary.innerHTML = '⏳ Fixing ' + selectedTs.length + ' bar(s) from IB cache…';
 
-  fetch('/api/data/fix?' + _ref.params.toString(), { method: 'POST' })
+  var body = {
+    symbol: symbol,
+    timeframe: timeframe,
+    timestamps: selectedTs,
+  };
+  if (fromDate) body.from_dt = fromDate;
+  if (toDate)   body.to_dt   = toDate;
+
+  fetch('/api/data/fix', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
     .then(function(r) { return r.json(); })
     .then(function(data) {
-      _renderValidation(data, true, 'f');
+      // Mark fixed timestamps so they show the green tick on re-render
+      selectedTs.forEach(function(ts) { _vFixedTs.add(ts); });
+
+      // Update the last result so re-render reflects which are fixed
+      _renderValidation(_vLastResult);
+
+      summary.style.display = '';
+      summary.innerHTML =
+        '<span style="color:var(--green)">✅ Fixed ' + (data.fixed_count || 0) + ' bar(s)</span>'
+        + ' — DB: ' + (data.db_count || 0)
+        + ' | IB: ' + (data.ib_count || 0)
+        + ' | Remaining mismatches: ' + ((data.mismatch_count || 0) - (data.fixed_count || 0 > 0 ? selectedTs.length : 0));
+
       showToast('Fixed ' + (data.fixed_count || 0) + ' bars', 'success');
+
+      // Hide fix button if nothing left to fix
+      var remaining = document.querySelectorAll('.v-row-chk:not([disabled])').length;
+      if (remaining === 0) {
+        document.getElementById('v-fix-btn').style.display = 'none';
+      }
     })
     .catch(function(e) {
       summary.innerHTML = '❌ ' + e.message;
@@ -1026,7 +1085,7 @@ function runFix() {
 function runDeleteRealtime() {
   if (!confirm('Delete ALL realtime bars from the database? This cannot be undone.')) return;
 
-  var summary = document.getElementById('f-summary');
+  var summary = document.getElementById('v-summary');
   summary.style.display = '';
   summary.innerHTML = '⏳ Deleting realtime bars…';
 
@@ -1034,12 +1093,6 @@ function runDeleteRealtime() {
     .then(function(r) { return r.json(); })
     .then(function(data) {
       summary.innerHTML = '🗑 Deleted <span style="color:var(--red)">' + data.deleted + '</span> realtime bars';
-
-      document.getElementById('f-thead').innerHTML =
-        '<tr><th>Result</th></tr>';
-      document.getElementById('f-tbody').innerHTML =
-        '<tr><td>Deleted ' + data.deleted + ' bars with source="' + data.source + '"</td></tr>';
-
       showToast('Deleted ' + data.deleted + ' realtime bars', 'success');
     })
     .catch(function(e) {
@@ -1052,7 +1105,7 @@ function runDeleteRealtime() {
 function runValidateAll() {
   if (!confirm('Validate ALL symbol/timeframe pairs against IB? This may take a while.')) return;
 
-  var summary = document.getElementById('f-summary');
+  var summary = document.getElementById('v-summary');
   summary.style.display = '';
   summary.innerHTML = '⏳ Validating all pairs… this may take a while';
 
@@ -1064,20 +1117,17 @@ function runValidateAll() {
         + ' | Total mismatches: <span style="color:var(--orange)">' + data.total_mismatches + '</span>'
         + ' | Fixed: <span style="color:var(--green)">' + data.total_fixed + '</span>';
 
-      document.getElementById('f-thead').innerHTML =
+      document.getElementById('v-thead').innerHTML =
         '<tr>'
         + '<th style="width:100px">Symbol</th>'
         + '<th style="width:100px">Timeframe</th>'
-        + '<th style="width:100px">DB Count</th>'
-        + '<th style="width:100px">IB Count</th>'
         + '<th style="width:120px">Mismatches</th>'
-        + '<th style="width:100px">Fixed</th>'
         + '</tr>';
 
       var details = data.details || [];
-      var tbody = document.getElementById('f-tbody');
+      var tbody = document.getElementById('v-tbody');
       if (details.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="6"><div class="empty-msg">No pairs found in database</div></td></tr>';
+        tbody.innerHTML = '<tr><td colspan="3"><div class="empty-msg">No pairs found in database</div></td></tr>';
         return;
       }
       tbody.innerHTML = details.map(function(d) {
@@ -1085,10 +1135,7 @@ function runValidateAll() {
         return '<tr>'
           + '<td>' + (d.symbol || '') + '</td>'
           + '<td>' + (d.timeframe || '') + '</td>'
-          + '<td class="num">' + (d.db_count || 0) + '</td>'
-          + '<td class="num">' + (d.ib_count || 0) + '</td>'
           + '<td class="num ' + mcls + '">' + (d.total_mismatches || 0) + '</td>'
-          + '<td class="num">' + (d.total_fixed || 0) + '</td>'
           + '</tr>';
       }).join('');
 
