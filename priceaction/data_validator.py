@@ -216,8 +216,8 @@ async def get_ib_bars_with_cache(
             if gap_start is not None:
                 missing_ranges.append((gap_start, gap_end))
                 gap_start = None
-    if gap_start is not None:
-        missing_ranges.append((gap_start, expected[-1] if expected else aligned_to))
+    if gap_start is not None and expected:
+        missing_ranges.append((gap_start, expected[-1]))
 
     # Merge adjacent/overlapping ranges (with a 1-interval buffer to avoid gaps at edges)
     merged: List[Tuple[int, int]] = []
