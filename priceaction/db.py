@@ -236,6 +236,28 @@ def init_db() -> None:
                 PRIMARY KEY (symbol, timeframe)
             )
         """)
+        # ── IB fetch cache table — raw bars fetched from IB, never modified ───
+        # Used to avoid redundant IB requests across validate/fix cycles.
+        # Primary purpose: performance & rate-limit protection, especially for
+        # large-range validation scenarios.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS ib_fetch_cache (
+                symbol     TEXT    NOT NULL,
+                timeframe  TEXT    NOT NULL,
+                ts         INTEGER NOT NULL,
+                open       REAL    NOT NULL,
+                high       REAL    NOT NULL,
+                low        REAL    NOT NULL,
+                close      REAL    NOT NULL,
+                volume     REAL    NOT NULL,
+                fetched_at INTEGER NOT NULL,
+                PRIMARY KEY (symbol, timeframe, ts)
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ib_cache_sym_tf_ts "
+            "ON ib_fetch_cache (symbol, timeframe, ts)"
+        )
     logger.info("Database ready: %s", _DB_PATH)
 
 
@@ -376,6 +398,70 @@ def get_coverage() -> List[dict]:
         {"symbol": r[0], "timeframe": r[1], "min_ts": r[2], "max_ts": r[3], "count": r[4]}
         for r in rows
     ]
+
+
+# ─── IB Fetch Cache ───────────────────────────────────────────────────────────
+# Raw bars fetched from IB, kept as a local cache to avoid redundant IB requests.
+# Only used for caching purposes — never written to by any other logic.
+
+def insert_ib_cache_bars(symbol: str, timeframe: str, bars: List[dict]) -> int:
+    """Insert or replace bars into the IB fetch cache. Returns row count."""
+    if not bars:
+        return 0
+    import time as _time
+    now_ts = int(_time.time())
+    rows = [
+        (symbol, timeframe,
+         b["time"], b["open"], b["high"], b["low"], b["close"], b["volume"],
+         now_ts)
+        for b in bars
+    ]
+    with _conn() as conn:
+        conn.executemany(
+            "INSERT OR REPLACE INTO ib_fetch_cache "
+            "(symbol, timeframe, ts, open, high, low, close, volume, fetched_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            rows,
+        )
+    return len(rows)
+
+
+def get_ib_cache_bars(
+    symbol: str,
+    timeframe: str,
+    from_ts: int = 0,
+    to_ts: int = 9_999_999_999,
+) -> List[dict]:
+    """Return cached IB bars in [from_ts, to_ts] sorted ascending."""
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT ts, open, high, low, close, volume FROM ib_fetch_cache "
+            "WHERE symbol=? AND timeframe=? AND ts>=? AND ts<=? "
+            "ORDER BY ts",
+            (symbol, timeframe, from_ts, to_ts),
+        ).fetchall()
+    return [
+        {"time": r[0], "open": r[1], "high": r[2],
+         "low": r[3], "close": r[4], "volume": r[5]}
+        for r in rows
+    ]
+
+
+def get_ib_cache_coverage(
+    symbol: str,
+    timeframe: str,
+    from_ts: int,
+    to_ts: int,
+) -> List[int]:
+    """Return sorted list of cached timestamps for (symbol, timeframe) in range."""
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT ts FROM ib_fetch_cache "
+            "WHERE symbol=? AND timeframe=? AND ts>=? AND ts<=? "
+            "ORDER BY ts",
+            (symbol, timeframe, from_ts, to_ts),
+        ).fetchall()
+    return [r[0] for r in rows]
 
 
 def find_gaps(

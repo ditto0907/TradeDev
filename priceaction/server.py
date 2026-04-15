@@ -1115,7 +1115,8 @@ async def api_validate_bars(
     to_dt: Optional[str] = None,
 ):
     """Validate DB bars against IB historical data for a time range.
-    Returns mismatches without fixing them."""
+    Returns mismatches without fixing them.
+    IB data is fetched via the local ib_fetch_cache to reduce IB requests."""
     # Convert datetime strings if provided
     if from_dt and not from_ts:
         from_ts = _parse_dt_eastern(from_dt)
@@ -1134,20 +1135,31 @@ async def api_validate_bars(
     return result
 
 
+class FixBarsRequest(BaseModel):
+    symbol: str = "MES"
+    timeframe: str = "5min"
+    from_ts: Optional[int] = None
+    to_ts: Optional[int] = None
+    from_dt: Optional[str] = None
+    to_dt: Optional[str] = None
+    timestamps: Optional[List[int]] = None  # subset of timestamps to fix; None = fix all
+
+
 @app.post("/api/data/fix")
-async def api_fix_bars(
-    symbol: str = "MES",
-    timeframe: str = "5min",
-    from_ts: Optional[int] = None,
-    to_ts: Optional[int] = None,
-    from_dt: Optional[str] = None,
-    to_dt: Optional[str] = None,
-):
-    """Validate and fix DB bars: overwrite mismatched bars with IB data."""
-    if from_dt and not from_ts:
-        from_ts = _parse_dt_eastern(from_dt)
-    if to_dt and not to_ts:
-        to_ts = _parse_dt_eastern(to_dt)
+async def api_fix_bars(req: FixBarsRequest):
+    """Fix DB bars using IB data (from local ib_fetch_cache when available).
+
+    *timestamps*: optional list of Unix timestamps to restrict fixing to only
+    those specific bars (selected rows from the UI).  When omitted every
+    mismatch/missing bar in the range is fixed.
+    """
+    from_ts = req.from_ts
+    to_ts   = req.to_ts
+
+    if req.from_dt and not from_ts:
+        from_ts = _parse_dt_eastern(req.from_dt)
+    if req.to_dt and not to_ts:
+        to_ts = _parse_dt_eastern(req.to_dt)
 
     if from_ts is None:
         from_ts = int(time.time()) - 86400
@@ -1155,7 +1167,11 @@ async def api_fix_bars(
         to_ts = int(time.time())
 
     f = fetcher if (fetcher._ib_ready and fetcher.ib and fetcher.ib.isConnected()) else None
-    result = await data_validator.fix_bars(symbol, timeframe, from_ts, to_ts, fetcher=f)
+    result = await data_validator.fix_bars(
+        req.symbol, req.timeframe, from_ts, to_ts,
+        fetcher=f,
+        timestamps=req.timestamps,
+    )
     return result
 
 
