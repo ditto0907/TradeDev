@@ -488,21 +488,18 @@ async def lifespan(app: FastAPI):
 
     # ── Step 1: init DB and load historical bars (fast, ~100ms) ──────────────
     db.init_db()
-    stored = db.get_bars(MES_SYM, "5min")
-    if stored:
-        fetcher.bars["5min"] = stored[-config.MAX_BARS_IN_MEMORY:]
-        logger.info("Loaded %d 5min bars from DB", len(fetcher.bars["5min"]))
 
-    # ── Step 1b: load extra symbols' 5min bars from DB (same pattern as MES) ─
-    for _sym_cfg in config.EXTRA_SYMBOLS:
-        _sym_name = _sym_cfg["symbol"]
-        _extra_bars = db.get_bars(_sym_name, "5min")
-        if _extra_bars:
-            if _sym_name not in fetcher._symbol_bars:
-                fetcher._symbol_bars[_sym_name] = {}
-            fetcher._symbol_bars[_sym_name]["5min"] = _extra_bars[-config.MAX_BARS_IN_MEMORY:]
+    # Load ALL symbols (including MES) through the unified per-symbol store
+    all_symbols = [MES_SYM] + [cfg["symbol"] for cfg in config.EXTRA_SYMBOLS]
+    for _sym_name in all_symbols:
+        fetcher._ensure_symbol_state(_sym_name)
+        _sym_bars = db.get_bars(_sym_name, "5min")
+        if _sym_bars:
+            fetcher._symbol_bars[_sym_name]["5min"] = _sym_bars[-config.MAX_BARS_IN_MEMORY:]
             logger.info("Loaded %d 5min bars for %s from DB",
                         len(fetcher._symbol_bars[_sym_name]["5min"]), _sym_name)
+    # Sync legacy self.bars for backward compat
+    fetcher._sync_legacy_bars()
 
     # ── Step 2: seed _prev_completed_bar from saved realtime bars (crash recovery)
     from ib_data_fetcher import _key_to_ib as _k2ib
@@ -520,12 +517,10 @@ async def lifespan(app: FastAPI):
         if rt_bar["time"] == _current_bar_ts:
             _prev_completed_bar[(rt_sym, rt_tf)] = rt_bar
             logger.info("Restored realtime bar %s/%s ts=%s from DB", rt_sym, rt_tf, rt_bar["time"])
-            # Pre-seed fetcher._rt_current for extra symbols so tick assembly
-            # starts from the saved OHLC (mirrors _seed_rt_current for MES).
-            if rt_sym != MES_SYM:
-                fetcher._rt_current[f"{rt_sym}:{rt_tf}"] = rt_bar
-                logger.debug("Pre-seeded _rt_current %s/%s ts=%s from realtime_bars",
-                             rt_sym, rt_tf, rt_bar["time"])
+            # Pre-seed fetcher._rt_current for all symbols (unified approach)
+            fetcher._rt_current[f"{rt_sym}:{rt_tf}"] = rt_bar
+            logger.debug("Pre-seeded _rt_current %s/%s ts=%s from realtime_bars",
+                         rt_sym, rt_tf, rt_bar["time"])
 
     # ── Step 3: initial price-action analysis from DB data ───────────────────
     global _latest_analysis
