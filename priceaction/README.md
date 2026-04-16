@@ -18,14 +18,15 @@ graph TB
     subgraph Backend["FastAPI 后端 :8000"]
         SRV["server.py<br/>REST API + WebSocket + 生命周期"]
         OM["order_manager.py<br/>订单管理"]
-        IDF["ib_data_fetcher.py<br/>行情获取 & 实时推流"]
+        IDF["ib_data_fetcher.py<br/>行情获取 & 实时推流 (统一多品种)"]
         PA["price_action_analyzer.py<br/>S/R & 市场周期分析"]
-        DB["db.py<br/>SQLite 持久化"]
+        DB["db.py<br/>SQLite 持久化 (含入库验证)"]
+        TC["trading_calendar.py<br/>交易日历 & 会话管理"]
         GS["google_sheets_sync.py<br/>Google Sheets 同步"]
         TLP["trade_log_parser.py<br/>交易日志解析"]
         TD["test_data.py<br/>模拟数据生成"]
         CFG["config.py<br/>配置"]
-        DV2["data_validator.py<br/>数据校验"]
+        DV2["data_validator.py<br/>数据校验 (三层验证)"]
         SB2["strategy_backtest.py<br/>策略回测"]
     end
 

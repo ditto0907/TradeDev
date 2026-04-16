@@ -30,12 +30,13 @@ graph TB
 
     subgraph 服务层 ["服务层 (Application Server)"]
         SRV["FastAPI server.py"]
-        FET["ib_data_fetcher.py<br/>(IBDataFetcher)"]
+        FET["ib_data_fetcher.py<br/>(IBDataFetcher — unified)"]
         PA["price_action_analyzer.py<br/>(S/R Analysis)"]
         OM["order_manager.py<br/>(OrderManager)"]
         GS["google_sheets_sync.py"]
-        VAL["data_validator.py"]
-        MEM["In-Memory Cache<br/>fetcher.bars[5min]"]
+        VAL["data_validator.py<br/>(3-level validation)"]
+        CAL["trading_calendar.py<br/>(Session Calendar)"]
+        MEM["In-Memory Cache<br/>_symbol_bars[sym][key]"]
     end
 
     subgraph 存储层 ["存储层 (Storage)"]
@@ -58,6 +59,8 @@ graph TB
     OM -- "order status" --> SRV
     SRV -- "upload" --> GS
     VAL -- "validate/fix" --> DB
+    CAL -- "gap classify<br/>session check" --> SRV
+    CAL -- "expected bars" --> VAL
 
     style IB fill:#e1f5fe,stroke:#0288d1
     style DB fill:#fff3e0,stroke:#f57c00
@@ -90,9 +93,9 @@ sequenceDiagram
     Main->>DB: db.init_db()
     Note right of DB: CREATE TABLE IF NOT EXISTS<br/>~5ms
 
-    Main->>DB: load MES 5min bars
-    DB-->>Cache: bars → fetcher.bars["5min"]
-    Note right of Cache: 全量加载到内存<br/>~50ms
+    Main->>DB: load ALL symbols 5min bars (unified loop)
+    DB-->>Cache: bars → fetcher._symbol_bars[sym]["5min"]
+    Note right of Cache: 统一加载所有品种到内存<br/>~50ms
 
     Main->>PA: run initial S/R analysis
     Note right of PA: 基于 DB 中已有数据<br/>计算 Support/Resistance
