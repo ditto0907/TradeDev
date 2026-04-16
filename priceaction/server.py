@@ -753,6 +753,7 @@ async def get_history(
     now_ts = int(time.time())
     fetch_ranges: list = []            # [(from, to), ...]
     right_gap_index: int = -1          # index into fetch_ranges for cooldown
+    left_gap_index:  int = -1          # index into fetch_ranges for left-gap cooldown
 
     if earliest_db is None:
         # ---- Case 1: no data at all for this symbol / timeframe -------------
@@ -766,12 +767,22 @@ async def get_history(
     else:
         # ---- Case 2: left gap (chart scrolled past oldest bar) --------------
         if from_ts < earliest_db:
-            fetch_ranges.append((from_ts, earliest_db))
-            logger.info(
-                "[%s/%s] Left gap: request starts before DB coverage "
-                "(from=%s < earliest_db=%s)",
-                sym, key, from_ts, earliest_db,
-            )
+            left_cooldown_key = f"left_{sym}_{key}"
+            left_cooldown_until = _ib_fetch_cooldown.get(left_cooldown_key, 0)
+            if now_ts >= left_cooldown_until:
+                left_gap_index = len(fetch_ranges)
+                fetch_ranges.append((from_ts, earliest_db))
+                logger.info(
+                    "[%s/%s] Left gap: request starts before DB coverage "
+                    "(from=%s < earliest_db=%s)",
+                    sym, key, from_ts, earliest_db,
+                )
+            else:
+                logger.debug(
+                    "[%s/%s] Left gap detected but in cooldown "
+                    "(%ds remaining) — skipping IB fetch",
+                    sym, key, left_cooldown_until - now_ts,
+                )
 
         # ---- Case 4: middle hole (request falls entirely inside a DB gap) ---
         if (not bars
@@ -845,6 +856,7 @@ async def get_history(
                     any_fetched = True
                     _ib_fetch_cooldown.pop((sym, key), None)
                     _ib_fetch_cooldown.pop(f"mid_{sym}_{key}_{f_from}", None)
+                    _ib_fetch_cooldown.pop(f"left_{sym}_{key}", None)
                 else:
                     logger.info(
                         "[%s/%s] IB returned 0 bars for range [%s→%s]",
@@ -852,6 +864,12 @@ async def get_history(
                     )
                     if idx == right_gap_index:
                         _ib_fetch_cooldown[(sym, key)] = now_ts + _IB_COOLDOWN_NO_DATA
+                    if idx == left_gap_index:
+                        _ib_fetch_cooldown[f"left_{sym}_{key}"] = now_ts + _IB_COOLDOWN_NO_DATA
+                        logger.info(
+                            "[%s/%s] Left gap: IB returned no data — cooldown %ds",
+                            sym, key, _IB_COOLDOWN_NO_DATA,
+                        )
             except Exception as e:
                 logger.warning(
                     "[%s/%s] IB fetch failed for range [%s→%s]: %s",
@@ -859,6 +877,8 @@ async def get_history(
                 )
                 if idx == right_gap_index:
                     _ib_fetch_cooldown[(sym, key)] = now_ts + _IB_COOLDOWN_ERROR
+                if idx == left_gap_index:
+                    _ib_fetch_cooldown[f"left_{sym}_{key}"] = now_ts + _IB_COOLDOWN_ERROR
     elif fetch_ranges:
         logger.debug(
             "[%s/%s] Data gaps detected but IB not ready — skipping fetch",
@@ -1885,7 +1905,7 @@ async def api_data_query(
         offset = (max(1, page) - 1) * page_size
         data_sql = (
             f"SELECT symbol, timeframe, ts, open, high, low, close, volume, source "
-            f"FROM bars{where_sql} ORDER BY ts DESC LIMIT ? OFFSET ?"
+            f"FROM bars{where_sql} ORDER BY ts ASC LIMIT ? OFFSET ?"
         )
         rows = conn.execute(data_sql, params + [page_size, offset]).fetchall()
 
