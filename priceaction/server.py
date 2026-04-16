@@ -699,7 +699,7 @@ async def get_history(
     symbol:    str = Query("MES"),
     resolution: str = Query("5"),
     from_ts:   int = Query(0,           alias="from"),
-    to_ts:     int = Query(9_999_999_999, alias="to"),
+    to_ts:     int = Query(db.MAX_TIMESTAMP, alias="to"),
     countback: int = Query(None),
 ):
     """
@@ -1132,7 +1132,7 @@ async def skill_get_bars(
                 status_code=400
             )
     elif to_ts is None:
-        to_ts = 9_999_999_999
+        to_ts = db.MAX_TIMESTAMP
     
     # Debug logging
     logger.info(f"skill_get_bars: sym={sym}, key={key}, from_ts={from_ts}, to_ts={to_ts}")
@@ -1701,7 +1701,7 @@ class BacktestRequest(BaseModel):
     symbol:             str   = "MES"
     timeframe:          str   = "5min"
     from_ts:            int   = 0
-    to_ts:              int   = 9_999_999_999
+    to_ts:              int   = db.MAX_TIMESTAMP
     ibs_threshold:      float = 0.70
     rr_ratio:           float = 1.0
     use_context_filter: bool  = True
@@ -1935,7 +1935,7 @@ async def api_data_integrity(
     report = db.get_integrity_report(
         symbol, timeframe,
         from_ts=from_ts or 0,
-        to_ts=to_ts or 9_999_999_999,
+        to_ts=to_ts or db.MAX_TIMESTAMP,
     )
     return report
 
@@ -2001,7 +2001,7 @@ async def api_fix_ohlcv(
     fixed = db.fix_ohlcv_violations(
         symbol, timeframe,
         from_ts=from_ts or 0,
-        to_ts=to_ts or 9_999_999_999,
+        to_ts=to_ts or db.MAX_TIMESTAMP,
     )
     return {"fixed": fixed, "symbol": symbol, "timeframe": timeframe}
 
@@ -2029,7 +2029,7 @@ async def api_calendar_gaps(
 
     bars = db.get_bars(symbol, timeframe,
                        from_ts=from_ts or 0,
-                       to_ts=to_ts or 9_999_999_999)
+                       to_ts=to_ts or db.MAX_TIMESTAMP)
     if len(bars) < 2:
         return {"symbol": symbol, "timeframe": timeframe, "gaps": [], "data_gaps": 0}
 

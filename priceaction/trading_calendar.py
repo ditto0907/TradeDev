@@ -69,9 +69,14 @@ def _build_cme_sessions() -> Dict[int, List[SessionWindow]]:
     # For intraday bar classification, we represent this as continuous windows:
     # Each weekday has TWO segments:
     #   1. 00:00-17:00 (continuation from previous evening)
-    #   2. 18:00-23:59 (start of new session)
-    # Sunday only has segment 2 (18:00-23:59)
+    #   2. 18:00-23:59:59 (start of new session)
+    # Sunday only has segment 2 (18:00-23:59:59)
     # Friday only has segment 1 (00:00-17:00)
+    #
+    # Note: 23:59:59 is used instead of 00:00 to avoid midnight-wrapping
+    # complexity. Bars starting at 23:55 are included in the current day's
+    # session — their 5-minute window ends at 00:00 which falls into the
+    # next calendar day's 00:00-17:00 segment (continuous coverage).
     
     return {
         0: [(time(0, 0), time(17, 0)), (time(18, 0), time(23, 59, 59))],  # Monday

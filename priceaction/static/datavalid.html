@@ -1356,7 +1356,7 @@ function runFixOHLCV() {
   var from = dateToTs(document.getElementById('i-from').value, false);
   var to   = dateToTs(document.getElementById('i-to').value, true);
 
-  if (!confirm('Fix OHLCV violations for ' + sym + '/' + tf + '? This will swap high/low and delete invalid bars.')) return;
+  if (!confirm('Fix OHLCV violations for ' + sym + '/' + tf + '? This will swap high/low, clamp open/close to [low,high], and delete bars with non-positive prices.')) return;
 
   var summary = document.getElementById('i-summary');
   summary.style.display = '';

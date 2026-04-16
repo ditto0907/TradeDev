@@ -26,6 +26,10 @@ logger = logging.getLogger(__name__)
 
 _DB_PATH = Path(__file__).parent / "data" / "tradedev.db"
 
+# Sentinel value for "no upper bound" in timestamp queries.
+# Represents a far-future Unix timestamp (~2286).
+MAX_TIMESTAMP = 9_999_999_999
+
 # ── Connection Pool ───────────────────────────────────────────────────────────
 # Reuse connections to avoid "too many open files" with high-frequency operations.
 # SQLite WAL mode allows multiple readers + one writer concurrently.
@@ -345,7 +349,7 @@ def get_bars(
     symbol: str,
     timeframe: str,
     from_ts: int = 0,
-    to_ts: int = 9_999_999_999,
+    to_ts: int = MAX_TIMESTAMP,
     limit: Optional[int] = None,
 ) -> List[dict]:
     """Return bars in [from_ts, to_ts] sorted ascending by timestamp."""
@@ -468,7 +472,7 @@ def get_ib_cache_bars(
     symbol: str,
     timeframe: str,
     from_ts: int = 0,
-    to_ts: int = 9_999_999_999,
+    to_ts: int = MAX_TIMESTAMP,
 ) -> List[dict]:
     """Return cached IB bars in [from_ts, to_ts] sorted ascending."""
     with _conn() as conn:
@@ -644,7 +648,7 @@ def get_bar_at(symbol: str, timeframe: str, ts: int) -> Optional[dict]:
 
 
 def get_integrity_report(symbol: str, timeframe: str,
-                         from_ts: int = 0, to_ts: int = 9_999_999_999) -> dict:
+                         from_ts: int = 0, to_ts: int = MAX_TIMESTAMP) -> dict:
     """Generate a data integrity report: counts, source breakdown, OHLCV violations."""
     with _conn() as conn:
         # Total count
@@ -699,7 +703,7 @@ def get_integrity_report(symbol: str, timeframe: str,
 
 
 def fix_ohlcv_violations(symbol: str, timeframe: str,
-                         from_ts: int = 0, to_ts: int = 9_999_999_999) -> int:
+                         from_ts: int = 0, to_ts: int = MAX_TIMESTAMP) -> int:
     """Fix bars where high < low by swapping. Delete bars with non-positive prices.
     Returns count of bars fixed or deleted."""
     fixed = 0
