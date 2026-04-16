@@ -665,44 +665,65 @@ function fmtVol(v) {
 
 // ── Table sorting ─────────────────────────────────────────────────────────
 var _sortState = {};
+var _sortInitialized = {};   // track which tables have handlers attached
 
-function initTableSort(tableId, data, renderFn) {
+function initTableSort(tableId, data, renderFn, defaultCol, defaultDir) {
   var thead = document.getElementById(tableId.replace('-table', '-thead'));
   if (!thead) return;
-  thead.querySelectorAll('th[data-col]').forEach(function(th) {
-    th.addEventListener('click', function() {
-      var col = th.dataset.col;
-      var key = tableId + ':' + col;
-      var dir = _sortState[key] === 'asc' ? 'desc' : 'asc';
 
-      // Reset all arrows in this table
-      thead.querySelectorAll('.sort-arrow').forEach(function(s) {
-        s.textContent = '⇅';
-        s.classList.remove('active');
+  // Avoid stacking duplicate click handlers on repeated calls
+  if (!_sortInitialized[tableId]) {
+    _sortInitialized[tableId] = true;
+    thead.querySelectorAll('th[data-col]').forEach(function(th) {
+      th.addEventListener('click', function() {
+        var col = th.dataset.col;
+        var key = tableId + ':' + col;
+        var dir = _sortState[key] === 'asc' ? 'desc' : 'asc';
+        _applySortUI(thead, tableId, col, dir);
+        _sortDataAndRender(tableId, data, col, dir, renderFn);
       });
-      var arrow = th.querySelector('.sort-arrow');
-      if (arrow) {
-        arrow.textContent = dir === 'asc' ? '▲' : '▼';
-        arrow.classList.add('active');
-      }
-      _sortState[tableId + ':col'] = col;
-      _sortState[key] = dir;
-
-      data.sort(function(a, b) {
-        var va = a[col], vb = b[col];
-        if (va == null) return 1;
-        if (vb == null) return -1;
-        var na = Number(va), nb = Number(vb);
-        if (!isNaN(na) && !isNaN(nb)) {
-          return dir === 'asc' ? na - nb : nb - na;
-        }
-        return dir === 'asc'
-          ? String(va).localeCompare(String(vb))
-          : String(vb).localeCompare(String(va));
-      });
-      renderFn(data);
     });
+  }
+
+  // Apply default sort on each data load
+  if (defaultCol && defaultDir) {
+    _applySortUI(thead, tableId, defaultCol, defaultDir);
+    _sortDataAndRender(tableId, data, defaultCol, defaultDir, renderFn);
+  }
+}
+
+function _applySortUI(thead, tableId, col, dir) {
+  // Reset all arrows in this table
+  thead.querySelectorAll('.sort-arrow').forEach(function(s) {
+    s.textContent = '⇅';
+    s.classList.remove('active');
   });
+  var th = thead.querySelector('th[data-col="' + col + '"]');
+  if (th) {
+    var arrow = th.querySelector('.sort-arrow');
+    if (arrow) {
+      arrow.textContent = dir === 'asc' ? '▲' : '▼';
+      arrow.classList.add('active');
+    }
+  }
+  _sortState[tableId + ':col'] = col;
+  _sortState[tableId + ':' + col] = dir;
+}
+
+function _sortDataAndRender(tableId, data, col, dir, renderFn) {
+  data.sort(function(a, b) {
+    var va = a[col], vb = b[col];
+    if (va == null) return 1;
+    if (vb == null) return -1;
+    var na = Number(va), nb = Number(vb);
+    if (!isNaN(na) && !isNaN(nb)) {
+      return dir === 'asc' ? na - nb : nb - na;
+    }
+    return dir === 'asc'
+      ? String(va).localeCompare(String(vb))
+      : String(vb).localeCompare(String(va));
+  });
+  renderFn(data);
 }
 
 
@@ -811,7 +832,7 @@ function queryData() {
       document.getElementById('q-prev').disabled = (_qPage <= 1);
       document.getElementById('q-next').disabled = (_qPage >= totalPages);
 
-      initTableSort('q-table', _qData, renderQueryTable);
+      initTableSort('q-table', _qData, renderQueryTable, 'time', 'asc');
     })
     .catch(function(e) {
       showToast('Query failed: ' + e.message, 'error');
