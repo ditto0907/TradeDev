@@ -28,7 +28,6 @@ from google_sheets_sync import GoogleSheetsSync
 from price_action_analyzer import PriceActionAnalyzer
 from order_manager import IBOrderManager
 from trade_log_parser import load_all_trades, parse_csv_content
-from test_data import generate_bars
 import strategy_backtest
 
 # ─── Logging Setup ─────────────────────────────────────────────────────────────
@@ -357,14 +356,6 @@ async def _ib_background_init():
     # Prefetch extra symbols in background (non-blocking)
     asyncio.create_task(_prefetch_extra_symbols(fetcher, ib_ok))
 
-    # Synthetic fallback only when NOTHING is available
-    if not ib_ok and not has_db_data:
-        logger.info("Loading synthetic test data (500 bars)…")
-        fetcher.bars["5min"] = generate_bars(n=500, bar_minutes=5)
-        db.insert_bars(MES_SYM, "5min", fetcher.bars["5min"],
-                       source="synthetic")
-        logger.info("Saved %d synthetic bars to DB", len(fetcher.bars["5min"]))
-
     # Real-time subscription
     if ib_ok:
         try:
@@ -402,6 +393,79 @@ async def _ib_background_init():
     logger.info("IB background initialization complete.")
 
 
+async def _ib_reconnect_loop():
+    """Background loop: retry IB connection every 60 s when disconnected.
+
+    Handles both the initial-startup failure case (all 3 connect attempts
+    timed out) and mid-session disconnects (e.g. TWS restart, network blip).
+    On successful reconnect it re-fetches missing bars, re-subscribes to
+    real-time, and recreates the order manager — so the server recovers
+    fully without a restart.
+    """
+    global _order_mgr
+    while True:
+        await asyncio.sleep(60)  # check every minute
+        try:
+            already_ok = (
+                fetcher._ib_ready
+                and fetcher.ib is not None
+                and fetcher.ib.isConnected()
+            )
+            if already_ok:
+                continue
+
+            logger.info("[IB Reconnect] IB not connected — retrying…")
+
+            # Clean up stale connection state
+            if fetcher.ib:
+                try:
+                    fetcher.ib.disconnect()
+                except Exception:
+                    pass
+            fetcher._ib_ready = False
+            fetcher._contract = None
+            fetcher._contract_cache.clear()
+
+            await fetcher.connect()
+
+            # Incremental history fetch (only bars we're missing)
+            since_5min = db.get_latest_ts(MES_SYM, "5min")
+            await fetcher.load_history(since_5min=since_5min)
+            if fetcher.bars["5min"]:
+                saved = db.insert_bars(MES_SYM, "5min", fetcher.bars["5min"],
+                                       source="ib_historical")
+                logger.info("[IB Reconnect] Saved %d new 5min bars to DB", saved)
+
+            # Realtime subscription (guard against duplicate callbacks)
+            if on_new_bar not in fetcher._new_bar_callbacks:
+                fetcher.add_new_bar_callback(on_new_bar)
+            await fetcher.subscribe_mktdata_all()
+            logger.info("[IB Reconnect] Real-time streaming resumed.")
+
+            # Order manager
+            _order_mgr = IBOrderManager(fetcher.ib, fetcher._contract)
+
+            def _on_order_status(trade):
+                asyncio.create_task(broadcast({
+                    "type":  "order_update",
+                    "order": IBOrderManager._trade_to_dict(trade),
+                }))
+                status = trade.orderStatus.status
+                if status in ("Cancelled", "ApiCancelled", "Inactive"):
+                    oid = trade.order.orderId
+                    if _order_mgr:
+                        _order_mgr._cancel_bracket_siblings(oid)
+            fetcher.ib.orderStatusEvent += _on_order_status
+
+            # Prefetch extra symbols now that IB is available
+            asyncio.create_task(_prefetch_extra_symbols(fetcher, True))
+
+            logger.info("[IB Reconnect] Reconnect complete — IB ready.")
+
+        except Exception as e:
+            logger.warning("[IB Reconnect] Attempt failed: %s", e)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _order_mgr
@@ -414,6 +478,17 @@ async def lifespan(app: FastAPI):
     if stored:
         fetcher.bars["5min"] = stored[-config.MAX_BARS_IN_MEMORY:]
         logger.info("Loaded %d 5min bars from DB", len(fetcher.bars["5min"]))
+
+    # ── Step 1b: load extra symbols' 5min bars from DB (same pattern as MES) ─
+    for _sym_cfg in config.EXTRA_SYMBOLS:
+        _sym_name = _sym_cfg["symbol"]
+        _extra_bars = db.get_bars(_sym_name, "5min")
+        if _extra_bars:
+            if _sym_name not in fetcher._symbol_bars:
+                fetcher._symbol_bars[_sym_name] = {}
+            fetcher._symbol_bars[_sym_name]["5min"] = _extra_bars[-config.MAX_BARS_IN_MEMORY:]
+            logger.info("Loaded %d 5min bars for %s from DB",
+                        len(fetcher._symbol_bars[_sym_name]["5min"]), _sym_name)
 
     # ── Step 2: seed _prev_completed_bar from saved realtime bars (crash recovery)
     from ib_data_fetcher import _key_to_ib as _k2ib
@@ -431,6 +506,12 @@ async def lifespan(app: FastAPI):
         if rt_bar["time"] == _current_bar_ts:
             _prev_completed_bar[(rt_sym, rt_tf)] = rt_bar
             logger.info("Restored realtime bar %s/%s ts=%s from DB", rt_sym, rt_tf, rt_bar["time"])
+            # Pre-seed fetcher._rt_current for extra symbols so tick assembly
+            # starts from the saved OHLC (mirrors _seed_rt_current for MES).
+            if rt_sym != MES_SYM:
+                fetcher._rt_current[f"{rt_sym}:{rt_tf}"] = rt_bar
+                logger.debug("Pre-seeded _rt_current %s/%s ts=%s from realtime_bars",
+                             rt_sym, rt_tf, rt_bar["time"])
 
     # ── Step 3: initial price-action analysis from DB data ───────────────────
     global _latest_analysis
@@ -441,12 +522,16 @@ async def lifespan(app: FastAPI):
     # ── Step 4: IB connect + fetch + realtime in background (non-blocking) ───
     _ib_init_task = asyncio.create_task(_ib_background_init())
 
+    # ── Step 5: Background reconnect loop (retries every 60 s if IB drops) ──
+    _ib_reconnect_task = asyncio.create_task(_ib_reconnect_loop())
+
     logger.info("Server ready to accept requests (DB-only mode).")
 
     yield   # ── server is running ────────────────────────────────────────────
 
     # ── Shutdown ──────────────────────────────────────────────────────────────
     logger.info("Shutting down…")
+    _ib_reconnect_task.cancel()
     sheets.flush_buffer()
     fetcher.unsubscribe_realtime()
     fetcher.disconnect()
@@ -632,9 +717,18 @@ async def get_history(
     bars = db.get_bars(sym, key, from_ts=from_ts, to_ts=to_ts)
     earliest_db = db.get_earliest_ts(sym, key)
     latest_db   = db.get_latest_ts(sym, key)
+    # Convert timestamps to exchange-local timezone for readable logging
+    import zoneinfo as _zi
+    _inst = config.INSTRUMENTS.get(sym)
+    _tz_log = _zi.ZoneInfo(_inst["timezone"]) if _inst else _zi.ZoneInfo("America/New_York")
+    def _fmt_ts(ts):
+        if ts is None: return "None"
+        return datetime.fromtimestamp(ts, tz=timezone.utc).astimezone(_tz_log).strftime("%m-%d %H:%M")
     logger.info(
         "[%s/%s] DB check: %d bars in range [%s→%s], DB coverage=[%s→%s]",
-        sym, key, len(bars), from_ts, to_ts, earliest_db, latest_db,
+        sym, key, len(bars),
+        _fmt_ts(from_ts), _fmt_ts(to_ts),
+        _fmt_ts(earliest_db), _fmt_ts(latest_db),
     )
 
     # ── Step 2: Determine missing ranges ─────────────────────────────────────
@@ -661,6 +755,30 @@ async def get_history(
                 "(from=%s < earliest_db=%s)",
                 sym, key, from_ts, earliest_db,
             )
+
+        # ---- Case 4: middle hole (request falls entirely inside a DB gap) ---
+        # When earliest_db <= from_ts AND latest_db >= to_ts but the DB
+        # returned 0 bars, the requested window sits in a hole between two
+        # data islands.  Neither the left-gap nor the right-gap condition
+        # fires in this scenario, so we must detect it explicitly and fetch
+        # the range synchronously so this request returns real data.
+        if (not bars
+                and not any(r[0] == from_ts for r in fetch_ranges)  # avoid dup
+                and earliest_db <= from_ts
+                and latest_db is not None
+                and latest_db >= to_ts):
+            capped_to = min(to_ts, now_ts)
+            cooldown_key = f"mid_{sym}_{key}_{from_ts}"
+            if now_ts >= _ib_fetch_cooldown.get(cooldown_key, 0):
+                # Pre-set cooldown so concurrent requests for the same range
+                # don't all trigger duplicate IB fetches.  Cleared on success.
+                _ib_fetch_cooldown[cooldown_key] = now_ts + 300  # 5 min
+                fetch_ranges.append((from_ts, capped_to))
+                logger.info(
+                    "[%s/%s] Middle hole: request [%s→%s] falls inside a DB gap "
+                    "(earliest_db=%s, latest_db=%s) — fetching from IB",
+                    sym, key, from_ts, to_ts, earliest_db, latest_db,
+                )
 
         # ---- Case 3: right gap (stale data, no real-time for this symbol) ---
         if latest_db is not None:
@@ -718,8 +836,9 @@ async def get_history(
                         sym, key, len(fetched), saved,
                     )
                     any_fetched = True
-                    # Clear cooldown on success
+                    # Clear cooldown on success (both right-gap and mid-hole keys)
                     _ib_fetch_cooldown.pop((sym, key), None)
+                    _ib_fetch_cooldown.pop(f"mid_{sym}_{key}_{f_from}", None)
                 else:
                     logger.info(
                         "[%s/%s] IB returned 0 bars for range [%s→%s]",
@@ -744,30 +863,106 @@ async def get_history(
             "[%s/%s] Data gaps detected but IB not ready — skipping fetch",
             sym, key,
         )
+        # Clear pre-set mid-hole cooldowns so the ranges retry immediately
+        # once IB reconnects (avoid blocking the reconnect loop for 5 min)
+        for r_from, _ in fetch_ranges:
+            _ib_fetch_cooldown.pop(f"mid_{sym}_{key}_{r_from}", None)
 
     # Re-query DB after successful fetches
     if any_fetched:
         bars = db.get_bars(sym, key, from_ts=from_ts, to_ts=to_ts)
         logger.info("[%s/%s] After IB fill: %d bars in range", sym, key, len(bars))
 
-    # ── Step 4: Detect & fill INTERNAL gaps in returned bars ─────────────────
+    # ── Step 4: Detect & fill INTERNAL gaps in returned bars (SYNC) ─────────
     # The left/right gap logic above only handles edges.  If the DB has holes
-    # in the middle (e.g. server was offline), trigger a background fill so
-    # the next request will have complete data.
+    # in the middle (e.g. server was offline), fill them synchronously so the
+    # frontend never receives data with gaps.
     if bars and len(bars) >= 2 and ib_ready:
         _internal_gap_cooldown_key = f"internal_{sym}_{key}"
         if now_ts >= _ib_fetch_cooldown.get(_internal_gap_cooldown_key, 0):
-            has_internal_gap = False
+            from datetime import timezone as _tz, timedelta as _td
+            _et = _tz(_td(hours=-4))
+            internal_gaps = []
             for i in range(1, len(bars)):
-                if bars[i]["time"] - bars[i - 1]["time"] > interval * 2:
-                    has_internal_gap = True
-                    break
-            if has_internal_gap:
-                logger.info("[%s/%s] Internal gaps detected — scheduling background fill",
-                            sym, key)
-                asyncio.create_task(_fill_internal_gaps(sym, key, fetcher, max_age_days=7))
-                # Set cooldown to avoid re-scheduling on every request
-                _ib_fetch_cooldown[_internal_gap_cooldown_key] = now_ts + 120
+                gap_sec = bars[i]["time"] - bars[i - 1]["time"]
+                if gap_sec > interval * 2:
+                    # Skip normal maintenance break (17:xx→18:00/19:00 ET)
+                    prev_dt = datetime.fromtimestamp(bars[i-1]["time"], tz=_tz.utc).astimezone(_et)
+                    next_dt = datetime.fromtimestamp(bars[i]["time"],   tz=_tz.utc).astimezone(_et)
+                    if prev_dt.hour >= 16 and next_dt.hour <= 19 and gap_sec < 7200:
+                        continue
+                    # Skip weekend closures (Fri 17:xx → Sun 18:xx)
+                    if prev_dt.weekday() == 4 and next_dt.weekday() == 6 and gap_sec < 200000:
+                        continue
+                    internal_gaps.append((bars[i - 1]["time"], bars[i]["time"], gap_sec))
+            if internal_gaps:
+                logger.info("[%s/%s] %d internal gaps detected — filling synchronously",
+                            sym, key, len(internal_gaps))
+                filled_any = False
+                _CHUNK = 7 * 86400  # split large gaps into 7-day chunks
+                for g_from, g_to, g_sec in internal_gaps:
+                    # Split gap into weekly chunks for IB pacing & contract rollover
+                    chunk_start = g_from
+                    while chunk_start < g_to:
+                        chunk_end = min(chunk_start + _CHUNK, g_to)
+                        try:
+                            ib_bars = await fetcher.fetch_range(
+                                key, chunk_start, chunk_end, symbol=sym)
+                            if ib_bars:
+                                gap_bars = [b for b in ib_bars
+                                            if g_from < b["time"] < g_to]
+                                if gap_bars:
+                                    saved = db.insert_bars(sym, key, gap_bars,
+                                                           source="ib_historical")
+                                    filled_any = True
+                                    logger.info(
+                                        "[%s/%s] Filled chunk %s→%s: %d bars",
+                                        sym, key, chunk_start, chunk_end, saved)
+                            await asyncio.sleep(2)  # IB pacing
+                        except Exception as e:
+                            logger.warning(
+                                "[%s/%s] Chunk fill failed %s→%s: %s",
+                                sym, key, chunk_start, chunk_end, e)
+                        chunk_start = chunk_end
+                if filled_any:
+                    bars = db.get_bars(sym, key, from_ts=from_ts, to_ts=to_ts)
+                    logger.info("[%s/%s] After internal fill: %d bars", sym, key, len(bars))
+                else:
+                    # No new bars from IB (maintenance/holiday gaps) — cooldown
+                    _ib_fetch_cooldown[_internal_gap_cooldown_key] = now_ts + 300
+
+    # ── Step 5: Strip unfillable gaps — never return broken data ────────────
+    # After Step 4 (sync fill), if large internal gaps remain (IB offline,
+    # holidays, etc.), only keep the most-recent contiguous segment so the
+    # chart never shows a jarring time-jump.
+    if bars and len(bars) >= 2:
+        from datetime import timezone as _tz5, timedelta as _td5
+        _et5 = _tz5(_td5(hours=-4))
+        # Minimum gap (seconds) to treat as a "chart-breaking" hole.
+        # Use 4× interval to allow normal maintenance breaks to pass through
+        # while catching real data outages.
+        _GAP_THRESHOLD = max(interval * 8, 14400)  # at least 4 hours
+        last_big_gap_idx = -1
+        for i in range(1, len(bars)):
+            gap_sec = bars[i]["time"] - bars[i - 1]["time"]
+            if gap_sec >= _GAP_THRESHOLD:
+                prev_dt = datetime.fromtimestamp(bars[i-1]["time"], tz=_tz5.utc).astimezone(_et5)
+                next_dt = datetime.fromtimestamp(bars[i]["time"],   tz=_tz5.utc).astimezone(_et5)
+                # Allow normal weekend gaps (Fri→Sun/Mon, ≤56h)
+                if prev_dt.weekday() == 4 and next_dt.weekday() in (0, 6) and gap_sec < 201600:
+                    continue
+                # Allow daily maintenance (16:xx→19:xx ET, < 4h)
+                if prev_dt.hour >= 16 and next_dt.hour <= 19 and gap_sec < 14400:
+                    continue
+                last_big_gap_idx = i
+        if last_big_gap_idx > 0:
+            logger.info(
+                "[%s/%s] Stripping %d bars before unfillable gap at idx %d "
+                "(keeping %d bars from continuous segment)",
+                sym, key, last_big_gap_idx, last_big_gap_idx,
+                len(bars) - last_big_gap_idx,
+            )
+            bars = bars[last_big_gap_idx:]
 
     # Final fallback: in-memory cache (only valid for the primary symbol MES)
     if not bars and sym == MES_SYM:
@@ -1606,9 +1801,10 @@ async def api_data_gaps(
         "symbol": symbol,
         "timeframe": timeframe,
         "total_gaps": len(gaps),
-        "weekday_gaps": len([g for g in gaps if not g["spans_weekend"] and not g.get("spans_holiday")]),
-        "weekend_gaps": len([g for g in gaps if g["spans_weekend"]]),
-        "holiday_gaps": len([g for g in gaps if g.get("spans_holiday") and not g["spans_weekend"]]),
+        "data_gaps": len([g for g in gaps if g.get("gap_type") == "data_gap"]),
+        "weekend_gaps": len([g for g in gaps if g.get("gap_type") == "weekend"]),
+        "holiday_gaps": len([g for g in gaps if g.get("gap_type") == "holiday"]),
+        "maintenance_gaps": len([g for g in gaps if g.get("gap_type") == "maintenance"]),
         "gaps": gaps,
     }
 

@@ -479,11 +479,15 @@ def find_gaps(
             "gap_start":    int,   # timestamp of last bar before the gap
             "gap_end":      int,   # timestamp of first bar after the gap
             "gap_seconds":  int,   # duration in seconds
-            "spans_weekend": bool, # True if any Sat/Sun falls inside the gap
+            "spans_weekend": bool, # True if gap is a NORMAL weekend closure
+            "spans_holiday": bool, # True if gap includes a US holiday
+            "gap_type":     str,   # "weekend" | "holiday" | "maintenance" | "data_gap"
         }
 
-    Gaps that span a weekend are expected (market closed); gaps during
-    weekdays likely indicate missing data that should be back-filled.
+    A gap is classified as ``weekend`` only when it follows the expected
+    pattern: starts Friday afternoon (≥16:00 ET) and ends Sunday evening
+    (≤20:00 ET) with a duration under 56 hours.  Multi-day gaps that merely
+    *include* Sat/Sun are labelled ``data_gap`` instead.
     """
     if max_acceptable_gap is None:
         # Default thresholds: 4 h for intraday, 4 days for daily
@@ -501,6 +505,8 @@ def find_gaps(
     from datetime import datetime, timezone, timedelta
     from market_holidays import spans_us_holiday
 
+    _et = timezone(timedelta(hours=-4))  # ET (approximate; good enough for classification)
+
     gaps: List[dict] = []
     for i in range(1, len(rows)):
         t1 = rows[i - 1][0]
@@ -509,28 +515,43 @@ def find_gaps(
         if gap <= max_acceptable_gap:
             continue
 
-        # Check whether the gap includes a Saturday or Sunday (UTC)
-        d1 = datetime.fromtimestamp(t1, tz=timezone.utc)
-        d2 = datetime.fromtimestamp(t2, tz=timezone.utc)
-        days_diff = (d2.date() - d1.date()).days
-        spans_weekend = False
-        if days_diff >= 7:
-            spans_weekend = True
-        else:
-            for j in range(days_diff + 1):
-                if (d1 + timedelta(days=j)).weekday() in (5, 6):
-                    spans_weekend = True
-                    break
+        d1_et = datetime.fromtimestamp(t1, tz=timezone.utc).astimezone(_et)
+        d2_et = datetime.fromtimestamp(t2, tz=timezone.utc).astimezone(_et)
+
+        # Normal weekend: Fri ≥16:00 → Sun/Mon ≤20:00, < 56h
+        is_normal_weekend = (
+            d1_et.weekday() == 4
+            and d2_et.weekday() in (0, 6)
+            and d1_et.hour >= 16
+            and gap < 201600  # 56 hours
+        )
+
+        # Maintenance break: same day, 16:xx→19:xx, < 4h
+        is_maintenance = (
+            d1_et.hour >= 16
+            and d2_et.hour <= 19
+            and gap < 14400
+        )
 
         # Check whether the gap includes a US market holiday
-        spans_holiday = spans_us_holiday(d1.date(), d2.date())
+        spans_holiday = spans_us_holiday(d1_et.date(), d2_et.date())
+
+        if is_normal_weekend:
+            gap_type = "weekend"
+        elif is_maintenance:
+            gap_type = "maintenance"
+        elif spans_holiday and gap < 259200:  # < 72h (holiday + weekend combo)
+            gap_type = "holiday"
+        else:
+            gap_type = "data_gap"
 
         gaps.append({
             "gap_start": t1,
             "gap_end": t2,
             "gap_seconds": gap,
-            "spans_weekend": spans_weekend,
+            "spans_weekend": is_normal_weekend,
             "spans_holiday": spans_holiday,
+            "gap_type": gap_type,
         })
 
     return gaps

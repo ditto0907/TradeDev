@@ -299,6 +299,13 @@ def _compare_bars(
     return mismatches, db_only, ib_only
 
 
+def _fmt_range(from_ts: int, to_ts: int) -> str:
+    """Format a UTC timestamp pair as readable ET date strings."""
+    from_dt = datetime.fromtimestamp(from_ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+    to_dt   = datetime.fromtimestamp(to_ts,   tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+    return f"{from_dt} → {to_dt} UTC"
+
+
 async def validate_bars(
     symbol: str,
     timeframe: str,
@@ -313,12 +320,25 @@ async def validate_bars(
     Uses the local IB fetch cache to avoid redundant IB requests.
     If *fetcher* is provided, uses its IB connection (avoids event-loop deadlocks).
     """
+    rng = _fmt_range(from_ts, to_ts)
+    logger.info("=== [DATA VALIDATE] START  %s/%s  %s ===", symbol, timeframe, rng)
+    t0 = time.monotonic()
+
     db_bars = db.get_bars(symbol, timeframe, from_ts, to_ts)
     ib_bars = await get_ib_bars_with_cache(
         symbol, timeframe, from_ts, to_ts, ib=ib, fetcher=fetcher
     )
 
     mismatches, db_only, ib_only = _compare_bars(db_bars, ib_bars)
+
+    elapsed = time.monotonic() - t0
+    logger.info(
+        "=== [DATA VALIDATE] DONE   %s/%s  %s  "
+        "db=%d ib=%d mismatches=%d db_only=%d ib_only=%d  (%.1fs) ===",
+        symbol, timeframe, rng,
+        len(db_bars), len(ib_bars), len(mismatches), len(db_only), len(ib_only),
+        elapsed,
+    )
 
     return {
         "symbol": symbol,
@@ -354,6 +374,11 @@ async def fix_bars(
     already has data for the requested range (populated during validate_bars).
     Returns summary.
     """
+    rng = _fmt_range(from_ts, to_ts)
+    sel_info = f"  selected={len(timestamps)}" if timestamps is not None else ""
+    logger.info("=== [DATA FIX] START  %s/%s  %s%s ===", symbol, timeframe, rng, sel_info)
+    t0 = time.monotonic()
+
     db_bars = db.get_bars(symbol, timeframe, from_ts, to_ts)
     ib_bars = await get_ib_bars_with_cache(
         symbol, timeframe, from_ts, to_ts, ib=ib, fetcher=fetcher
@@ -384,6 +409,15 @@ async def fix_bars(
     saved = 0
     if fixed_bars:
         saved = db.insert_bars(symbol, timeframe, fixed_bars, source="ib_validated")
+
+    elapsed = time.monotonic() - t0
+    logger.info(
+        "=== [DATA FIX] DONE   %s/%s  %s  "
+        "db=%d ib=%d mismatches=%d ib_only=%d fixed=%d  (%.1fs) ===",
+        symbol, timeframe, rng,
+        len(db_bars), len(ib_bars), len(mismatches), len(ib_only), saved,
+        elapsed,
+    )
 
     return {
         "symbol": symbol,
@@ -421,6 +455,9 @@ async def validate_all(
     Data older than 365 days is skipped since IB may not serve expired
     contracts reliably.
     """
+    logger.info("=== [DATA VALIDATE ALL] START  fix=%s ===", fix)
+    t0_all = time.monotonic()
+
     # Only create a standalone IB connection when no fetcher is available
     conn_ib = None
     should_disconnect = False
@@ -525,9 +562,12 @@ async def validate_all(
                         sym, tf, sym_result["total_mismatches"],
                         sym_result["total_fixed"])
 
-        logger.info("[validate_all] Complete: %d pairs, %d total mismatches, "
-                    "%d total fixed, %d IB-only inserted",
-                    len(pairs), total_mismatches, total_fixed, total_ib_only)
+        elapsed_all = time.monotonic() - t0_all
+        logger.info(
+            "=== [DATA VALIDATE ALL] DONE  fix=%s  pairs=%d  mismatches=%d  "
+            "fixed=%d  ib_only=%d  (%.1fs) ===",
+            fix, len(pairs), total_mismatches, total_fixed, total_ib_only, elapsed_all,
+        )
 
     finally:
         if should_disconnect and conn_ib:
