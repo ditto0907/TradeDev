@@ -106,6 +106,53 @@ def _prev_contract_month(yyyymm: str) -> str:
     return f"{y}{_MES_QUARTERLY[idx - 1]:02d}"
 
 
+def _next_contract_month(yyyymm: str) -> str:
+    """Return the YYYYMM of the next quarterly MES contract."""
+    y   = int(yyyymm[:4])
+    m   = int(yyyymm[4:])
+    idx = _MES_QUARTERLY.index(m)
+    if idx == len(_MES_QUARTERLY) - 1:
+        return f"{y + 1}{_MES_QUARTERLY[0]:02d}"
+    return f"{y}{_MES_QUARTERLY[idx + 1]:02d}"
+
+
+def _contracts_for_range(from_ts: int, to_ts: int) -> list:
+    """
+    Return all quarterly MES contract months (oldest → newest) that were
+    front-month at any point within [from_ts, to_ts].
+    """
+    start_month = _contract_month_for_ts(from_ts)
+    end_month   = _contract_month_for_ts(to_ts)
+    months = [start_month]
+    m = start_month
+    while m != end_month:
+        m = _next_contract_month(m)
+        months.append(m)
+    return months
+
+
+def _contract_active_start_ts(yyyymm: str) -> int:
+    """
+    Timestamp of the first second this contract became front-month.
+    Rollover from the previous contract occurs on day 11 00:00 UTC of the
+    previous quarter's expiry month (i.e. one day after our approximate
+    rollover day-10 boundary used in _contract_month_for_ts).
+    """
+    prev = _prev_contract_month(yyyymm)
+    y, m = int(prev[:4]), int(prev[4:])
+    return int(datetime(y, m, 11, 0, 0, 0, tzinfo=timezone.utc).timestamp())
+
+
+def _contract_active_end_ts(yyyymm: str) -> int:
+    """
+    Timestamp of the last second this contract is front-month.
+    Rollover to the next contract occurs at the start of day 11 of this
+    contract's expiry month, so this contract's window ends at day 10 23:59:59.
+    """
+    y, m = int(yyyymm[:4]), int(yyyymm[4:])
+    return int(datetime(y, m, 10, 23, 59, 59, tzinfo=timezone.utc).timestamp())
+
+
 # ─── IBDataFetcher ────────────────────────────────────────────────────────────
 
 class IBDataFetcher:
@@ -304,43 +351,51 @@ class IBDataFetcher:
         Fetch a specific historical time range from IB on demand.
         Used by the server when the chart scrolls to an uncached region.
 
-        Automatically selects the correct Future contract for the date range.
-        If the target contract returns no data (e.g. scrolled past its trading
-        start), falls back to the previous quarterly contract.
-        Returns bars filtered to [from_ts, to_ts].
+        Automatically splits the range across ALL quarterly contract expirations
+        that fall within [from_ts, to_ts], fetching each contract's sub-window
+        separately and stitching the results together.  This produces truly
+        continuous data even when scrolling back many months.
+
+        Returns bars sorted by time and filtered to [from_ts, to_ts].
         """
         bar_size, interval = _key_to_ib(bar_size_key)
+        start_ts = (from_ts // interval) * interval
+        end_ts   = ((to_ts + interval - 1) // interval) * interval
 
-        start_ts   = (from_ts // interval) * interval
-        end_ts     = ((to_ts + interval - 1) // interval) * interval
-        end_dt     = datetime.fromtimestamp(end_ts, tz=timezone.utc)
-        end_str    = end_dt.strftime("%Y%m%d %H:%M:%S UTC")
-        dur_str    = _ib_duration(end_ts - start_ts)
+        months = _contracts_for_range(start_ts, end_ts)
+        all_bars: dict = {}   # timestamp → bar (deduplicates overlapping contract data)
 
-        # Determine which contract covers the end of the requested range,
-        # with the previous quarter as fallback.
-        target_month = _contract_month_for_ts(end_ts)
-        months_to_try = [target_month, _prev_contract_month(target_month)]
+        for month in months:
+            # Clamp the sub-window to this contract's front-month period
+            sub_start = max(start_ts, _contract_active_start_ts(month))
+            sub_end   = min(end_ts,   _contract_active_end_ts(month))
+            if sub_start > sub_end:
+                continue
 
-        for month in months_to_try:
+            sub_end_dt  = datetime.fromtimestamp(sub_end, tz=timezone.utc)
+            sub_end_str = sub_end_dt.strftime("%Y%m%d %H:%M:%S UTC")
+            sub_dur     = _ib_duration(sub_end - sub_start)
+
             try:
                 contract = await self._get_future_for_month(month)
             except Exception as e:
-                logger.warning("Cannot qualify MES %s: %s", month, e)
+                logger.warning("Cannot qualify MES %s: %s — skipping sub-window", month, e)
                 continue
 
-            logger.info("On-demand fetch: %s  %s → %s  (%s)  contract=%s",
-                        bar_size_key,
-                        datetime.fromtimestamp(start_ts, tz=timezone.utc).isoformat(),
-                        datetime.fromtimestamp(end_ts,   tz=timezone.utc).isoformat(),
-                        dur_str, contract.localSymbol)
+            logger.info(
+                "Stitching %s  %s → %s  (%s)  contract=%s",
+                bar_size_key,
+                datetime.fromtimestamp(sub_start, tz=timezone.utc).isoformat(),
+                datetime.fromtimestamp(sub_end,   tz=timezone.utc).isoformat(),
+                sub_dur, contract.localSymbol,
+            )
 
             try:
                 raw = await asyncio.wait_for(
                     self.ib.reqHistoricalDataAsync(
                         contract,
-                        endDateTime=end_str,
-                        durationStr=dur_str,
+                        endDateTime=sub_end_str,
+                        durationStr=sub_dur,
                         barSizeSetting=bar_size,
                         whatToShow="TRADES",
                         useRTH=False,
@@ -349,25 +404,31 @@ class IBDataFetcher:
                     timeout=60.0,
                 )
             except asyncio.TimeoutError:
-                logger.error("On-demand fetch timed out for %s (contract %s)",
-                            bar_size_key, contract.localSymbol)
+                logger.error(
+                    "Stitching fetch timed out for %s (contract %s) — skipping",
+                    bar_size_key, contract.localSymbol,
+                )
                 continue
 
-            bars = [b for b in (_bar_to_dict(r) for r in raw)
-                    if b["time"] >= from_ts and b["time"] <= to_ts]
-            bars.sort(key=lambda b: b["time"])
+            added = 0
+            for b in (_bar_to_dict(r) for r in raw):
+                if from_ts <= b["time"] <= to_ts:
+                    all_bars[b["time"]] = b
+                    added += 1
 
-            if bars:
-                logger.info("On-demand fetch: %d %s bars from %s",
-                            len(bars), bar_size_key, contract.localSymbol)
-                return bars
+            logger.info(
+                "Stitching %s  contract=%s → %d bars (total so far: %d)",
+                bar_size_key, contract.localSymbol, added, len(all_bars),
+            )
 
-            logger.info("Contract %s returned 0 bars for %s %s→%s, trying previous",
-                        contract.localSymbol, bar_size_key, from_ts, to_ts)
-
-        logger.info("On-demand fetch: no data from any contract for %s %s→%s",
-                    bar_size_key, from_ts, to_ts)
-        return []
+        result = sorted(all_bars.values(), key=lambda b: b["time"])
+        logger.info(
+            "Stitched fetch complete: %d %s bars from %d contract(s) for range %s→%s",
+            len(result), bar_size_key, len(months),
+            datetime.fromtimestamp(from_ts, tz=timezone.utc).isoformat(),
+            datetime.fromtimestamp(to_ts,   tz=timezone.utc).isoformat(),
+        )
+        return result
 
     # ─── Real-time (reqRealTimeBars — 5-second bars) ─────────────────────────
 
