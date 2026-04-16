@@ -263,23 +263,49 @@ def init_db() -> None:
 
 def insert_bars(symbol: str, timeframe: str, bars: List[dict],
                 source: str = "unknown") -> int:
-    """Insert or replace bars. Returns number of rows upserted."""
+    """Insert or replace bars after validating OHLCV integrity.
+
+    Bars that fail validation (e.g. high < low, non-positive price) are
+    logged and skipped — never persisted.  Returns number of rows upserted.
+    """
     if not bars:
         return 0
-    rows = [
-        (symbol, timeframe,
-         b["time"], b["open"], b["high"], b["low"], b["close"], b["volume"],
-         b.get("source", source))
-        for b in bars
-    ]
+    valid_rows = []
+    for b in bars:
+        o, h, l, c = b["open"], b["high"], b["low"], b["close"]
+        v = b["volume"]
+        # ── OHLCV integrity checks ──────────────────────────────────────
+        if h < l:
+            logger.warning("Skipping bar %s/%s ts=%s: high (%.4f) < low (%.4f)",
+                           symbol, timeframe, b["time"], h, l)
+            continue
+        if any(p <= 0 for p in (o, h, l, c)):
+            logger.warning("Skipping bar %s/%s ts=%s: non-positive price O=%.4f H=%.4f L=%.4f C=%.4f",
+                           symbol, timeframe, b["time"], o, h, l, c)
+            continue
+        if v < 0:
+            logger.warning("Skipping bar %s/%s ts=%s: negative volume %.1f",
+                           symbol, timeframe, b["time"], v)
+            continue
+        valid_rows.append(
+            (symbol, timeframe,
+             b["time"], o, h, l, c, v,
+             b.get("source", source))
+        )
+    if not valid_rows:
+        return 0
     with _conn() as conn:
         conn.executemany(
             "INSERT OR REPLACE INTO bars "
             "(symbol, timeframe, ts, open, high, low, close, volume, source) "
             "VALUES (?,?,?,?,?,?,?,?,?)",
-            rows,
+            valid_rows,
         )
-    return len(rows)
+    skipped = len(bars) - len(valid_rows)
+    if skipped:
+        logger.info("insert_bars %s/%s: %d inserted, %d skipped (validation)",
+                     symbol, timeframe, len(valid_rows), skipped)
+    return len(valid_rows)
 
 
 def upsert_realtime_bar(symbol: str, timeframe: str, bar: dict) -> None:
@@ -405,25 +431,37 @@ def get_coverage() -> List[dict]:
 # Only used for caching purposes — never written to by any other logic.
 
 def insert_ib_cache_bars(symbol: str, timeframe: str, bars: List[dict]) -> int:
-    """Insert or replace bars into the IB fetch cache. Returns row count."""
+    """Insert or replace bars into the IB fetch cache with validation.
+
+    Applies the same OHLCV integrity checks as insert_bars — invalid bars
+    from IB are logged and skipped.  Returns row count.
+    """
     if not bars:
         return 0
     import time as _time
     now_ts = int(_time.time())
-    rows = [
-        (symbol, timeframe,
-         b["time"], b["open"], b["high"], b["low"], b["close"], b["volume"],
-         now_ts)
-        for b in bars
-    ]
+    valid_rows = []
+    for b in bars:
+        o, h, l, c = b["open"], b["high"], b["low"], b["close"]
+        v = b["volume"]
+        if h < l or any(p <= 0 for p in (o, h, l, c)) or v < 0:
+            logger.warning("IB cache: skipping invalid bar %s/%s ts=%s O=%.4f H=%.4f L=%.4f C=%.4f V=%.1f",
+                           symbol, timeframe, b["time"], o, h, l, c, v)
+            continue
+        valid_rows.append(
+            (symbol, timeframe,
+             b["time"], o, h, l, c, v, now_ts)
+        )
+    if not valid_rows:
+        return 0
     with _conn() as conn:
         conn.executemany(
             "INSERT OR REPLACE INTO ib_fetch_cache "
             "(symbol, timeframe, ts, open, high, low, close, volume, fetched_at) "
             "VALUES (?,?,?,?,?,?,?,?,?)",
-            rows,
+            valid_rows,
         )
-    return len(rows)
+    return len(valid_rows)
 
 
 def get_ib_cache_bars(
@@ -471,7 +509,11 @@ def find_gaps(
     max_acceptable_gap: int = None,
 ) -> List[dict]:
     """
-    Detect gaps in bar data that exceed *max_acceptable_gap* seconds.
+    Detect gaps in bar data using the trading session calendar.
+
+    Uses ``TradingCalendar`` for the symbol to classify gaps accurately
+    based on the instrument's actual trading schedule rather than ad-hoc
+    weekday/hour heuristics.
 
     Returns a list of gap dicts::
 
@@ -479,15 +521,9 @@ def find_gaps(
             "gap_start":    int,   # timestamp of last bar before the gap
             "gap_end":      int,   # timestamp of first bar after the gap
             "gap_seconds":  int,   # duration in seconds
-            "spans_weekend": bool, # True if gap is a NORMAL weekend closure
-            "spans_holiday": bool, # True if gap includes a US holiday
-            "gap_type":     str,   # "weekend" | "holiday" | "maintenance" | "data_gap"
+            "gap_type":     str,   # "weekend" | "holiday" | "maintenance" | "data_gap" | "normal"
+            "expected_bars": int,  # how many bars we'd expect in this gap
         }
-
-    A gap is classified as ``weekend`` only when it follows the expected
-    pattern: starts Friday afternoon (≥16:00 ET) and ends Sunday evening
-    (≤20:00 ET) with a duration under 56 hours.  Multi-day gaps that merely
-    *include* Sat/Sun are labelled ``data_gap`` instead.
     """
     if max_acceptable_gap is None:
         # Default thresholds: 4 h for intraday, 4 days for daily
@@ -502,10 +538,12 @@ def find_gaps(
     if len(rows) < 2:
         return []
 
-    from datetime import datetime, timezone, timedelta
-    from market_holidays import spans_us_holiday
-
-    _et = timezone(timedelta(hours=-4))  # ET (approximate; good enough for classification)
+    # Use trading calendar for classification
+    try:
+        from trading_calendar import get_calendar
+        cal = get_calendar(symbol)
+    except Exception:
+        cal = None
 
     gaps: List[dict] = []
     for i in range(1, len(rows)):
@@ -515,46 +553,191 @@ def find_gaps(
         if gap <= max_acceptable_gap:
             continue
 
-        d1_et = datetime.fromtimestamp(t1, tz=timezone.utc).astimezone(_et)
-        d2_et = datetime.fromtimestamp(t2, tz=timezone.utc).astimezone(_et)
-
-        # Normal weekend: Fri ≥16:00 → Sun/Mon ≤20:00, < 56h
-        is_normal_weekend = (
-            d1_et.weekday() == 4
-            and d2_et.weekday() in (0, 6)
-            and d1_et.hour >= 16
-            and gap < 201600  # 56 hours
-        )
-
-        # Maintenance break: same day, 16:xx→19:xx, < 4h
-        is_maintenance = (
-            d1_et.hour >= 16
-            and d2_et.hour <= 19
-            and gap < 14400
-        )
-
-        # Check whether the gap includes a US market holiday
-        spans_holiday = spans_us_holiday(d1_et.date(), d2_et.date())
-
-        if is_normal_weekend:
-            gap_type = "weekend"
-        elif is_maintenance:
-            gap_type = "maintenance"
-        elif spans_holiday and gap < 259200:  # < 72h (holiday + weekend combo)
-            gap_type = "holiday"
+        if cal:
+            gap_type = cal.classify_gap(t1, t2)
         else:
-            gap_type = "data_gap"
+            # Fallback to basic heuristics when calendar unavailable
+            from datetime import datetime, timezone, timedelta
+            from market_holidays import spans_us_holiday
+            _et = timezone(timedelta(hours=-4))
+            d1_et = datetime.fromtimestamp(t1, tz=timezone.utc).astimezone(_et)
+            d2_et = datetime.fromtimestamp(t2, tz=timezone.utc).astimezone(_et)
+            is_normal_weekend = (
+                d1_et.weekday() == 4 and d2_et.weekday() in (0, 6)
+                and d1_et.hour >= 16 and gap < 201600
+            )
+            is_maintenance = (
+                d1_et.hour >= 16 and d2_et.hour <= 19 and gap < 14400
+            )
+            spans_holiday = spans_us_holiday(d1_et.date(), d2_et.date())
+            if is_normal_weekend:
+                gap_type = "weekend"
+            elif is_maintenance:
+                gap_type = "maintenance"
+            elif spans_holiday and gap < 259200:
+                gap_type = "holiday"
+            else:
+                gap_type = "data_gap"
 
         gaps.append({
             "gap_start": t1,
             "gap_end": t2,
             "gap_seconds": gap,
-            "spans_weekend": is_normal_weekend,
-            "spans_holiday": spans_holiday,
             "gap_type": gap_type,
+            "expected_bars": max(0, gap // expected_interval - 1),
         })
 
     return gaps
+
+
+# ─── Data Maintenance Tools ──────────────────────────────────────────────────
+# Standard data operations for inspecting, fixing, and cleaning bar data.
+# These power the /api/data/* endpoints and the datavalid.html UI.
+
+def delete_bars_range(
+    symbol: str,
+    timeframe: str,
+    from_ts: int,
+    to_ts: int,
+) -> int:
+    """Delete bars in a time range. Returns count deleted."""
+    with _conn() as conn:
+        cursor = conn.execute(
+            "DELETE FROM bars WHERE symbol=? AND timeframe=? AND ts>=? AND ts<=?",
+            (symbol, timeframe, from_ts, to_ts),
+        )
+        return cursor.rowcount
+
+
+def delete_bars_by_timestamps(
+    symbol: str,
+    timeframe: str,
+    timestamps: List[int],
+) -> int:
+    """Delete specific bars by their timestamps. Returns count deleted."""
+    if not timestamps:
+        return 0
+    placeholders = ",".join("?" * len(timestamps))
+    with _conn() as conn:
+        cursor = conn.execute(
+            f"DELETE FROM bars WHERE symbol=? AND timeframe=? AND ts IN ({placeholders})",
+            [symbol, timeframe] + timestamps,
+        )
+        return cursor.rowcount
+
+
+def get_bar_at(symbol: str, timeframe: str, ts: int) -> Optional[dict]:
+    """Get a single bar at exact timestamp. For point inspection."""
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT ts, open, high, low, close, volume, source FROM bars "
+            "WHERE symbol=? AND timeframe=? AND ts=?",
+            (symbol, timeframe, ts),
+        ).fetchone()
+    if not row:
+        return None
+    return {
+        "time": row[0], "open": row[1], "high": row[2],
+        "low": row[3], "close": row[4], "volume": row[5],
+        "source": row[6],
+    }
+
+
+def get_integrity_report(symbol: str, timeframe: str,
+                         from_ts: int = 0, to_ts: int = 9_999_999_999) -> dict:
+    """Generate a data integrity report: counts, source breakdown, OHLCV violations."""
+    with _conn() as conn:
+        # Total count
+        total = conn.execute(
+            "SELECT COUNT(*) FROM bars WHERE symbol=? AND timeframe=? AND ts>=? AND ts<=?",
+            (symbol, timeframe, from_ts, to_ts),
+        ).fetchone()[0]
+
+        # Source breakdown
+        source_rows = conn.execute(
+            "SELECT source, COUNT(*) FROM bars "
+            "WHERE symbol=? AND timeframe=? AND ts>=? AND ts<=? "
+            "GROUP BY source ORDER BY source",
+            (symbol, timeframe, from_ts, to_ts),
+        ).fetchall()
+        sources = {r[0]: r[1] for r in source_rows}
+
+        # OHLCV violations
+        violations = conn.execute(
+            "SELECT COUNT(*) FROM bars "
+            "WHERE symbol=? AND timeframe=? AND ts>=? AND ts<=? "
+            "AND (high < low OR open > high OR open < low OR close > high OR close < low "
+            "     OR open <= 0 OR high <= 0 OR low <= 0 OR close <= 0 OR volume < 0)",
+            (symbol, timeframe, from_ts, to_ts),
+        ).fetchone()[0]
+
+        # Duplicate check (should be 0 due to PK, but verify)
+        dup_check = conn.execute(
+            "SELECT ts, COUNT(*) as cnt FROM bars "
+            "WHERE symbol=? AND timeframe=? AND ts>=? AND ts<=? "
+            "GROUP BY ts HAVING cnt > 1",
+            (symbol, timeframe, from_ts, to_ts),
+        ).fetchall()
+
+        # Time range
+        range_row = conn.execute(
+            "SELECT MIN(ts), MAX(ts) FROM bars "
+            "WHERE symbol=? AND timeframe=? AND ts>=? AND ts<=?",
+            (symbol, timeframe, from_ts, to_ts),
+        ).fetchone()
+
+    return {
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "total_bars": total,
+        "sources": sources,
+        "ohlcv_violations": violations,
+        "duplicates": len(dup_check),
+        "earliest_ts": range_row[0],
+        "latest_ts": range_row[1],
+    }
+
+
+def fix_ohlcv_violations(symbol: str, timeframe: str,
+                         from_ts: int = 0, to_ts: int = 9_999_999_999) -> int:
+    """Fix bars where high < low by swapping. Delete bars with non-positive prices.
+    Returns count of bars fixed or deleted."""
+    fixed = 0
+    with _conn() as conn:
+        # Fix high < low (swap)
+        cursor = conn.execute(
+            "UPDATE bars SET high = low, low = high "
+            "WHERE symbol=? AND timeframe=? AND ts>=? AND ts<=? AND high < low",
+            (symbol, timeframe, from_ts, to_ts),
+        )
+        fixed += cursor.rowcount
+
+        # Delete non-positive prices
+        cursor = conn.execute(
+            "DELETE FROM bars "
+            "WHERE symbol=? AND timeframe=? AND ts>=? AND ts<=? "
+            "AND (open <= 0 OR high <= 0 OR low <= 0 OR close <= 0)",
+            (symbol, timeframe, from_ts, to_ts),
+        )
+        fixed += cursor.rowcount
+
+        # Fix open/close outside [low, high]
+        cursor = conn.execute(
+            "UPDATE bars SET open = CASE "
+            "  WHEN open > high THEN high "
+            "  WHEN open < low THEN low "
+            "  ELSE open END, "
+            "close = CASE "
+            "  WHEN close > high THEN high "
+            "  WHEN close < low THEN low "
+            "  ELSE close END "
+            "WHERE symbol=? AND timeframe=? AND ts>=? AND ts<=? "
+            "AND (open > high OR open < low OR close > high OR close < low)",
+            (symbol, timeframe, from_ts, to_ts),
+        )
+        fixed += cursor.rowcount
+
+    return fixed
 
 
 # ─── Chart Layout CRUD ────────────────────────────────────────────────────────

@@ -166,12 +166,16 @@ def on_new_bar(bar_size_key: str, bar: dict, symbol: str = None):
 async def _fill_internal_gaps(sym: str, tf: str, fetcher_obj, max_age_days: int = 7):
     """Scan DB bars for internal gaps and fill them from IB.
 
+    Uses the instrument's TradingCalendar for gap classification so that
+    maintenance breaks, weekends, and holidays are skipped correctly for
+    ALL symbols (not just US futures).
+
     Only scans bars within the last *max_age_days* to avoid re-fetching
-    ancient data.  Skips the daily maintenance break (17:00-18:00 ET) and
-    weekend closures automatically — IB simply returns 0 bars for those
-    periods.
+    ancient data.
     """
     from ib_data_fetcher import _key_to_ib
+    from trading_calendar import get_calendar
+
     _, interval = _key_to_ib(tf)
 
     cutoff_ts = int(time.time()) - max_age_days * 86400
@@ -179,18 +183,28 @@ async def _fill_internal_gaps(sym: str, tf: str, fetcher_obj, max_age_days: int 
     if len(bars) < 2:
         return
 
-    # Detect gaps > 2× expected interval
-    gaps = []
-    for i in range(1, len(bars)):
-        gap_sec = bars[i]["time"] - bars[i - 1]["time"]
-        if gap_sec > interval * 2:
-            gaps.append((bars[i - 1]["time"], bars[i]["time"], gap_sec))
+    # Use calendar-aware gap detection
+    try:
+        cal = get_calendar(sym)
+        detected_gaps = cal.find_gaps(bars, interval)
+        gaps = [
+            (g["gap_start"], g["gap_end"], g["gap_seconds"])
+            for g in detected_gaps
+            if g["gap_type"] == "data_gap"
+        ]
+    except Exception:
+        # Fallback: simple interval-based detection
+        gaps = []
+        for i in range(1, len(bars)):
+            gap_sec = bars[i]["time"] - bars[i - 1]["time"]
+            if gap_sec > interval * 2:
+                gaps.append((bars[i - 1]["time"], bars[i]["time"], gap_sec))
 
     if not gaps:
-        logger.info("[%s/%s] No internal gaps in last %d days", sym, tf, max_age_days)
+        logger.info("[%s/%s] No internal data gaps in last %d days", sym, tf, max_age_days)
         return
 
-    logger.info("[%s/%s] Found %d internal gaps in last %d days — filling from IB",
+    logger.info("[%s/%s] Found %d internal data gaps in last %d days — filling from IB",
                 sym, tf, len(gaps), max_age_days)
 
     total_filled = 0
@@ -207,7 +221,7 @@ async def _fill_internal_gaps(sym: str, tf: str, fetcher_obj, max_age_days: int 
                     logger.info("[%s/%s] Filled %d bars for gap %s→%s (%ds)",
                                 sym, tf, saved, from_ts, to_ts, gap_sec)
                 else:
-                    logger.debug("[%s/%s] Gap %s→%s (%ds) — IB has no interior bars (maintenance/holiday)",
+                    logger.debug("[%s/%s] Gap %s→%s (%ds) — IB has no interior bars",
                                  sym, tf, from_ts, to_ts, gap_sec)
             else:
                 logger.debug("[%s/%s] Gap %s→%s (%ds) — IB returned 0 bars",
@@ -700,23 +714,31 @@ async def get_history(
     [from_ts, to_ts] range, on-demand fetches from IB fill the gaps and
     persist the result to the DB before returning.
 
-    Gap detection covers three cases:
-      1. **No data at all** — fetch the entire requested range.
-      2. **Left gap** — request extends before the earliest bar in DB.
-      3. **Right gap** — DB data is stale (latest bar older than ``to_ts``).
+    Gap detection uses the instrument's TradingCalendar to accurately
+    distinguish data gaps from expected closures (weekends, holidays,
+    maintenance breaks).
 
     A per-symbol cooldown prevents repeated IB calls when the market is
     closed and IB returns no new data.
     Works for ALL supported symbols (MES, MNQ, NK225MC, MGC, …).
     """
     from ib_data_fetcher import resolution_to_key, _key_to_ib
+    from trading_calendar import get_calendar
+
     key  = resolution_to_key(resolution)
     sym  = symbol.upper()
+
+    # Get trading calendar for session-aware gap classification
+    try:
+        cal = get_calendar(sym)
+    except Exception:
+        cal = None
 
     # ── Step 1: Query existing bars from DB ──────────────────────────────────
     bars = db.get_bars(sym, key, from_ts=from_ts, to_ts=to_ts)
     earliest_db = db.get_earliest_ts(sym, key)
     latest_db   = db.get_latest_ts(sym, key)
+
     # Convert timestamps to exchange-local timezone for readable logging
     import zoneinfo as _zi
     _inst = config.INSTRUMENTS.get(sym)
@@ -757,22 +779,15 @@ async def get_history(
             )
 
         # ---- Case 4: middle hole (request falls entirely inside a DB gap) ---
-        # When earliest_db <= from_ts AND latest_db >= to_ts but the DB
-        # returned 0 bars, the requested window sits in a hole between two
-        # data islands.  Neither the left-gap nor the right-gap condition
-        # fires in this scenario, so we must detect it explicitly and fetch
-        # the range synchronously so this request returns real data.
         if (not bars
-                and not any(r[0] == from_ts for r in fetch_ranges)  # avoid dup
+                and not any(r[0] == from_ts for r in fetch_ranges)
                 and earliest_db <= from_ts
                 and latest_db is not None
                 and latest_db >= to_ts):
             capped_to = min(to_ts, now_ts)
             cooldown_key = f"mid_{sym}_{key}_{from_ts}"
             if now_ts >= _ib_fetch_cooldown.get(cooldown_key, 0):
-                # Pre-set cooldown so concurrent requests for the same range
-                # don't all trigger duplicate IB fetches.  Cleared on success.
-                _ib_fetch_cooldown[cooldown_key] = now_ts + 300  # 5 min
+                _ib_fetch_cooldown[cooldown_key] = now_ts + 300
                 fetch_ranges.append((from_ts, capped_to))
                 logger.info(
                     "[%s/%s] Middle hole: request [%s→%s] falls inside a DB gap "
@@ -784,22 +799,19 @@ async def get_history(
         if latest_db is not None:
             capped_to = min(to_ts, now_ts)
             gap_right = capped_to - latest_db
-            
-            # Limit max gap to fetch: 3 days for intraday bars to avoid IB timeouts
-            # on inactive contracts or weekend gaps. Fur daily bars, allow up to 30 days.
+
             max_gap = 30 * 86400 if interval >= 86400 else 3 * 86400
-            
+
             if gap_right > interval * 2:
                 if gap_right > max_gap:
                     logger.warning(
                         "[%s/%s] Right gap %ds (%.1f days) exceeds max %ds — "
-                        "capping fetch to avoid timeout. Consider manual data sync.",
+                        "capping fetch to avoid timeout.",
                         sym, key, gap_right, gap_right/86400, max_gap,
                     )
-                    # Cap the fetch to max_gap from latest_db
                     capped_to = min(capped_to, latest_db + max_gap)
                     gap_right = capped_to - latest_db
-                
+
                 cooldown_key = (sym, key)
                 cooldown_until = _ib_fetch_cooldown.get(cooldown_key, 0)
                 if now_ts >= cooldown_until:
@@ -836,7 +848,6 @@ async def get_history(
                         sym, key, len(fetched), saved,
                     )
                     any_fetched = True
-                    # Clear cooldown on success (both right-gap and mid-hole keys)
                     _ib_fetch_cooldown.pop((sym, key), None)
                     _ib_fetch_cooldown.pop(f"mid_{sym}_{key}_{f_from}", None)
                 else:
@@ -844,13 +855,8 @@ async def get_history(
                         "[%s/%s] IB returned 0 bars for range [%s→%s]",
                         sym, key, f_from, f_to,
                     )
-                    # Set cooldown for right-gap fetches to avoid hammering IB
                     if idx == right_gap_index:
                         _ib_fetch_cooldown[(sym, key)] = now_ts + _IB_COOLDOWN_NO_DATA
-                        logger.debug(
-                            "[%s/%s] Right gap cooldown set (%ds)",
-                            sym, key, _IB_COOLDOWN_NO_DATA,
-                        )
             except Exception as e:
                 logger.warning(
                     "[%s/%s] IB fetch failed for range [%s→%s]: %s",
@@ -863,8 +869,6 @@ async def get_history(
             "[%s/%s] Data gaps detected but IB not ready — skipping fetch",
             sym, key,
         )
-        # Clear pre-set mid-hole cooldowns so the ranges retry immediately
-        # once IB reconnects (avoid blocking the reconnect loop for 5 min)
         for r_from, _ in fetch_ranges:
             _ib_fetch_cooldown.pop(f"mid_{sym}_{key}_{r_from}", None)
 
@@ -873,35 +877,31 @@ async def get_history(
         bars = db.get_bars(sym, key, from_ts=from_ts, to_ts=to_ts)
         logger.info("[%s/%s] After IB fill: %d bars in range", sym, key, len(bars))
 
-    # ── Step 4: Detect & fill INTERNAL gaps in returned bars (SYNC) ─────────
-    # The left/right gap logic above only handles edges.  If the DB has holes
-    # in the middle (e.g. server was offline), fill them synchronously so the
-    # frontend never receives data with gaps.
+    # ── Step 4: Fill internal gaps using calendar-aware detection ────────────
     if bars and len(bars) >= 2 and ib_ready:
         _internal_gap_cooldown_key = f"internal_{sym}_{key}"
         if now_ts >= _ib_fetch_cooldown.get(_internal_gap_cooldown_key, 0):
-            from datetime import timezone as _tz, timedelta as _td
-            _et = _tz(_td(hours=-4))
-            internal_gaps = []
-            for i in range(1, len(bars)):
-                gap_sec = bars[i]["time"] - bars[i - 1]["time"]
-                if gap_sec > interval * 2:
-                    # Skip normal maintenance break (17:xx→18:00/19:00 ET)
-                    prev_dt = datetime.fromtimestamp(bars[i-1]["time"], tz=_tz.utc).astimezone(_et)
-                    next_dt = datetime.fromtimestamp(bars[i]["time"],   tz=_tz.utc).astimezone(_et)
-                    if prev_dt.hour >= 16 and next_dt.hour <= 19 and gap_sec < 7200:
-                        continue
-                    # Skip weekend closures (Fri 17:xx → Sun 18:xx)
-                    if prev_dt.weekday() == 4 and next_dt.weekday() == 6 and gap_sec < 200000:
-                        continue
-                    internal_gaps.append((bars[i - 1]["time"], bars[i]["time"], gap_sec))
+            # Use trading calendar for gap classification instead of ad-hoc heuristics
+            if cal:
+                internal_gaps = [
+                    (g["gap_start"], g["gap_end"], g["gap_seconds"])
+                    for g in cal.find_gaps(bars, interval)
+                    if g["gap_type"] == "data_gap"
+                ]
+            else:
+                # Fallback to simple interval-based detection
+                internal_gaps = []
+                for i in range(1, len(bars)):
+                    gap_sec = bars[i]["time"] - bars[i - 1]["time"]
+                    if gap_sec > interval * 2:
+                        internal_gaps.append((bars[i - 1]["time"], bars[i]["time"], gap_sec))
+
             if internal_gaps:
-                logger.info("[%s/%s] %d internal gaps detected — filling synchronously",
+                logger.info("[%s/%s] %d internal data gaps detected — filling from IB",
                             sym, key, len(internal_gaps))
                 filled_any = False
-                _CHUNK = 7 * 86400  # split large gaps into 7-day chunks
+                _CHUNK = 7 * 86400
                 for g_from, g_to, g_sec in internal_gaps:
-                    # Split gap into weekly chunks for IB pacing & contract rollover
                     chunk_start = g_from
                     while chunk_start < g_to:
                         chunk_end = min(chunk_start + _CHUNK, g_to)
@@ -918,7 +918,7 @@ async def get_history(
                                     logger.info(
                                         "[%s/%s] Filled chunk %s→%s: %d bars",
                                         sym, key, chunk_start, chunk_end, saved)
-                            await asyncio.sleep(2)  # IB pacing
+                            await asyncio.sleep(2)
                         except Exception as e:
                             logger.warning(
                                 "[%s/%s] Chunk fill failed %s→%s: %s",
@@ -928,32 +928,30 @@ async def get_history(
                     bars = db.get_bars(sym, key, from_ts=from_ts, to_ts=to_ts)
                     logger.info("[%s/%s] After internal fill: %d bars", sym, key, len(bars))
                 else:
-                    # No new bars from IB (maintenance/holiday gaps) — cooldown
                     _ib_fetch_cooldown[_internal_gap_cooldown_key] = now_ts + 300
 
-    # ── Step 5: Strip unfillable gaps — never return broken data ────────────
-    # After Step 4 (sync fill), if large internal gaps remain (IB offline,
-    # holidays, etc.), only keep the most-recent contiguous segment so the
-    # chart never shows a jarring time-jump.
+    # ── Step 5: Strip unfillable data gaps (calendar-aware) ─────────────────
+    # Only strip genuine data gaps — let weekends/holidays/maintenance pass through.
     if bars and len(bars) >= 2:
-        from datetime import timezone as _tz5, timedelta as _td5
-        _et5 = _tz5(_td5(hours=-4))
-        # Minimum gap (seconds) to treat as a "chart-breaking" hole.
-        # Use 4× interval to allow normal maintenance breaks to pass through
-        # while catching real data outages.
         _GAP_THRESHOLD = max(interval * 8, 14400)  # at least 4 hours
         last_big_gap_idx = -1
         for i in range(1, len(bars)):
             gap_sec = bars[i]["time"] - bars[i - 1]["time"]
             if gap_sec >= _GAP_THRESHOLD:
-                prev_dt = datetime.fromtimestamp(bars[i-1]["time"], tz=_tz5.utc).astimezone(_et5)
-                next_dt = datetime.fromtimestamp(bars[i]["time"],   tz=_tz5.utc).astimezone(_et5)
-                # Allow normal weekend gaps (Fri→Sun/Mon, ≤56h)
-                if prev_dt.weekday() == 4 and next_dt.weekday() in (0, 6) and gap_sec < 201600:
-                    continue
-                # Allow daily maintenance (16:xx→19:xx ET, < 4h)
-                if prev_dt.hour >= 16 and next_dt.hour <= 19 and gap_sec < 14400:
-                    continue
+                if cal:
+                    gap_type = cal.classify_gap(bars[i-1]["time"], bars[i]["time"])
+                    if gap_type in ("weekend", "holiday", "maintenance", "normal"):
+                        continue  # Expected closure — don't strip
+                else:
+                    # Fallback: basic heuristics
+                    from datetime import timezone as _tz5, timedelta as _td5
+                    _et5 = _tz5(_td5(hours=-4))
+                    prev_dt = datetime.fromtimestamp(bars[i-1]["time"], tz=_tz5.utc).astimezone(_et5)
+                    next_dt = datetime.fromtimestamp(bars[i]["time"],   tz=_tz5.utc).astimezone(_et5)
+                    if prev_dt.weekday() == 4 and next_dt.weekday() in (0, 6) and gap_sec < 201600:
+                        continue
+                    if prev_dt.hour >= 16 and next_dt.hour <= 19 and gap_sec < 14400:
+                        continue
                 last_big_gap_idx = i
         if last_big_gap_idx > 0:
             logger.info(
@@ -969,15 +967,10 @@ async def get_history(
         bars = fetcher.get_bars(key, from_ts=from_ts, to_ts=to_ts)
 
     if countback and len(bars) > countback:
-        # Scale countback ×4 so that RTH sessions (which filter out ~75% of
-        # ETH bars) still receive enough visible bars on initial chart load.
-        # Cap at len(bars)-1 so at least one older bar is always withheld —
-        # this keeps TradingView's scroll-to-load pagination alive.
         effective = max(countback, min(countback * 4, len(bars) - 1))
         bars = bars[-effective:]
 
     if not bars:
-        # Provide nextTime so TradingView keeps requesting older data
         next_ts = db.get_latest_ts_before(sym, key, from_ts)
         resp: dict = {"s": "no_data"}
         if next_ts is not None:
@@ -985,15 +978,9 @@ async def get_history(
         return resp
 
     # ── Append in-progress realtime bar (if any) ────────────────────────────
-    # The latest realtime bar lives in _prev_completed_bar (in-memory) and is
-    # also persisted to the realtime_bars table for crash-recovery.  It is
-    # stored separately from IB historical bars to avoid corrupting the record.
     rt_key = (sym, key)
     rt_bar = _prev_completed_bar.get(rt_key)
     if rt_bar and from_ts <= rt_bar["time"] <= to_ts:
-        # Replace or append: if DB already has a bar at this timestamp
-        # (from a previous IB fetch), the realtime bar takes precedence
-        # for the most-recent candle because it has live updates.
         if bars and bars[-1]["time"] == rt_bar["time"]:
             bars[-1] = rt_bar
         elif not bars or rt_bar["time"] > bars[-1]["time"]:
@@ -1935,6 +1922,131 @@ async def api_data_query(
         "available_symbols": symbols,
         "available_timeframes": timeframes,
         "available_sources": sources,
+    }
+
+
+# ─── Data Maintenance Tools API ──────────────────────────────────────────────
+# Standard operations for inspecting, diagnosing, and repairing bar data.
+# These endpoints power the Data Validation UI and support batch operations.
+
+@app.get("/api/data/integrity")
+async def api_data_integrity(
+    symbol: str = "MES",
+    timeframe: str = "5min",
+    from_ts: Optional[int] = None,
+    to_ts: Optional[int] = None,
+):
+    """Generate a data integrity report: counts, source breakdown, OHLCV violations."""
+    report = db.get_integrity_report(
+        symbol, timeframe,
+        from_ts=from_ts or 0,
+        to_ts=to_ts or 9_999_999_999,
+    )
+    return report
+
+
+@app.get("/api/data/coverage")
+async def api_data_coverage():
+    """Return coverage summary for all symbol/timeframe pairs in the DB."""
+    return db.get_coverage()
+
+
+@app.get("/api/data/bar")
+async def api_get_bar(
+    symbol: str = "MES",
+    timeframe: str = "5min",
+    ts: int = Query(...),
+):
+    """Point-inspect a single bar by its exact timestamp."""
+    bar = db.get_bar_at(symbol, timeframe, ts)
+    if bar is None:
+        return JSONResponse({"error": "Bar not found"}, status_code=404)
+    return bar
+
+
+class DeleteBarsRangeRequest(BaseModel):
+    symbol: str = "MES"
+    timeframe: str = "5min"
+    from_ts: int
+    to_ts: int
+
+
+@app.post("/api/data/delete_range")
+async def api_delete_bars_range(req: DeleteBarsRangeRequest):
+    """Delete bars in a specific time range."""
+    deleted = db.delete_bars_range(req.symbol, req.timeframe, req.from_ts, req.to_ts)
+    logger.info("Deleted %d bars for %s/%s in [%d→%d]",
+                deleted, req.symbol, req.timeframe, req.from_ts, req.to_ts)
+    return {"deleted": deleted, "symbol": req.symbol, "timeframe": req.timeframe}
+
+
+class DeleteBarsByTimestampsRequest(BaseModel):
+    symbol: str = "MES"
+    timeframe: str = "5min"
+    timestamps: List[int]
+
+
+@app.post("/api/data/delete_bars")
+async def api_delete_bars_by_timestamps(req: DeleteBarsByTimestampsRequest):
+    """Delete specific bars by their exact timestamps."""
+    deleted = db.delete_bars_by_timestamps(req.symbol, req.timeframe, req.timestamps)
+    logger.info("Deleted %d bars for %s/%s by timestamps",
+                deleted, req.symbol, req.timeframe)
+    return {"deleted": deleted, "symbol": req.symbol, "timeframe": req.timeframe}
+
+
+@app.post("/api/data/fix_ohlcv")
+async def api_fix_ohlcv(
+    symbol: str = "MES",
+    timeframe: str = "5min",
+    from_ts: Optional[int] = None,
+    to_ts: Optional[int] = None,
+):
+    """Fix OHLCV violations: swap high/low, clamp open/close, delete invalid bars."""
+    fixed = db.fix_ohlcv_violations(
+        symbol, timeframe,
+        from_ts=from_ts or 0,
+        to_ts=to_ts or 9_999_999_999,
+    )
+    return {"fixed": fixed, "symbol": symbol, "timeframe": timeframe}
+
+
+@app.get("/api/data/calendar_gaps")
+async def api_calendar_gaps(
+    symbol: str = "MES",
+    timeframe: str = "5min",
+    from_ts: Optional[int] = None,
+    to_ts: Optional[int] = None,
+):
+    """Detect gaps using the instrument's trading session calendar.
+    Returns only genuine data gaps (not weekends/holidays/maintenance)."""
+    from trading_calendar import get_calendar
+    from ib_data_fetcher import _key_to_ib
+    try:
+        _, interval = _key_to_ib(timeframe)
+    except Exception:
+        interval = 300
+
+    try:
+        cal = get_calendar(symbol)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+    bars = db.get_bars(symbol, timeframe,
+                       from_ts=from_ts or 0,
+                       to_ts=to_ts or 9_999_999_999)
+    if len(bars) < 2:
+        return {"symbol": symbol, "timeframe": timeframe, "gaps": [], "data_gaps": 0}
+
+    all_gaps = cal.find_gaps(bars, interval)
+    data_gaps = [g for g in all_gaps if g["gap_type"] == "data_gap"]
+
+    return {
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "total_gaps": len(all_gaps),
+        "data_gaps": len(data_gaps),
+        "gaps": all_gaps,
     }
 
 
