@@ -315,7 +315,11 @@ async def validate_bars(
     fetcher: Optional["IBDataFetcher"] = None,
 ) -> dict:
     """Validate DB bars against IB for a given range.
-    Returns summary dict with mismatches/counts.
+
+    Performs three levels of validation:
+      1. **IB comparison**: Compare DB bars against IB source-of-truth
+      2. **OHLCV integrity**: Check for bars with high < low, non-positive prices, etc.
+      3. **Completeness**: Use trading calendar to check for expected-but-missing bars
 
     Uses the local IB fetch cache to avoid redundant IB requests.
     If *fetcher* is provided, uses its IB connection (avoids event-loop deadlocks).
@@ -331,12 +335,51 @@ async def validate_bars(
 
     mismatches, db_only, ib_only = _compare_bars(db_bars, ib_bars)
 
+    # ── OHLCV integrity check ────────────────────────────────────────────
+    ohlcv_violations = []
+    try:
+        from trading_calendar import get_calendar
+        cal = get_calendar(symbol)
+        for b in db_bars:
+            issues = cal.validate_bar(b)
+            if issues:
+                ohlcv_violations.append({
+                    "time": b["time"],
+                    "issues": issues,
+                    "bar": b,
+                })
+    except Exception:
+        # Fallback: basic validation without calendar
+        for b in db_bars:
+            issues = []
+            o, h, l, c = b.get("open", 0), b.get("high", 0), b.get("low", 0), b.get("close", 0)
+            if h < l:
+                issues.append(f"high ({h}) < low ({l})")
+            if any(p <= 0 for p in (o, h, l, c)):
+                issues.append(f"non-positive price")
+            if issues:
+                ohlcv_violations.append({"time": b["time"], "issues": issues, "bar": b})
+
+    # ── Completeness check (calendar-aware) ──────────────────────────────
+    calendar_missing = []
+    try:
+        from trading_calendar import get_calendar
+        cal = get_calendar(symbol)
+        _, interval = _key_to_ib(timeframe)
+        actual_ts = [b["time"] for b in db_bars]
+        missing = cal.find_missing_bars(actual_ts, from_ts, to_ts, interval)
+        calendar_missing = missing[:100]  # Cap to avoid huge responses
+    except Exception:
+        pass
+
     elapsed = time.monotonic() - t0
     logger.info(
         "=== [DATA VALIDATE] DONE   %s/%s  %s  "
-        "db=%d ib=%d mismatches=%d db_only=%d ib_only=%d  (%.1fs) ===",
+        "db=%d ib=%d mismatches=%d db_only=%d ib_only=%d "
+        "ohlcv_violations=%d calendar_missing=%d  (%.1fs) ===",
         symbol, timeframe, rng,
         len(db_bars), len(ib_bars), len(mismatches), len(db_only), len(ib_only),
+        len(ohlcv_violations), len(calendar_missing),
         elapsed,
     )
 
@@ -352,6 +395,10 @@ async def validate_bars(
         "db_only_count": len(db_only),
         "ib_only_count": len(ib_only),
         "ib_only": ib_only,
+        "ohlcv_violations": ohlcv_violations,
+        "ohlcv_violation_count": len(ohlcv_violations),
+        "calendar_missing_count": len(calendar_missing),
+        "calendar_missing": calendar_missing,
     }
 
 

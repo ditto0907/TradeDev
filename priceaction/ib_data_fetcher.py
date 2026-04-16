@@ -158,29 +158,57 @@ class IBDataFetcher:
     Async wrapper around ib_insync for fetching and streaming OHLCV data
     for multiple symbols (MES, MNQ, NK225MC, MGC, etc.).
 
-    In-memory bar stores (self.bars) serve as a fast cache for the HTTP/WS
-    layer.  The SQLite DB (db.py) is the durable store — managed by server.py.
+    All symbols use the same unified tick handler and per-symbol state
+    management — there is NO special-case code for any single symbol.
+
+    In-memory bar stores (_symbol_bars) serve as a fast cache for the
+    HTTP/WS layer.  The SQLite DB (db.py) is the durable store — managed
+    by server.py.  Legacy self.bars["5min"] is maintained as a read-only
+    alias into _symbol_bars["MES"]["5min"] for backward compatibility.
     """
 
     def __init__(self):
         self.ib: Optional[IB] = None
-        self.bars: Dict[str, List[dict]] = {"5min": []}
-        self._contract = None                        # cached qualified ContFuture (MES)
+        self._contract = None                        # cached qualified ContFuture (primary symbol)
         self._contract_cache: Dict[str, object] = {}   # YYYYMM → qualified Future
         self._ib_ready: bool = False                 # True only after contract is resolved
         self._realtime_subscriptions: Dict[str, object] = {}
         self._new_bar_callbacks: List[Callable] = []
-        # Aggregated in-progress bars (built from ticks / 5s bars)
-        # Keyed by "symbol:bar_size_key" for multi-symbol, with "5min" as legacy key for MES
-        self._rt_current: Dict[str, Optional[dict]] = {"5min": None}
-        # reqMktData tick state — per-symbol
-        self._tick_state: Dict[str, dict] = {}  # symbol → {prev_price, prev_size, last_broadcast}
-        # Legacy single-symbol tick state (kept for backward compat with MES)
-        self._prev_tick_price: float = float("nan")
-        self._prev_tick_size:  float = float("nan")
-        self._last_tick_broadcast: float = 0.0
+
+        # Unified per-symbol state
+        # Aggregated in-progress bars: "symbol:bar_size_key" → bar dict
+        self._rt_current: Dict[str, Optional[dict]] = {}
+        # Per-symbol tick state: symbol → {prev_price, prev_size, last_broadcast}
+        self._tick_state: Dict[str, dict] = {}
         # Multi-symbol bars cache: symbol → {bar_size_key → [bars]}
         self._symbol_bars: Dict[str, Dict[str, List[dict]]] = {}
+
+        # Legacy compat: self.bars["5min"] points to _symbol_bars["MES"]["5min"]
+        # Initialize with empty list; updated when MES bars are loaded.
+        self.bars: Dict[str, List[dict]] = {"5min": []}
+
+    def _ensure_symbol_state(self, symbol: str) -> None:
+        """Initialize per-symbol state structures if not already present."""
+        if symbol not in self._symbol_bars:
+            self._symbol_bars[symbol] = {"5min": []}
+        rt_key = f"{symbol}:5min"
+        if rt_key not in self._rt_current:
+            self._rt_current[rt_key] = None
+        if symbol not in self._tick_state:
+            self._tick_state[symbol] = {
+                "prev_price": float("nan"),
+                "prev_size": float("nan"),
+                "last_broadcast": 0.0,
+            }
+
+    def _sync_legacy_bars(self):
+        """Keep self.bars["5min"] in sync with _symbol_bars for MES."""
+        import config as _cfg
+        primary = getattr(_cfg, "MES_SYMBOL", "MES")
+        # Find the primary symbol key (matches MES_SYM in server.py)
+        sym_key = "MES"
+        if sym_key in self._symbol_bars and "5min" in self._symbol_bars[sym_key]:
+            self.bars["5min"] = self._symbol_bars[sym_key]["5min"]
 
     # ─── Connection ──────────────────────────────────────────────────────────
 
@@ -347,15 +375,20 @@ class IBDataFetcher:
             existing = {b["time"]: b for b in self.bars[key]}
             for b in new_bars:
                 existing[b["time"]] = b
-            self.bars[key] = sorted(existing.values(), key=lambda b: b["time"])
+            merged = sorted(existing.values(), key=lambda b: b["time"])
         else:
-            self.bars[key] = new_bars
+            merged = new_bars
 
-        if len(self.bars[key]) > config.MAX_BARS_IN_MEMORY:
-            self.bars[key] = self.bars[key][-config.MAX_BARS_IN_MEMORY:]
+        if len(merged) > config.MAX_BARS_IN_MEMORY:
+            merged = merged[-config.MAX_BARS_IN_MEMORY:]
+
+        # Store in unified per-symbol structure
+        self._ensure_symbol_state("MES")
+        self._symbol_bars["MES"]["5min"] = merged
+        self._sync_legacy_bars()
 
         logger.info("Loaded %d %s bars total (%d new from IB)",
-                    len(self.bars[key]), key, len(new_bars))
+                    len(merged), key, len(new_bars))
 
     async def fetch_range(self, bar_size_key: str, from_ts: int, to_ts: int,
                          symbol: str = "MES") -> List[dict]:
@@ -477,7 +510,7 @@ class IBDataFetcher:
     async def subscribe_realtime(self):
         """5-second bar streaming (kept as fallback; use subscribe_mktdata for speed)."""
         contract = await self._get_contract()
-        self._seed_rt_current()
+        self._seed_rt_current("MES")
 
         rt_bars = self.ib.reqRealTimeBars(contract, 5, "TRADES", False)
         self._realtime_subscriptions["rt"] = rt_bars
@@ -495,28 +528,8 @@ class IBDataFetcher:
         rb_close = float(rb.close)
         rb_vol   = float(rb.volume)
 
-        key = "5min"
-        interval = 300
-        bar_ts = (rt_ts // interval) * interval
-        cur    = self._rt_current[key]
-
-        if cur is None or bar_ts > cur["time"]:
-            if cur is not None:
-                self._append_bar(key, cur)
-                self._dispatch(key, cur)
-            cur = {"time": bar_ts, "open": rb_open, "high": rb_high,
-                   "low": rb_low, "close": rb_close, "volume": rb_vol}
-            self._rt_current[key] = cur
-            self._append_bar(key, cur)
-        else:
-            cur["high"]    = max(cur["high"], rb_high)
-            cur["low"]     = min(cur["low"],  rb_low)
-            cur["close"]   = rb_close
-            cur["volume"] += rb_vol
-            if self.bars[key] and self.bars[key][-1]["time"] == bar_ts:
-                self.bars[key][-1] = cur
-
-        self._dispatch(key, cur)
+        # Use unified tick processing for MES
+        self._process_tick("MES", "5min", 300, rt_ts, rb_open, rb_high, rb_low, rb_close, rb_vol, is_bar=True)
 
     # ─── Real-time (reqMktData — tick level) ─────────────────────────────────
 
@@ -526,18 +539,27 @@ class IBDataFetcher:
         """
         Tick-level streaming via reqMktData — updates chart every ~250 ms.
         Seeds _rt_current from last historical bar to avoid a gap at startup.
-        Subscribes to MES only (legacy). Use subscribe_mktdata_all() for all symbols.
+        Legacy method — use subscribe_mktdata_all() for all symbols.
         """
         contract = await self._get_contract()
-        self._seed_rt_current()
+        self._ensure_symbol_state("MES")
+        self._seed_rt_current("MES")
 
         ticker = self.ib.reqMktData(contract, "", False, False)
         self._realtime_subscriptions["mktdata"] = ticker
-        ticker.updateEvent += self._on_tick
-        logger.info("Subscribed to market data ticks (≤250 ms chart updates)")
+
+        # Use unified tick handler for MES
+        def mes_handler(t):
+            self._on_tick_unified(t, "MES")
+        ticker.updateEvent += mes_handler
+        logger.info("[MES] Subscribed to market data ticks (≤250 ms chart updates)")
 
     async def subscribe_mktdata_all(self):
-        """Subscribe to tick-level streaming for ALL configured symbols."""
+        """Subscribe to tick-level streaming for ALL configured symbols.
+
+        Uses the same unified tick handler for every symbol — no special-case
+        code for any single instrument.
+        """
         from ib_insync import ContFuture as _ContFuture
         import db as _db
 
@@ -560,45 +582,26 @@ class IBDataFetcher:
                     logger.warning("[%s] No contract for realtime — skipping", sym_name)
                     continue
 
-                # Initialize per-symbol state — guard against overwriting
-                # values pre-seeded by server.py lifespan (crash recovery).
-                rt_key = f"{sym_name}:5min"
-                if rt_key not in self._rt_current:
-                    self._rt_current[rt_key] = None
-                if sym_name not in self._tick_state:
-                    self._tick_state[sym_name] = {
-                        "prev_price": float("nan"),
-                        "prev_size": float("nan"),
-                        "last_broadcast": 0.0,
-                    }
+                # Initialize per-symbol state (guard against overwriting pre-seeded values)
+                self._ensure_symbol_state(sym_name)
 
                 # Initialize in-memory bars for symbol if not pre-loaded by lifespan
-                if sym_name not in self._symbol_bars:
-                    self._symbol_bars[sym_name] = {"5min": []}
+                if not self._symbol_bars[sym_name].get("5min"):
                     recent = _db.get_bars(sym_name, "5min")
                     if recent:
                         self._symbol_bars[sym_name]["5min"] = recent[-config.MAX_BARS_IN_MEMORY:]
 
-                # Seed rt_current from last in-memory bar — mirrors _seed_rt_current() for MES.
-                # Only run if not already seeded (e.g. crash recovery from realtime_bars).
-                if self._rt_current.get(rt_key) is None:
-                    sym_mem_bars = self._symbol_bars.get(sym_name, {}).get("5min", [])
-                    if sym_mem_bars:
-                        now_ts = int(time.time())
-                        bar_ts = (now_ts // 300) * 300
-                        last = dict(sym_mem_bars[-1])
-                        if last["time"] == bar_ts:
-                            self._rt_current[rt_key] = last
-                            logger.debug("Seeded %s rt_current from history ts=%s", rt_key, last["time"])
+                # Seed rt_current from last in-memory bar
+                self._seed_rt_current(sym_name)
 
                 ticker = self.ib.reqMktData(qualified[0], "", False, False)
                 sub_key = f"mktdata_{sym_name}"
                 self._realtime_subscriptions[sub_key] = ticker
 
-                # Create per-symbol tick handler
+                # Create per-symbol tick handler using unified handler
                 def make_handler(symbol):
                     def handler(t):
-                        self._on_tick_multi(t, symbol)
+                        self._on_tick_unified(t, symbol)
                     return handler
 
                 ticker.updateEvent += make_handler(sym_name)
@@ -607,63 +610,38 @@ class IBDataFetcher:
             except Exception as e:
                 logger.warning("[%s] Realtime subscription failed: %s", sym_name, e)
 
-    def _seed_rt_current(self):
-        """Pre-fill _rt_current from last historical bar to avoid startup gap."""
+    def _seed_rt_current(self, symbol: str = "MES"):
+        """Pre-fill _rt_current from last historical bar to avoid startup gap.
+        Works for any symbol using the unified state structures."""
+        self._ensure_symbol_state(symbol)
         now_ts = int(time.time())
         key = "5min"
         interval = 300
-        if self.bars[key]:
-            last   = dict(self.bars[key][-1])
+        rt_key = f"{symbol}:{key}"
+
+        # Only seed if not already set (e.g. from crash recovery)
+        if self._rt_current.get(rt_key) is not None:
+            return
+
+        sym_bars = self._symbol_bars.get(symbol, {}).get(key, [])
+        if sym_bars:
+            last = dict(sym_bars[-1])
             bar_ts = (now_ts // interval) * interval
             if last["time"] == bar_ts:
-                self._rt_current[key] = last
-                logger.debug("Seeded %s rt_current from history ts=%s", key, last["time"])
+                self._rt_current[rt_key] = last
+                logger.debug("Seeded %s rt_current from history ts=%s", rt_key, last["time"])
 
-    def _on_tick(self, ticker):
-        price = ticker.last
-        size  = ticker.lastSize
-        if price is None or math.isnan(price) or price <= 0:
-            return
-        if size is None or math.isnan(size):
-            size = 0.0
+    # ─── Unified tick handler ────────────────────────────────────────────────
+    # Single handler for ALL symbols — eliminates the MES-specific _on_tick
+    # and the duplicate _on_tick_multi.
 
-        vol_delta = 0.0
-        if price != self._prev_tick_price or size != self._prev_tick_size:
-            vol_delta = float(size)
-            self._prev_tick_price = price
-            self._prev_tick_size  = size
+    def _on_tick_unified(self, ticker, symbol: str):
+        """Unified tick handler for all symbols (MES, MNQ, NK225MC, MGC, etc.).
 
-        wall_ts = int(time.time())
-        key = "5min"
-        interval = 300
-        bar_ts = (wall_ts // interval) * interval
-        cur    = self._rt_current[key]
-
-        if cur is None or bar_ts > cur["time"]:
-            if cur is not None:
-                self._append_bar(key, cur)
-                self._dispatch(key, cur)
-            cur = {"time": bar_ts, "open": price, "high": price,
-                   "low": price, "close": price, "volume": vol_delta}
-            self._rt_current[key] = cur
-            self._append_bar(key, cur)
-        else:
-            cur["high"]    = max(cur["high"], price)
-            cur["low"]     = min(cur["low"],  price)
-            cur["close"]   = price
-            cur["volume"] += vol_delta
-            if self.bars[key] and self.bars[key][-1]["time"] == bar_ts:
-                self.bars[key][-1] = cur
-
-        now = time.monotonic()
-        if now - self._last_tick_broadcast >= self._TICK_BROADCAST_INTERVAL:
-            self._last_tick_broadcast = now
-            cur = self._rt_current[key]
-            if cur:
-                self._dispatch(key, cur)
-
-    def _on_tick_multi(self, ticker, symbol: str):
-        """Tick handler for non-MES symbols."""
+        Processes a tick update: validates price, computes volume delta,
+        aggregates into the current 5-minute bar, and throttles WebSocket
+        broadcasts.
+        """
         price = ticker.last
         size  = ticker.lastSize
         if price is None or math.isnan(price) or price <= 0:
@@ -682,36 +660,64 @@ class IBDataFetcher:
             state["prev_size"] = size
 
         wall_ts = int(time.time())
-        rt_key = f"{symbol}:5min"
-        interval = 300
-        bar_ts = (wall_ts // interval) * interval
-        cur = self._rt_current.get(rt_key)
+        self._process_tick(symbol, "5min", 300, wall_ts, price, price, price, price, vol_delta)
 
-        sym_bars = self._symbol_bars.get(symbol, {}).get("5min", [])
-
-        if cur is None or bar_ts > cur["time"]:
-            if cur is not None:
-                self._append_bar_multi(symbol, "5min", cur)
-                self._dispatch_multi(symbol, "5min", cur)
-            cur = {"time": bar_ts, "open": price, "high": price,
-                   "low": price, "close": price, "volume": vol_delta}
-            self._rt_current[rt_key] = cur
-            self._append_bar_multi(symbol, "5min", cur)
-        else:
-            cur["high"]    = max(cur["high"], price)
-            cur["low"]     = min(cur["low"],  price)
-            cur["close"]   = price
-            cur["volume"] += vol_delta
-            if sym_bars and sym_bars[-1]["time"] == bar_ts:
-                sym_bars[-1] = cur
-
+        # Throttled broadcast
         now = time.monotonic()
         last_broadcast = state.get("last_broadcast", 0.0)
         if now - last_broadcast >= self._TICK_BROADCAST_INTERVAL:
             state["last_broadcast"] = now
+            rt_key = f"{symbol}:5min"
             cur = self._rt_current.get(rt_key)
             if cur:
                 self._dispatch_multi(symbol, "5min", cur)
+
+    def _process_tick(self, symbol: str, key: str, interval: int,
+                      ts: int, tick_open: float, tick_high: float,
+                      tick_low: float, tick_close: float, vol_delta: float,
+                      is_bar: bool = False):
+        """Core bar aggregation logic — shared by all symbols and data sources.
+
+        Updates the in-progress bar (_rt_current) for the given symbol/timeframe.
+        When a bar period ends, dispatches the completed bar and starts a new one.
+
+        Args:
+            is_bar: True when processing a pre-built bar (from reqRealTimeBars),
+                    False when processing individual ticks (from reqMktData).
+        """
+        self._ensure_symbol_state(symbol)
+        rt_key = f"{symbol}:{key}"
+        bar_ts = (ts // interval) * interval
+        cur = self._rt_current.get(rt_key)
+
+        if cur is None or bar_ts > cur["time"]:
+            if cur is not None:
+                self._append_bar_multi(symbol, key, cur)
+                self._dispatch_multi(symbol, key, cur)
+            cur = {
+                "time": bar_ts,
+                "open": tick_open,
+                "high": tick_high,
+                "low": tick_low,
+                "close": tick_close,
+                "volume": vol_delta,
+            }
+            self._rt_current[rt_key] = cur
+            self._append_bar_multi(symbol, key, cur)
+        else:
+            if is_bar:
+                cur["high"] = max(cur["high"], tick_high)
+                cur["low"]  = min(cur["low"], tick_low)
+            else:
+                cur["high"] = max(cur["high"], tick_close)
+                cur["low"]  = min(cur["low"], tick_close)
+            cur["close"]   = tick_close
+            cur["volume"] += vol_delta
+
+            # Update in-memory bar list
+            sym_bars = self._symbol_bars.get(symbol, {}).get(key, [])
+            if sym_bars and sym_bars[-1]["time"] == bar_ts:
+                sym_bars[-1] = cur
 
     # ─── Shared helpers ───────────────────────────────────────────────────────
 
@@ -719,11 +725,8 @@ class IBDataFetcher:
         self._new_bar_callbacks.append(callback)
 
     def _dispatch(self, key: str, bar: dict):
-        for cb in self._new_bar_callbacks:
-            try:
-                cb(key, dict(bar))
-            except Exception as exc:
-                logger.error("Callback error: %s", exc)
+        """Legacy dispatch — routes through _dispatch_multi with MES."""
+        self._dispatch_multi("MES", key, bar)
 
     def _dispatch_multi(self, symbol: str, key: str, bar: dict):
         """Dispatch bar update with symbol info for multi-symbol callbacks."""
@@ -734,34 +737,15 @@ class IBDataFetcher:
                 logger.error("Callback error for %s: %s", symbol, exc)
 
     def _append_bar(self, key: str, bar: dict):
-        bars = self.bars[key]
-        if bars and bars[-1]["time"] == bar["time"]:
-            bars[-1] = bar
-            return
-
-        if not bars or bar["time"] > bars[-1]["time"]:
-            bars.append(bar)
-        else:
-            inserted = False
-            for idx, existing in enumerate(bars):
-                if existing["time"] == bar["time"]:
-                    bars[idx] = bar
-                    inserted = True
-                    break
-                if existing["time"] > bar["time"]:
-                    bars.insert(idx, bar)
-                    inserted = True
-                    break
-            if not inserted:
-                bars.append(bar)
-
-        if len(bars) > config.MAX_BARS_IN_MEMORY:
-            bars.pop(0)
+        """Legacy append — routes through _append_bar_multi with MES."""
+        self._append_bar_multi("MES", key, bar)
+        self._sync_legacy_bars()
 
     def _append_bar_multi(self, symbol: str, key: str, bar: dict):
-        """Append bar to per-symbol in-memory store."""
-        if symbol not in self._symbol_bars:
-            self._symbol_bars[symbol] = {}
+        """Append bar to per-symbol in-memory store.
+        Maintains time-sorted order and deduplicates by timestamp.
+        """
+        self._ensure_symbol_state(symbol)
         if key not in self._symbol_bars[symbol]:
             self._symbol_bars[symbol][key] = []
         bars = self._symbol_bars[symbol][key]
@@ -789,6 +773,10 @@ class IBDataFetcher:
         if len(bars) > config.MAX_BARS_IN_MEMORY:
             bars.pop(0)
 
+        # Keep legacy self.bars in sync
+        if symbol == "MES":
+            self._sync_legacy_bars()
+
     def unsubscribe_realtime(self):
         if not self.ib:
             return
@@ -814,12 +802,8 @@ class IBDataFetcher:
         from_ts: Optional[int] = None,
         to_ts: Optional[int]   = None,
     ) -> List[dict]:
-        bars = self.bars.get(bar_size_key, [])
-        if from_ts is not None:
-            bars = [b for b in bars if b["time"] >= from_ts]
-        if to_ts is not None:
-            bars = [b for b in bars if b["time"] <= to_ts]
-        return bars
+        """Get in-memory bars for MES (legacy API — delegates to get_bars_for_symbol)."""
+        return self.get_bars_for_symbol("MES", bar_size_key, from_ts, to_ts)
 
     def get_bars_for_symbol(
         self,
@@ -828,9 +812,8 @@ class IBDataFetcher:
         from_ts: Optional[int] = None,
         to_ts: Optional[int]   = None,
     ) -> List[dict]:
-        """Get in-memory bars for a specific symbol."""
-        if symbol == "MES":
-            return self.get_bars(bar_size_key, from_ts, to_ts)
+        """Get in-memory bars for a specific symbol.
+        Uses the unified _symbol_bars store for all symbols."""
         bars = self._symbol_bars.get(symbol, {}).get(bar_size_key, [])
         if from_ts is not None:
             bars = [b for b in bars if b["time"] >= from_ts]
