@@ -42,7 +42,7 @@
 - **DB 为唯一数据源**：`/api/history` 纯 DB 读取，无 IB 等待，P99 < 100ms
 - **后台数据同步**：BarManager 持续后台检测和填充数据缺口
 - **写入前校验**：所有写入 DB 的数据经过时间戳对齐、OHLC 一致性、价格合理性校验
-- **统一交易日历**：TradingCalendar 统一管理 session、假日、维护窗口，消除 gap 误判
+- **统一交易日历**：TradingCalendar 统一管理 session、假日、维护窗口，消除数据缺口误判
 - **多品种通用**：所有逻辑以 (symbol, timeframe) 为 key，品种差异通过配置驱动
 
 ### 📊 表格功能

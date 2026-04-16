@@ -771,7 +771,7 @@ getBars(symbolInfo, resolution, periodParams, onResult, onError) {
 | Step | 描述 | 文件 | 影响 |
 |------|------|------|------|
 | 1.1 | 创建 `trading_calendar.py` | 新建 | 无 |
-| 1.2 | 将 `market_holidays.py` 逻辑迁移到 `trading_calendar.py` | 修改 | 无 |
+| 1.2 | 将 `market_holidays.py` 逻辑迁移到 `trading_calendar.py`（迁移完成后 `market_holidays.py` 保留为空 wrapper，标记 deprecated，后续版本移除） | 修改 | 无 |
 | 1.3 | 在 `config.py` 中集中配置阈值 | 修改 | 无 |
 | 1.4 | 在 `db.py` 中添加新表和新函数（保留旧函数） | 修改 | 无 |
 
@@ -873,7 +873,7 @@ getBars(symbolInfo, resolution, periodParams, onResult, onError) {
 1. **渐进式迁移**：新模块先并行运行，验证通过后再切换
 2. **数据库兼容**：`bars` 表结构不变，新增表不影响旧代码
 3. **API 向后兼容**：所有 API 返回格式保持不变
-4. **回滚方案**：保留旧代码文件（rename 为 `_legacy`），可快速回滚
+4. **回滚方案**：保留旧代码文件（`server.py` → `server_legacy.py`、`ib_data_fetcher.py` → `ib_data_fetcher_legacy.py`、`db.py` → `db_legacy.py`），可快速回滚。回滚触发条件：重构后出现 API 响应异常（非 200）、实时 bar 推送中断超过 5 分钟、或图表无法加载数据
 
 ---
 
