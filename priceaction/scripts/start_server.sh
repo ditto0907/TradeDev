@@ -2,7 +2,7 @@
 # PriceAction Server Startup Script
 # Ensures proper file descriptor limits and connection pooling
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 # Set file descriptor limit
 ulimit -n 10240

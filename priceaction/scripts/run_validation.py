@@ -4,17 +4,21 @@ Standalone data validation & fix script.
 Connects directly to IB with its own clientId, independent of the server.
 
 Usage:
-    python3 run_validation.py              # validate only (report)
-    python3 run_validation.py --fix        # validate and fix mismatches
-    python3 run_validation.py --symbol MES --timeframe 5min  # specific pair
+    python3 scripts/run_validation.py              # validate only (report)
+    python3 scripts/run_validation.py --fix        # validate and fix mismatches
+    python3 scripts/run_validation.py --symbol MES --timeframe 5min  # specific pair
 """
 import argparse
 import asyncio
 import json
 import logging
+import os
 import sys
 import time
 from datetime import datetime, timezone
+
+# Add parent directory to path so project modules can be imported
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 # Project imports
 import config

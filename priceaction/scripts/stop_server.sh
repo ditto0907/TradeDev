@@ -2,7 +2,7 @@
 # PriceAction Server Stop Script
 # Gracefully stops the running server
 
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 echo "Stopping PriceAction server..."
 
