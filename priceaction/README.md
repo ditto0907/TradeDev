@@ -2,6 +2,9 @@
 
 基于 TradingView Charting Library + FastAPI + Interactive Brokers 的实时期货交易终端。
 
+> **📌 数据架构重构 (v2)**: K线数据逻辑已规划重构，详见 [refactor.md](refactor.md) 和 [dataflow.md](dataflow.md) 中的 v2 架构部分。
+> 核心变更：BarManager 统一管理、API 纯读取、写入前校验、统一交易日历。
+
 ---
 
 ## 系统总架构

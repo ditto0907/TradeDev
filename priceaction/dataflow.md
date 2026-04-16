@@ -5,6 +5,119 @@
 
 ---
 
+## v2 架构概览 (重构后)
+
+> ⚠️ 以下 v2 部分描述重构后的目标架构。v1 架构文档保留在下方供参考。
+
+### 核心设计原则
+
+1. **DB 为唯一数据源 (Single Source of Truth)**：`/api/history` 只做 DB 查询 + 格式化返回
+2. **API 无副作用**：数据补全是后台任务，不在 API 请求路径上执行
+3. **写入前校验**：所有数据经过 BarManager 的 validation pipeline 再写入 DB
+4. **统一交易日历**：TradingCalendar 统一管理 session/假日/维护窗口
+
+### v2 系统架构
+
+```mermaid
+graph TB
+    subgraph 数据源层 ["数据源层 (Data Source)"]
+        IB["IB TWS Gateway"]
+    end
+
+    subgraph 核心层 ["核心层 (Core — BarManager)"]
+        BM["bar_manager.py<br/>(BarManager)"]
+        TC["trading_calendar.py<br/>(TradingCalendar)"]
+        VLD["validation pipeline<br/>(write-through)"]
+    end
+
+    subgraph API层 ["API层 (Pure Read)"]
+        SRV["server.py<br/>(FastAPI)"]
+        OPS["data_ops.py<br/>(DataOps)"]
+    end
+
+    subgraph 存储层 ["存储层 (Storage)"]
+        DB["SQLite WAL<br/>db.py (pure CRUD)"]
+    end
+
+    subgraph 展示层 ["展示层 (Frontend)"]
+        TV["TradingView Chart"]
+    end
+
+    IB -- "fetch_historical<br/>subscribe_ticks" --> BM
+    BM -- "realtime tick" --> VLD
+    BM -- "background sync" --> VLD
+    VLD -- "validated bars" --> DB
+    TC -- "session/holiday" --> BM
+    DB -- "pure read" --> SRV
+    BM -- "RT bar (memory)" --> SRV
+    SRV -- "GET /api/history" --> TV
+    SRV -- "WS push" --> TV
+    OPS -- "query/fix" --> DB
+    OPS -- "validate vs IB" --> IB
+
+    style BM fill:#e8f5e9,stroke:#388e3c
+    style VLD fill:#fff9c4,stroke:#f9a825
+    style DB fill:#fff3e0,stroke:#f57c00
+    style SRV fill:#e1f5fe,stroke:#0288d1
+```
+
+### v2 数据加载流程
+
+```mermaid
+sequenceDiagram
+    participant SRV as server.py
+    participant BM as BarManager
+    participant DB as SQLite
+    participant IB as IB TWS
+    participant FE as Frontend
+
+    Note over SRV: === Startup ===
+    SRV->>DB: init_db()
+    SRV->>BM: init(db, fetcher, calendar)
+    BM->>DB: load latest bars to memory cache
+
+    Note over SRV: === Server Ready (< 200ms) ===
+
+    par Background Sync
+        BM->>IB: connect + fetch gaps
+        IB-->>BM: historical bars
+        BM->>BM: validate_bars_batch()
+        BM->>DB: insert validated bars
+    and API Serving (Pure Read)
+        FE->>SRV: GET /api/history
+        SRV->>DB: get_bars (pure query)
+        SRV->>BM: get RT bar (memory)
+        SRV-->>FE: {s:"ok", t:[], o:[], ...}
+    end
+
+    Note over BM: Periodic sync every 5min
+    loop Background Gap Check
+        BM->>DB: get_bar_timestamps()
+        BM->>BM: TradingCalendar.find_gaps()
+        BM->>IB: fetch missing ranges
+        BM->>BM: validate + store
+    end
+```
+
+### v2 API 端点
+
+| 端点 | 方法 | 描述 | 副作用 |
+|------|------|------|--------|
+| `/api/history` | GET | K线数据查询 | ❌ 无 (纯 DB 读取) |
+| `/ws/realtime` | WS | 实时 bar 推送 | ❌ 无 |
+| `/api/data-ops/coverage` | GET | 数据覆盖率 | ❌ 无 |
+| `/api/data-ops/gaps` | GET | 缺口报告 | ❌ 无 |
+| `/api/data-ops/validate` | POST | IB 对比校验 | ❌ 无 (只读) |
+| `/api/data-ops/fix` | POST | 批量修复 | ✅ 写入 DB |
+| `/api/data-ops/fix-bar` | POST | 单点修复 | ✅ 写入 DB |
+| `/api/data-ops/quality-report` | GET | 质量报告 | ❌ 无 |
+
+---
+
+## v1 架构文档 (原有实现)
+
+---
+
 ## 目录
 
 1. [概览 (Overview)](#1-概览-overview)
