@@ -135,8 +135,9 @@ def _contract_active_start_ts(yyyymm: str) -> int:
     """
     Timestamp of the first second this contract became front-month.
     Rollover from the previous contract occurs on day 11 00:00 UTC of the
-    previous quarter's expiry month (i.e. one day after our approximate
-    rollover day-10 boundary used in _contract_month_for_ts).
+    previous quarter's expiry month (i.e. one day after the day-10 rollover
+    boundary used in _contract_month_for_ts: 'd <= 10' → old contract,
+    'd >= 11' → new contract).
     """
     prev = _prev_contract_month(yyyymm)
     y, m = int(prev[:4]), int(prev[4:])
@@ -363,13 +364,19 @@ class IBDataFetcher:
         end_ts   = ((to_ts + interval - 1) // interval) * interval
 
         months = _contracts_for_range(start_ts, end_ts)
-        all_bars: dict = {}   # timestamp → bar (deduplicates overlapping contract data)
+        all_bars: Dict[int, dict] = {}   # timestamp → bar (deduplicates overlapping contract data)
 
         for month in months:
             # Clamp the sub-window to this contract's front-month period
             sub_start = max(start_ts, _contract_active_start_ts(month))
             sub_end   = min(end_ts,   _contract_active_end_ts(month))
             if sub_start > sub_end:
+                logger.debug(
+                    "Contract %s sub-window is empty after clamping to [%s, %s], skipping",
+                    month,
+                    datetime.fromtimestamp(start_ts, tz=timezone.utc).isoformat(),
+                    datetime.fromtimestamp(end_ts,   tz=timezone.utc).isoformat(),
+                )
                 continue
 
             sub_end_dt  = datetime.fromtimestamp(sub_end, tz=timezone.utc)
