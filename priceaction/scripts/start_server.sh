@@ -2,6 +2,7 @@
 # PriceAction Server Startup Script
 # Ensures proper file descriptor limits and connection pooling
 
+# Navigate to priceaction root — server.py and its modules live there
 cd "$(dirname "$0")/.."
 
 # Set file descriptor limit
