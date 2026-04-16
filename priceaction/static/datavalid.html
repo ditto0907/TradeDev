@@ -421,6 +421,7 @@ body {
     <div id="tab-bar">
       <div class="dv-tab active" data-pane="query">📋 Data Query</div>
       <div class="dv-tab" data-pane="validate">✅ Data Validate</div>
+      <div class="dv-tab" data-pane="integrity">🔧 Integrity</div>
     </div>
 
     <!-- ═══ Data Query Pane ══════════════════════════════════════════════ -->
@@ -527,6 +528,47 @@ body {
           </thead>
           <tbody id="v-tbody">
             <tr><td colspan="8"><div class="empty-msg">Select parameters and run a check</div></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ═══ Integrity Pane ═══════════════════════════════════════════════ -->
+    <div class="dv-pane" id="pane-integrity">
+      <div class="dv-toolbar">
+        <label>Symbol
+          <select id="i-symbol">
+            <option value="MES">MES</option>
+            <option value="MNQ">MNQ</option>
+            <option value="NK225MC">NK225MC</option>
+            <option value="MGC">MGC</option>
+          </select>
+        </label>
+        <label>Timeframe
+          <select id="i-timeframe">
+            <option value="5min">5min</option>
+            <option value="1D">1D</option>
+          </select>
+        </label>
+        <label>From
+          <input type="datetime-local" id="i-from" min="2024-01-01T00:00"/>
+        </label>
+        <label>To
+          <input type="datetime-local" id="i-to" min="2024-01-01T00:00"/>
+        </label>
+        <button class="dv-btn primary" onclick="runIntegrity()">🔍 Run Report</button>
+        <button class="dv-btn" onclick="runCoverageCheck()">📊 Coverage</button>
+        <button class="dv-btn" onclick="runCalendarGaps()">📅 Calendar Gaps</button>
+        <button class="dv-btn danger" onclick="runFixOHLCV()">🔧 Fix OHLCV</button>
+      </div>
+      <div class="dv-summary" id="i-summary"></div>
+      <div class="dv-table-wrap">
+        <table class="dv-data-table" id="i-table">
+          <thead id="i-thead">
+            <tr><th colspan="6">Run an integrity check to see results</th></tr>
+          </thead>
+          <tbody id="i-tbody">
+            <tr><td colspan="6"><div class="empty-msg">Select parameters and click Run Report</div></td></tr>
           </tbody>
         </table>
       </div>
@@ -1146,6 +1188,205 @@ function runValidateAll() {
       showToast('Validate all failed: ' + e.message, 'error');
     });
 }
+
+// ── Integrity tab functions ────────────────────────────────────────────────
+
+function runIntegrity() {
+  var sym  = document.getElementById('i-symbol').value;
+  var tf   = document.getElementById('i-timeframe').value;
+  var from = dateToTs(document.getElementById('i-from').value, false);
+  var to   = dateToTs(document.getElementById('i-to').value, true);
+  var summary = document.getElementById('i-summary');
+  summary.style.display = '';
+  summary.innerHTML = '⏳ Running integrity check…';
+
+  var url = '/api/data/integrity?symbol=' + sym + '&timeframe=' + tf;
+  if (from) url += '&from_ts=' + from;
+  if (to) url += '&to_ts=' + to;
+
+  fetch(url)
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      summary.innerHTML =
+        'Total bars: <span style="color:var(--text)">' + data.total_bars + '</span>'
+        + ' | OHLCV violations: <span style="color:' + (data.ohlcv_violations > 0 ? 'var(--red)' : 'var(--green)') + '">' + data.ohlcv_violations + '</span>'
+        + ' | Duplicates: <span style="color:' + (data.duplicates > 0 ? 'var(--red)' : 'var(--green)') + '">' + data.duplicates + '</span>'
+        + ' | Earliest: <span style="color:var(--text-dim)">' + (data.earliest_ts ? tsToLocal(data.earliest_ts) : 'N/A') + '</span>'
+        + ' | Latest: <span style="color:var(--text-dim)">' + (data.latest_ts ? tsToLocal(data.latest_ts) : 'N/A') + '</span>';
+
+      // Source breakdown table
+      var sources = data.sources || {};
+      var srcKeys = Object.keys(sources);
+      document.getElementById('i-thead').innerHTML =
+        '<tr>'
+        + '<th style="width:200px">Source</th>'
+        + '<th style="width:120px">Bar Count</th>'
+        + '<th style="width:120px">Percentage</th>'
+        + '</tr>';
+      if (srcKeys.length === 0) {
+        document.getElementById('i-tbody').innerHTML =
+          '<tr><td colspan="3"><div class="empty-msg">No data found</div></td></tr>';
+        return;
+      }
+      document.getElementById('i-tbody').innerHTML = srcKeys.map(function(src) {
+        var cnt = sources[src];
+        var pct = data.total_bars > 0 ? (cnt / data.total_bars * 100).toFixed(1) : '0';
+        return '<tr>'
+          + '<td>' + src + '</td>'
+          + '<td class="num">' + cnt.toLocaleString() + '</td>'
+          + '<td class="num">' + pct + '%</td>'
+          + '</tr>';
+      }).join('');
+
+      showToast('Integrity check complete', data.ohlcv_violations > 0 ? 'warn' : 'success');
+    })
+    .catch(function(e) {
+      summary.innerHTML = '❌ ' + e.message;
+      showToast('Integrity check failed: ' + e.message, 'error');
+    });
+}
+
+function runCoverageCheck() {
+  var summary = document.getElementById('i-summary');
+  summary.style.display = '';
+  summary.innerHTML = '⏳ Checking coverage…';
+
+  fetch('/api/data/coverage')
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      summary.innerHTML = 'Found <span style="color:var(--text)">' + data.length + '</span> symbol/timeframe pairs';
+
+      document.getElementById('i-thead').innerHTML =
+        '<tr>'
+        + '<th style="width:100px">Symbol</th>'
+        + '<th style="width:100px">Timeframe</th>'
+        + '<th style="width:140px">Earliest</th>'
+        + '<th style="width:140px">Latest</th>'
+        + '<th style="width:100px">Bar Count</th>'
+        + '</tr>';
+
+      if (data.length === 0) {
+        document.getElementById('i-tbody').innerHTML =
+          '<tr><td colspan="5"><div class="empty-msg">No data in database</div></td></tr>';
+        return;
+      }
+      document.getElementById('i-tbody').innerHTML = data.map(function(r) {
+        return '<tr>'
+          + '<td>' + r.symbol + '</td>'
+          + '<td>' + r.timeframe + '</td>'
+          + '<td>' + tsToLocal(r.min_ts) + '</td>'
+          + '<td>' + tsToLocal(r.max_ts) + '</td>'
+          + '<td class="num">' + r.count.toLocaleString() + '</td>'
+          + '</tr>';
+      }).join('');
+
+      showToast('Coverage check complete', 'success');
+    })
+    .catch(function(e) {
+      summary.innerHTML = '❌ ' + e.message;
+      showToast('Coverage check failed: ' + e.message, 'error');
+    });
+}
+
+function runCalendarGaps() {
+  var sym  = document.getElementById('i-symbol').value;
+  var tf   = document.getElementById('i-timeframe').value;
+  var from = dateToTs(document.getElementById('i-from').value, false);
+  var to   = dateToTs(document.getElementById('i-to').value, true);
+  var summary = document.getElementById('i-summary');
+  summary.style.display = '';
+  summary.innerHTML = '⏳ Detecting calendar gaps…';
+
+  var url = '/api/data/calendar_gaps?symbol=' + sym + '&timeframe=' + tf;
+  if (from) url += '&from_ts=' + from;
+  if (to) url += '&to_ts=' + to;
+
+  fetch(url)
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data.error) {
+        summary.innerHTML = '❌ ' + data.error;
+        return;
+      }
+      var gaps = data.gaps || [];
+      var dataGapCount = data.data_gaps || 0;
+      summary.innerHTML =
+        'Total gaps: <span style="color:var(--text)">' + data.total_gaps + '</span>'
+        + ' | Data gaps: <span style="color:' + (dataGapCount > 0 ? 'var(--red)' : 'var(--green)') + '">' + dataGapCount + '</span>';
+
+      document.getElementById('i-thead').innerHTML =
+        '<tr>'
+        + '<th style="width:160px">Gap Start</th>'
+        + '<th style="width:160px">Gap End</th>'
+        + '<th style="width:100px">Duration</th>'
+        + '<th style="width:110px">Type</th>'
+        + '<th style="width:100px">Expected Bars</th>'
+        + '</tr>';
+
+      if (gaps.length === 0) {
+        document.getElementById('i-tbody').innerHTML =
+          '<tr><td colspan="5"><div class="empty-msg">No gaps found</div></td></tr>';
+        return;
+      }
+      document.getElementById('i-tbody').innerHTML = gaps.map(function(g) {
+        var typeCls = g.gap_type === 'data_gap' ? 'warn' : '';
+        var dur = g.gap_seconds < 3600
+          ? Math.round(g.gap_seconds / 60) + 'm'
+          : (g.gap_seconds / 3600).toFixed(1) + 'h';
+        return '<tr>'
+          + '<td>' + tsToLocal(g.gap_start) + '</td>'
+          + '<td>' + tsToLocal(g.gap_end) + '</td>'
+          + '<td class="num">' + dur + '</td>'
+          + '<td class="' + typeCls + '">' + (g.gap_type || '') + '</td>'
+          + '<td class="num">' + (g.expected_bars || 0) + '</td>'
+          + '</tr>';
+      }).join('');
+
+      showToast('Calendar gap check complete', dataGapCount > 0 ? 'warn' : 'success');
+    })
+    .catch(function(e) {
+      summary.innerHTML = '❌ ' + e.message;
+      showToast('Calendar gap check failed: ' + e.message, 'error');
+    });
+}
+
+function runFixOHLCV() {
+  var sym  = document.getElementById('i-symbol').value;
+  var tf   = document.getElementById('i-timeframe').value;
+  var from = dateToTs(document.getElementById('i-from').value, false);
+  var to   = dateToTs(document.getElementById('i-to').value, true);
+
+  if (!confirm('Fix OHLCV violations for ' + sym + '/' + tf + '? This will swap high/low and delete invalid bars.')) return;
+
+  var summary = document.getElementById('i-summary');
+  summary.style.display = '';
+  summary.innerHTML = '⏳ Fixing OHLCV violations…';
+
+  var url = '/api/data/fix_ohlcv?symbol=' + sym + '&timeframe=' + tf;
+  if (from) url += '&from_ts=' + from;
+  if (to) url += '&to_ts=' + to;
+
+  fetch(url, { method: 'POST' })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      summary.innerHTML =
+        'Fixed: <span style="color:var(--green)">' + data.fixed + '</span> bars for '
+        + data.symbol + '/' + data.timeframe;
+      showToast('Fixed ' + data.fixed + ' OHLCV violations', data.fixed > 0 ? 'success' : 'info');
+    })
+    .catch(function(e) {
+      summary.innerHTML = '❌ ' + e.message;
+      showToast('Fix OHLCV failed: ' + e.message, 'error');
+    });
+}
+
+// Initialize integrity tab defaults
+(function() {
+  var fromEl = document.getElementById('i-from');
+  var toEl = document.getElementById('i-to');
+  if (fromEl && !fromEl.value) fromEl.value = document.getElementById('q-from').value;
+  if (toEl && !toEl.value) toEl.value = document.getElementById('q-to').value;
+})();
 </script>
 </body>
 </html>
