@@ -458,6 +458,9 @@ class IBDataFetcher:
             bars.sort(key=lambda b: b["time"])
 
             if bars:
+                # Tag each bar with the contract month used for the fetch
+                for b in bars:
+                    b["contract_month"] = month
                 logger.info("[%s] On-demand fetch: got %d %s bars from Future %s",
                             symbol, len(bars), bar_size_key, contract.localSymbol)
                 return bars
@@ -495,6 +498,9 @@ class IBDataFetcher:
                         if b["time"] >= from_ts and b["time"] <= to_ts]
                 bars.sort(key=lambda b: b["time"])
                 if bars:
+                    # Tag each bar with the contract month derived from its timestamp
+                    for b in bars:
+                        b["contract_month"] = _contract_month_for_ts(b["time"], symbol)
                     logger.info("[%s] ContFuture fallback: got %d %s bars",
                                 symbol, len(bars), bar_size_key)
                     return bars

@@ -1310,10 +1310,13 @@ async def api_validate_bars(
     to_ts: Optional[int] = None,
     from_dt: Optional[str] = None,
     to_dt: Optional[str] = None,
+    contract_month: Optional[str] = None,
 ):
     """Validate DB bars against IB historical data for a time range.
     Returns mismatches without fixing them.
-    IB data is fetched via the local ib_fetch_cache to reduce IB requests."""
+    IB data is fetched via the local ib_fetch_cache to reduce IB requests.
+    Supply *contract_month* (e.g. '202503') to restrict validation to bars
+    belonging to that specific futures contract only."""
     # Convert datetime strings if provided
     if from_dt and not from_ts:
         from_ts = _parse_dt_eastern(from_dt)
@@ -1328,7 +1331,10 @@ async def api_validate_bars(
 
     # Reuse server's IB connection via fetcher (avoids event-loop deadlocks)
     f = fetcher if (fetcher._ib_ready and fetcher.ib and fetcher.ib.isConnected()) else None
-    result = await data_validator.validate_bars(symbol, timeframe, from_ts, to_ts, fetcher=f)
+    result = await data_validator.validate_bars(
+        symbol, timeframe, from_ts, to_ts,
+        fetcher=f, contract_month=contract_month,
+    )
     return result
 
 
@@ -1340,6 +1346,7 @@ class FixBarsRequest(BaseModel):
     from_dt: Optional[str] = None
     to_dt: Optional[str] = None
     timestamps: Optional[List[int]] = None  # subset of timestamps to fix; None = fix all
+    contract_month: Optional[str] = None    # restrict fix to this contract month
 
 
 @app.post("/api/data/fix")
@@ -1349,6 +1356,8 @@ async def api_fix_bars(req: FixBarsRequest):
     *timestamps*: optional list of Unix timestamps to restrict fixing to only
     those specific bars (selected rows from the UI).  When omitted every
     mismatch/missing bar in the range is fixed.
+    *contract_month*: optional contract month (e.g. '202503') to restrict fix
+    to bars belonging to that specific futures contract only.
     """
     from_ts = req.from_ts
     to_ts   = req.to_ts
@@ -1368,6 +1377,7 @@ async def api_fix_bars(req: FixBarsRequest):
         req.symbol, req.timeframe, from_ts, to_ts,
         fetcher=f,
         timestamps=req.timestamps,
+        contract_month=req.contract_month,
     )
     return result
 
@@ -1866,13 +1876,16 @@ async def api_data_query(
     symbol: Optional[str] = None,
     timeframe: Optional[str] = None,
     source: Optional[str] = None,
+    contract_month: Optional[str] = None,
     from_ts: Optional[int] = None,
     to_ts: Optional[int] = None,
     page: int = 1,
     page_size: int = 50,
 ):
     """Paginated query of bars from DB with flexible filter conditions.
-    page_size is bounded to 1-500."""
+    page_size is bounded to 1-500.
+    Supply *contract_month* (e.g. '202503') to restrict results to bars
+    belonging to that specific futures contract."""
     page_size = min(max(1, page_size), 500)  # Bound page_size to 1-500
     where_clauses = []
     params: list = []
@@ -1885,6 +1898,9 @@ async def api_data_query(
     if source:
         where_clauses.append("source=?")
         params.append(source)
+    if contract_month is not None:
+        where_clauses.append("contract_month=?")
+        params.append(contract_month)
     if from_ts:
         where_clauses.append("ts>=?")
         params.append(from_ts)
@@ -1904,7 +1920,7 @@ async def api_data_query(
         # Paginated data
         offset = (max(1, page) - 1) * page_size
         data_sql = (
-            f"SELECT symbol, timeframe, ts, open, high, low, close, volume, source "
+            f"SELECT symbol, timeframe, ts, open, high, low, close, volume, source, contract_month "
             f"FROM bars{where_sql} ORDER BY ts ASC LIMIT ? OFFSET ?"
         )
         rows = conn.execute(data_sql, params + [page_size, offset]).fetchall()
@@ -1919,11 +1935,14 @@ async def api_data_query(
         sources = [r[0] for r in conn.execute(
             "SELECT DISTINCT source FROM bars ORDER BY source"
         ).fetchall()]
+        contract_months = [r[0] for r in conn.execute(
+            "SELECT DISTINCT contract_month FROM bars WHERE contract_month != '' ORDER BY contract_month"
+        ).fetchall()]
 
     bars = [
         {"symbol": r[0], "timeframe": r[1], "time": r[2],
          "open": r[3], "high": r[4], "low": r[5], "close": r[6],
-         "volume": r[7], "source": r[8]}
+         "volume": r[7], "source": r[8], "contract_month": r[9]}
         for r in rows
     ]
     total_pages = max(1, (total + page_size - 1) // page_size)
@@ -1937,6 +1956,7 @@ async def api_data_query(
         "available_symbols": symbols,
         "available_timeframes": timeframes,
         "available_sources": sources,
+        "available_contract_months": contract_months,
     }
 
 
