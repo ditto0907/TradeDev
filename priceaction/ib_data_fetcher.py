@@ -560,31 +560,36 @@ class IBDataFetcher:
                     logger.warning("[%s] No contract for realtime — skipping", sym_name)
                     continue
 
-                # Initialize per-symbol state
+                # Initialize per-symbol state — guard against overwriting
+                # values pre-seeded by server.py lifespan (crash recovery).
                 rt_key = f"{sym_name}:5min"
-                self._rt_current[rt_key] = None
-                self._tick_state[sym_name] = {
-                    "prev_price": float("nan"),
-                    "prev_size": float("nan"),
-                    "last_broadcast": 0.0,
-                }
+                if rt_key not in self._rt_current:
+                    self._rt_current[rt_key] = None
+                if sym_name not in self._tick_state:
+                    self._tick_state[sym_name] = {
+                        "prev_price": float("nan"),
+                        "prev_size": float("nan"),
+                        "last_broadcast": 0.0,
+                    }
 
-                # Seed rt_current from DB if available
-                db_bars = _db.get_bars(sym_name, "5min", limit=1)
-                if db_bars:
-                    now_ts = int(time.time())
-                    bar_ts = (now_ts // 300) * 300
-                    last = dict(db_bars[-1])
-                    if last["time"] == bar_ts:
-                        self._rt_current[rt_key] = last
-
-                # Initialize in-memory bars for symbol
+                # Initialize in-memory bars for symbol if not pre-loaded by lifespan
                 if sym_name not in self._symbol_bars:
                     self._symbol_bars[sym_name] = {"5min": []}
-                    # Load recent bars from DB
                     recent = _db.get_bars(sym_name, "5min")
                     if recent:
                         self._symbol_bars[sym_name]["5min"] = recent[-config.MAX_BARS_IN_MEMORY:]
+
+                # Seed rt_current from last in-memory bar — mirrors _seed_rt_current() for MES.
+                # Only run if not already seeded (e.g. crash recovery from realtime_bars).
+                if self._rt_current.get(rt_key) is None:
+                    sym_mem_bars = self._symbol_bars.get(sym_name, {}).get("5min", [])
+                    if sym_mem_bars:
+                        now_ts = int(time.time())
+                        bar_ts = (now_ts // 300) * 300
+                        last = dict(sym_mem_bars[-1])
+                        if last["time"] == bar_ts:
+                            self._rt_current[rt_key] = last
+                            logger.debug("Seeded %s rt_current from history ts=%s", rt_key, last["time"])
 
                 ticker = self.ib.reqMktData(qualified[0], "", False, False)
                 sub_key = f"mktdata_{sym_name}"
