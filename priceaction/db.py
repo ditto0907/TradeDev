@@ -573,7 +573,7 @@ def get_merged_validated_ranges(
     merged: list = []
     cur_from, cur_to = rows[0]
     for r_from, r_to in rows[1:]:
-        if r_from <= cur_to + 1:  # adjacent or overlapping
+        if r_from <= cur_to + 1:  # Merge if ranges overlap or are consecutive timestamps
             cur_to = max(cur_to, r_to)
         else:
             merged.append({"from_ts": cur_from, "to_ts": cur_to})

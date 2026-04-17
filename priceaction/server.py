@@ -1936,8 +1936,10 @@ async def api_data_query(
 
     page_size = min(max(1, page_size), 500)  # Bound page_size to 1-500
 
-    # ib_fetch_cache has 'fetched_at' instead of 'source'
-    is_cache = db_table == "ib_fetch_cache"
+    # Use a hardcoded safe table name to avoid any SQL injection risk.
+    # The whitelist above guarantees db_table is one of these two values.
+    safe_table = "ib_fetch_cache" if db_table == "ib_fetch_cache" else "bars"
+    is_cache = safe_table == "ib_fetch_cache"
 
     where_clauses = []
     params: list = []
@@ -1970,7 +1972,7 @@ async def api_data_query(
     with db._conn() as conn:
         # Total count
         count_row = conn.execute(
-            f"SELECT COUNT(*) FROM {db_table}{where_sql}", params
+            f"SELECT COUNT(*) FROM {safe_table}{where_sql}", params
         ).fetchone()
         total = count_row[0]
 
@@ -1978,25 +1980,25 @@ async def api_data_query(
         offset = (max(1, page) - 1) * page_size
         data_sql = (
             f"SELECT {select_cols} "
-            f"FROM {db_table}{where_sql} ORDER BY ts ASC LIMIT ? OFFSET ?"
+            f"FROM {safe_table}{where_sql} ORDER BY ts ASC LIMIT ? OFFSET ?"
         )
         rows = conn.execute(data_sql, params + [page_size, offset]).fetchall()
 
         # Available filter values (from selected table)
         symbols = [r[0] for r in conn.execute(
-            f"SELECT DISTINCT symbol FROM {db_table} ORDER BY symbol"
+            f"SELECT DISTINCT symbol FROM {safe_table} ORDER BY symbol"
         ).fetchall()]
         timeframes = [r[0] for r in conn.execute(
-            f"SELECT DISTINCT timeframe FROM {db_table} ORDER BY timeframe"
+            f"SELECT DISTINCT timeframe FROM {safe_table} ORDER BY timeframe"
         ).fetchall()]
         if is_cache:
             sources = []
         else:
             sources = [r[0] for r in conn.execute(
-                f"SELECT DISTINCT source FROM {db_table} ORDER BY source"
+                f"SELECT DISTINCT source FROM {safe_table} ORDER BY source"
             ).fetchall()]
         contract_months = [r[0] for r in conn.execute(
-            f"SELECT DISTINCT contract_month FROM {db_table} WHERE contract_month != '' ORDER BY contract_month"
+            f"SELECT DISTINCT contract_month FROM {safe_table} WHERE contract_month != '' ORDER BY contract_month"
         ).fetchall()]
 
     if is_cache:
