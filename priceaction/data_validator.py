@@ -127,6 +127,9 @@ async def _fetch_ib_bars(
             bars = [b for b in (_bar_to_dict(r) for r in raw)
                     if from_ts <= b["time"] <= to_ts]
             if bars:
+                # Tag bars with the specific contract month used
+                for b in bars:
+                    b["contract_month"] = month
                 return sorted(bars, key=lambda b: b["time"])
         except asyncio.TimeoutError:
             logger.debug("[%s] Future %s qualify timed out, caching as failed", symbol, month)
@@ -158,6 +161,9 @@ async def _fetch_ib_bars(
         bars = [b for b in (_bar_to_dict(r) for r in raw)
                 if from_ts <= b["time"] <= to_ts]
         if bars:
+            # Tag bars with the contract month derived from each bar's timestamp
+            for b in bars:
+                b["contract_month"] = _contract_month_for_ts(b["time"], symbol)
             return sorted(bars, key=lambda b: b["time"])
     except Exception as e:
         logger.debug("[%s] ContFuture fallback failed: %s", symbol, e)
@@ -313,6 +319,7 @@ async def validate_bars(
     to_ts: int,
     ib: Optional[IB] = None,
     fetcher: Optional["IBDataFetcher"] = None,
+    contract_month: Optional[str] = None,
 ) -> dict:
     """Validate DB bars against IB for a given range.
 
@@ -321,17 +328,26 @@ async def validate_bars(
       2. **OHLCV integrity**: Check for bars with high < low, non-positive prices, etc.
       3. **Completeness**: Use trading calendar to check for expected-but-missing bars
 
+    If *contract_month* is provided (e.g. '202503'), only bars tagged with that
+    contract are fetched from DB and compared — prevents cross-contract comparison
+    of bars in the same time range.
+
     Uses the local IB fetch cache to avoid redundant IB requests.
     If *fetcher* is provided, uses its IB connection (avoids event-loop deadlocks).
     """
     rng = _fmt_range(from_ts, to_ts)
-    logger.info("=== [DATA VALIDATE] START  %s/%s  %s ===", symbol, timeframe, rng)
+    cm_info = f"  contract={contract_month}" if contract_month else ""
+    logger.info("=== [DATA VALIDATE] START  %s/%s  %s%s ===", symbol, timeframe, rng, cm_info)
     t0 = time.monotonic()
 
-    db_bars = db.get_bars(symbol, timeframe, from_ts, to_ts)
+    db_bars = db.get_bars(symbol, timeframe, from_ts, to_ts, contract_month=contract_month)
     ib_bars = await get_ib_bars_with_cache(
         symbol, timeframe, from_ts, to_ts, ib=ib, fetcher=fetcher
     )
+    # Filter IB bars to the same contract when specified, so we only compare
+    # bars that belong to the same futures contract.
+    if contract_month is not None:
+        ib_bars = [b for b in ib_bars if b.get("contract_month", "") == contract_month]
 
     mismatches, db_only, ib_only = _compare_bars(db_bars, ib_bars)
 
@@ -374,10 +390,10 @@ async def validate_bars(
 
     elapsed = time.monotonic() - t0
     logger.info(
-        "=== [DATA VALIDATE] DONE   %s/%s  %s  "
+        "=== [DATA VALIDATE] DONE   %s/%s  %s%s  "
         "db=%d ib=%d mismatches=%d db_only=%d ib_only=%d "
         "ohlcv_violations=%d calendar_missing=%d  (%.1fs) ===",
-        symbol, timeframe, rng,
+        symbol, timeframe, rng, cm_info,
         len(db_bars), len(ib_bars), len(mismatches), len(db_only), len(ib_only),
         len(ohlcv_violations), len(calendar_missing),
         elapsed,
@@ -386,6 +402,7 @@ async def validate_bars(
     return {
         "symbol": symbol,
         "timeframe": timeframe,
+        "contract_month": contract_month or "",
         "from_ts": from_ts,
         "to_ts": to_ts,
         "db_count": len(db_bars),
@@ -410,6 +427,7 @@ async def fix_bars(
     ib: Optional[IB] = None,
     fetcher: Optional["IBDataFetcher"] = None,
     timestamps: Optional[List[int]] = None,
+    contract_month: Optional[str] = None,
 ) -> dict:
     """Validate and fix: overwrite mismatched DB bars with IB data,
     insert bars that exist only in IB.
@@ -417,19 +435,26 @@ async def fix_bars(
     If *timestamps* is provided, only fix bars whose timestamps are in that list
     (selective fix — for the UI's per-row checkbox workflow).
 
+    If *contract_month* is provided (e.g. '202503'), only bars tagged with that
+    contract are fetched from DB and compared — prevents cross-contract fixes.
+
     Uses the local IB fetch cache; no additional IB request is made if the cache
     already has data for the requested range (populated during validate_bars).
     Returns summary.
     """
     rng = _fmt_range(from_ts, to_ts)
+    cm_info = f"  contract={contract_month}" if contract_month else ""
     sel_info = f"  selected={len(timestamps)}" if timestamps is not None else ""
-    logger.info("=== [DATA FIX] START  %s/%s  %s%s ===", symbol, timeframe, rng, sel_info)
+    logger.info("=== [DATA FIX] START  %s/%s  %s%s%s ===", symbol, timeframe, rng, cm_info, sel_info)
     t0 = time.monotonic()
 
-    db_bars = db.get_bars(symbol, timeframe, from_ts, to_ts)
+    db_bars = db.get_bars(symbol, timeframe, from_ts, to_ts, contract_month=contract_month)
     ib_bars = await get_ib_bars_with_cache(
         symbol, timeframe, from_ts, to_ts, ib=ib, fetcher=fetcher
     )
+    # Filter IB bars to the same contract when specified
+    if contract_month is not None:
+        ib_bars = [b for b in ib_bars if b.get("contract_month", "") == contract_month]
 
     mismatches, db_only, ib_only = _compare_bars(db_bars, ib_bars)
 
@@ -459,9 +484,9 @@ async def fix_bars(
 
     elapsed = time.monotonic() - t0
     logger.info(
-        "=== [DATA FIX] DONE   %s/%s  %s  "
+        "=== [DATA FIX] DONE   %s/%s  %s%s  "
         "db=%d ib=%d mismatches=%d ib_only=%d fixed=%d  (%.1fs) ===",
-        symbol, timeframe, rng,
+        symbol, timeframe, rng, cm_info,
         len(db_bars), len(ib_bars), len(mismatches), len(ib_only), saved,
         elapsed,
     )
@@ -469,6 +494,7 @@ async def fix_bars(
     return {
         "symbol": symbol,
         "timeframe": timeframe,
+        "contract_month": contract_month or "",
         "from_ts": from_ts,
         "to_ts": to_ts,
         "db_count": len(db_bars),
@@ -488,7 +514,12 @@ async def validate_all(
     chunk_seconds: int = 86400,  # validate one day at a time
 ) -> List[dict]:
     """Scan all symbol/timeframe pairs in the DB, validate against IB
-    in day-sized chunks. If fix=True, overwrite bad data.
+    in day-sized chunks per contract month. If fix=True, overwrite bad data.
+
+    Validates each contract month separately to prevent cross-contract comparison
+    of bars in the same time range (e.g. MES202503 vs MES202506 overlap).
+    Pairs that have no contract_month tags fall back to the original (unfiltered)
+    per-chunk approach for backward compatibility.
 
     Prefer passing *fetcher* (the server's IBDataFetcher) which reuses
     the existing IB connection — avoids event-loop deadlocks from having
@@ -548,10 +579,16 @@ async def validate_all(
                             sym, tf)
                 continue
 
-            logger.info("[validate_all] Scanning %s/%s  %s → %s",
-                        sym, tf, effective_earliest, latest)
+            # Determine contract months to iterate (for per-contract validation)
+            contract_months = db.get_distinct_contract_months(sym, tf)
+            # Pairs without any contract tags fall back to unfiltered validation
+            if not contract_months:
+                contract_months = [None]  # None means no contract filter
 
-            chunk_start = effective_earliest
+            logger.info("[validate_all] Scanning %s/%s  %s → %s  contracts=%s",
+                        sym, tf, effective_earliest, latest,
+                        contract_months if contract_months[0] else ["(all)"])
+
             sym_result = {
                 "symbol": sym,
                 "timeframe": tf,
@@ -562,43 +599,53 @@ async def validate_all(
                 "total_fixed": 0,
                 "total_ib_only_inserted": 0,
                 "mismatch_details": [],
+                "contracts": [cm for cm in contract_months if cm],
             }
 
-            while chunk_start <= latest:
-                chunk_end = min(chunk_start + effective_chunk, latest)
+            for cm in contract_months:
+                chunk_start = effective_earliest
+                while chunk_start <= latest:
+                    chunk_end = min(chunk_start + effective_chunk, latest)
 
-                try:
-                    if fix:
-                        r = await fix_bars(sym, tf, chunk_start, chunk_end,
-                                          ib=conn_ib, fetcher=fetcher)
-                        sym_result["total_fixed"] += r["fixed_count"]
-                        sym_result["total_ib_only_inserted"] += r["ib_only_inserted"]
-                    else:
-                        r = await validate_bars(sym, tf, chunk_start, chunk_end,
-                                               ib=conn_ib, fetcher=fetcher)
+                    try:
+                        if fix:
+                            r = await fix_bars(sym, tf, chunk_start, chunk_end,
+                                              ib=conn_ib, fetcher=fetcher,
+                                              contract_month=cm)
+                            sym_result["total_fixed"] += r["fixed_count"]
+                            sym_result["total_ib_only_inserted"] += r["ib_only_inserted"]
+                        else:
+                            r = await validate_bars(sym, tf, chunk_start, chunk_end,
+                                                   ib=conn_ib, fetcher=fetcher,
+                                                   contract_month=cm)
 
-                    sym_result["chunks_checked"] += 1
-                    sym_result["total_mismatches"] += r["mismatch_count"]
+                        sym_result["chunks_checked"] += 1
+                        sym_result["total_mismatches"] += r["mismatch_count"]
 
-                    if r["mismatch_count"] > 0:
-                        for m in r["mismatches"]:
-                            sym_result["mismatch_details"].append({
-                                "time": m["time"],
-                                "diffs": {k: {"db": v[0], "ib": v[1]}
-                                          for k, v in m["diffs"].items()},
-                            })
+                        if r["mismatch_count"] > 0:
+                            for m in r["mismatches"]:
+                                sym_result["mismatch_details"].append({
+                                    "time": m["time"],
+                                    "contract_month": cm or "",
+                                    "diffs": {k: {"db": v[0], "ib": v[1]}
+                                              for k, v in m["diffs"].items()},
+                                })
 
-                    logger.info("[validate_all] %s/%s chunk %s→%s: %d mismatches",
-                                sym, tf, chunk_start, chunk_end, r["mismatch_count"])
+                        logger.info("[validate_all] %s/%s%s chunk %s→%s: %d mismatches",
+                                    sym, tf,
+                                    f" [{cm}]" if cm else "",
+                                    chunk_start, chunk_end, r["mismatch_count"])
 
-                except Exception as e:
-                    logger.warning("[validate_all] %s/%s chunk %s-%s failed: %s",
-                                   sym, tf, chunk_start, chunk_end, e)
+                    except Exception as e:
+                        logger.warning("[validate_all] %s/%s%s chunk %s-%s failed: %s",
+                                       sym, tf,
+                                       f" [{cm}]" if cm else "",
+                                       chunk_start, chunk_end, e)
 
-                chunk_start = chunk_end + interval
+                    chunk_start = chunk_end + interval
 
-                # IB pacing: ~2 second pause between requests
-                await asyncio.sleep(2)
+                    # IB pacing: ~2 second pause between requests
+                    await asyncio.sleep(2)
 
             total_mismatches += sym_result["total_mismatches"]
             total_fixed += sym_result["total_fixed"]

@@ -105,15 +105,16 @@ def init_db() -> None:
     with _conn() as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS bars (
-                symbol    TEXT    NOT NULL,
-                timeframe TEXT    NOT NULL,
-                ts        INTEGER NOT NULL,
-                open      REAL    NOT NULL,
-                high      REAL    NOT NULL,
-                low       REAL    NOT NULL,
-                close     REAL    NOT NULL,
-                volume    REAL    NOT NULL,
-                source    TEXT    NOT NULL DEFAULT 'unknown',
+                symbol         TEXT    NOT NULL,
+                timeframe      TEXT    NOT NULL,
+                ts             INTEGER NOT NULL,
+                open           REAL    NOT NULL,
+                high           REAL    NOT NULL,
+                low            REAL    NOT NULL,
+                close          REAL    NOT NULL,
+                volume         REAL    NOT NULL,
+                source         TEXT    NOT NULL DEFAULT 'unknown',
+                contract_month TEXT    NOT NULL DEFAULT '',
                 PRIMARY KEY (symbol, timeframe, ts)
             )
         """)
@@ -121,7 +122,7 @@ def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_bars_sym_tf_ts "
             "ON bars (symbol, timeframe, ts)"
         )
-        # ── Migrate: add source column to existing databases ──────────────
+        # ── Migrate: add columns to existing databases ────────────────────
         cursor = conn.execute("PRAGMA table_info(bars)")
         bar_columns = {row[1] for row in cursor.fetchall()}
         if "source" not in bar_columns:
@@ -129,6 +130,11 @@ def init_db() -> None:
                 "ALTER TABLE bars ADD COLUMN source TEXT NOT NULL DEFAULT 'unknown'"
             )
             logger.info("Migrated bars table: added 'source' column")
+        if "contract_month" not in bar_columns:
+            conn.execute(
+                "ALTER TABLE bars ADD COLUMN contract_month TEXT NOT NULL DEFAULT ''"
+            )
+            logger.info("Migrated bars table: added 'contract_month' column")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS chart_layouts (
                 id        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -246,15 +252,16 @@ def init_db() -> None:
         # large-range validation scenarios.
         conn.execute("""
             CREATE TABLE IF NOT EXISTS ib_fetch_cache (
-                symbol     TEXT    NOT NULL,
-                timeframe  TEXT    NOT NULL,
-                ts         INTEGER NOT NULL,
-                open       REAL    NOT NULL,
-                high       REAL    NOT NULL,
-                low        REAL    NOT NULL,
-                close      REAL    NOT NULL,
-                volume     REAL    NOT NULL,
-                fetched_at INTEGER NOT NULL,
+                symbol         TEXT    NOT NULL,
+                timeframe      TEXT    NOT NULL,
+                ts             INTEGER NOT NULL,
+                open           REAL    NOT NULL,
+                high           REAL    NOT NULL,
+                low            REAL    NOT NULL,
+                close          REAL    NOT NULL,
+                volume         REAL    NOT NULL,
+                fetched_at     INTEGER NOT NULL,
+                contract_month TEXT    NOT NULL DEFAULT '',
                 PRIMARY KEY (symbol, timeframe, ts)
             )
         """)
@@ -262,6 +269,14 @@ def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_ib_cache_sym_tf_ts "
             "ON ib_fetch_cache (symbol, timeframe, ts)"
         )
+        # ── Migrate: add contract_month to ib_fetch_cache ─────────────────
+        cursor = conn.execute("PRAGMA table_info(ib_fetch_cache)")
+        cache_columns = {row[1] for row in cursor.fetchall()}
+        if "contract_month" not in cache_columns:
+            conn.execute(
+                "ALTER TABLE ib_fetch_cache ADD COLUMN contract_month TEXT NOT NULL DEFAULT ''"
+            )
+            logger.info("Migrated ib_fetch_cache table: added 'contract_month' column")
     logger.info("Database ready: %s", _DB_PATH)
 
 
@@ -294,15 +309,16 @@ def insert_bars(symbol: str, timeframe: str, bars: List[dict],
         valid_rows.append(
             (symbol, timeframe,
              b["time"], o, h, l, c, v,
-             b.get("source", source))
+             b.get("source", source),
+             b.get("contract_month", ""))
         )
     if not valid_rows:
         return 0
     with _conn() as conn:
         conn.executemany(
             "INSERT OR REPLACE INTO bars "
-            "(symbol, timeframe, ts, open, high, low, close, volume, source) "
-            "VALUES (?,?,?,?,?,?,?,?,?)",
+            "(symbol, timeframe, ts, open, high, low, close, volume, source, contract_month) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
             valid_rows,
         )
     skipped = len(bars) - len(valid_rows)
@@ -351,14 +367,22 @@ def get_bars(
     from_ts: int = 0,
     to_ts: int = MAX_TIMESTAMP,
     limit: Optional[int] = None,
+    contract_month: Optional[str] = None,
 ) -> List[dict]:
-    """Return bars in [from_ts, to_ts] sorted ascending by timestamp."""
+    """Return bars in [from_ts, to_ts] sorted ascending by timestamp.
+
+    If *contract_month* is provided (e.g. '202503'), only bars tagged with
+    that contract are returned — prevents mixing data from different contracts.
+    """
     sql = (
-        "SELECT ts, open, high, low, close, volume, source FROM bars "
-        "WHERE symbol=? AND timeframe=? AND ts>=? AND ts<=? "
-        "ORDER BY ts"
+        "SELECT ts, open, high, low, close, volume, source, contract_month FROM bars "
+        "WHERE symbol=? AND timeframe=? AND ts>=? AND ts<=?"
     )
     params: list = [symbol, timeframe, from_ts, to_ts]
+    if contract_month is not None:
+        sql += " AND contract_month=?"
+        params.append(contract_month)
+    sql += " ORDER BY ts"
     if limit:
         sql += " LIMIT ?"
         params.append(limit)
@@ -367,7 +391,8 @@ def get_bars(
     return [
         {"time": r[0], "open": r[1], "high": r[2],
          "low": r[3], "close": r[4], "volume": r[5],
-         "source": r[6] if len(r) > 6 else "unknown"}
+         "source": r[6] if len(r) > 6 else "unknown",
+         "contract_month": r[7] if len(r) > 7 else ""}
         for r in rows
     ]
 
@@ -418,16 +443,47 @@ def delete_bars_by_source(source: str) -> int:
 
 
 def get_coverage() -> List[dict]:
-    """Return min/max timestamps and bar count for every (symbol, timeframe) pair."""
+    """Return min/max timestamps and bar count for every (symbol, timeframe) pair,
+    including the list of distinct contract months stored for each pair."""
     with _conn() as conn:
         rows = conn.execute(
             "SELECT symbol, timeframe, MIN(ts), MAX(ts), COUNT(*) "
             "FROM bars GROUP BY symbol, timeframe ORDER BY symbol, timeframe"
         ).fetchall()
+        # Gather distinct contract months per (symbol, timeframe)
+        contract_rows = conn.execute(
+            "SELECT symbol, timeframe, contract_month, COUNT(*) "
+            "FROM bars WHERE contract_month != '' "
+            "GROUP BY symbol, timeframe, contract_month "
+            "ORDER BY symbol, timeframe, contract_month"
+        ).fetchall()
+
+    # Build contract_months map: (symbol, tf) -> [{contract_month, count}]
+    contracts_map: dict = {}
+    for r in contract_rows:
+        key = (r[0], r[1])
+        contracts_map.setdefault(key, []).append({"contract_month": r[2], "count": r[3]})
+
     return [
-        {"symbol": r[0], "timeframe": r[1], "min_ts": r[2], "max_ts": r[3], "count": r[4]}
+        {
+            "symbol": r[0], "timeframe": r[1],
+            "min_ts": r[2], "max_ts": r[3], "count": r[4],
+            "contracts": contracts_map.get((r[0], r[1]), []),
+        }
         for r in rows
     ]
+
+
+def get_distinct_contract_months(symbol: str, timeframe: str) -> List[str]:
+    """Return sorted list of distinct non-empty contract months for a (symbol, timeframe) pair."""
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT contract_month FROM bars "
+            "WHERE symbol=? AND timeframe=? AND contract_month != '' "
+            "ORDER BY contract_month",
+            (symbol, timeframe),
+        ).fetchall()
+    return [r[0] for r in rows]
 
 
 # ─── IB Fetch Cache ───────────────────────────────────────────────────────────
@@ -454,15 +510,16 @@ def insert_ib_cache_bars(symbol: str, timeframe: str, bars: List[dict]) -> int:
             continue
         valid_rows.append(
             (symbol, timeframe,
-             b["time"], o, h, l, c, v, now_ts)
+             b["time"], o, h, l, c, v, now_ts,
+             b.get("contract_month", ""))
         )
     if not valid_rows:
         return 0
     with _conn() as conn:
         conn.executemany(
             "INSERT OR REPLACE INTO ib_fetch_cache "
-            "(symbol, timeframe, ts, open, high, low, close, volume, fetched_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?)",
+            "(symbol, timeframe, ts, open, high, low, close, volume, fetched_at, contract_month) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
             valid_rows,
         )
     return len(valid_rows)
@@ -473,18 +530,27 @@ def get_ib_cache_bars(
     timeframe: str,
     from_ts: int = 0,
     to_ts: int = MAX_TIMESTAMP,
+    contract_month: Optional[str] = None,
 ) -> List[dict]:
-    """Return cached IB bars in [from_ts, to_ts] sorted ascending."""
+    """Return cached IB bars in [from_ts, to_ts] sorted ascending.
+
+    If *contract_month* is provided, only bars for that contract are returned.
+    """
+    sql = (
+        "SELECT ts, open, high, low, close, volume, contract_month FROM ib_fetch_cache "
+        "WHERE symbol=? AND timeframe=? AND ts>=? AND ts<=?"
+    )
+    params: list = [symbol, timeframe, from_ts, to_ts]
+    if contract_month is not None:
+        sql += " AND contract_month=?"
+        params.append(contract_month)
+    sql += " ORDER BY ts"
     with _conn() as conn:
-        rows = conn.execute(
-            "SELECT ts, open, high, low, close, volume FROM ib_fetch_cache "
-            "WHERE symbol=? AND timeframe=? AND ts>=? AND ts<=? "
-            "ORDER BY ts",
-            (symbol, timeframe, from_ts, to_ts),
-        ).fetchall()
+        rows = conn.execute(sql, params).fetchall()
     return [
         {"time": r[0], "open": r[1], "high": r[2],
-         "low": r[3], "close": r[4], "volume": r[5]}
+         "low": r[3], "close": r[4], "volume": r[5],
+         "contract_month": r[6] if len(r) > 6 else ""}
         for r in rows
     ]
 
@@ -634,7 +700,7 @@ def get_bar_at(symbol: str, timeframe: str, ts: int) -> Optional[dict]:
     """Get a single bar at exact timestamp. For point inspection."""
     with _conn() as conn:
         row = conn.execute(
-            "SELECT ts, open, high, low, close, volume, source FROM bars "
+            "SELECT ts, open, high, low, close, volume, source, contract_month FROM bars "
             "WHERE symbol=? AND timeframe=? AND ts=?",
             (symbol, timeframe, ts),
         ).fetchone()
@@ -643,7 +709,7 @@ def get_bar_at(symbol: str, timeframe: str, ts: int) -> Optional[dict]:
     return {
         "time": row[0], "open": row[1], "high": row[2],
         "low": row[3], "close": row[4], "volume": row[5],
-        "source": row[6],
+        "source": row[6], "contract_month": row[7],
     }
 
 
