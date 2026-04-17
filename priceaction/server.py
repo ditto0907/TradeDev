@@ -534,6 +534,18 @@ async def lifespan(app: FastAPI):
     # ── Step 5: Background reconnect loop (retries every 60 s if IB drops) ──
     _ib_reconnect_task = asyncio.create_task(_ib_reconnect_loop())
 
+    # ── Step 6: Background data validation (runs after IB init) ──────────────
+    async def _bg_validate_after_init():
+        """Wait for IB init, then run background validation silently."""
+        try:
+            await _ib_init_task
+        except Exception:
+            pass  # IB init may fail; still try validation with cached data
+        await asyncio.sleep(30)  # Give IB time to stabilize
+        f = fetcher if (fetcher._ib_ready and fetcher.ib and fetcher.ib.isConnected()) else None
+        await data_validator.background_validate(fetcher=f)
+    _bg_validate_task = asyncio.create_task(_bg_validate_after_init())
+
     logger.info("Server ready to accept requests (DB-only mode).")
 
     yield   # ── server is running ────────────────────────────────────────────
@@ -541,6 +553,7 @@ async def lifespan(app: FastAPI):
     # ── Shutdown ──────────────────────────────────────────────────────────────
     logger.info("Shutting down…")
     _ib_reconnect_task.cancel()
+    _bg_validate_task.cancel()
     sheets.flush_buffer()
     fetcher.unsubscribe_realtime()
     fetcher.disconnect()
@@ -1311,12 +1324,14 @@ async def api_validate_bars(
     from_dt: Optional[str] = None,
     to_dt: Optional[str] = None,
     contract_month: Optional[str] = None,
+    skip_validated: bool = False,
 ):
     """Validate DB bars against IB historical data for a time range.
     Returns mismatches without fixing them.
     IB data is fetched via the local ib_fetch_cache to reduce IB requests.
     Supply *contract_month* (e.g. '202503') to restrict validation to bars
-    belonging to that specific futures contract only."""
+    belonging to that specific futures contract only.
+    Set *skip_validated* to True to skip already-checked ranges."""
     # Convert datetime strings if provided
     if from_dt and not from_ts:
         from_ts = _parse_dt_eastern(from_dt)
@@ -1334,6 +1349,7 @@ async def api_validate_bars(
     result = await data_validator.validate_bars(
         symbol, timeframe, from_ts, to_ts,
         fetcher=f, contract_month=contract_month,
+        skip_validated=skip_validated,
     )
     return result
 
@@ -1396,6 +1412,28 @@ async def api_validate_all(fix: bool = False):
         "total_fixed": total_fixed,
         "details": results,
     }
+
+
+@app.get("/api/data/validated_ranges")
+async def api_validated_ranges(
+    symbol: Optional[str] = None,
+    timeframe: Optional[str] = None,
+):
+    """Return already-checked (validated) time ranges per symbol/timeframe.
+    If symbol+timeframe are provided, also returns merged continuous ranges."""
+    ranges = db.get_validated_ranges(symbol=symbol, timeframe=timeframe)
+    result: dict = {"ranges": ranges}
+    if symbol and timeframe:
+        result["merged"] = db.get_merged_validated_ranges(symbol, timeframe)
+    return result
+
+
+@app.post("/api/data/bg_validate")
+async def api_trigger_bg_validate():
+    """Manually trigger the background validation task."""
+    f = fetcher if (fetcher._ib_ready and fetcher.ib and fetcher.ib.isConnected()) else None
+    asyncio.create_task(data_validator.background_validate(fetcher=f))
+    return {"success": True, "message": "Background validation started"}
 
 
 @app.get("/api/trades")

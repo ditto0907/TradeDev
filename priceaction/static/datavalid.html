@@ -525,6 +525,8 @@ body {
         <button class="dv-btn" onclick="runGaps()">🔍 Check Gaps</button>
         <button class="dv-btn" onclick="runValidate()">✅ Validate vs IB</button>
         <button class="dv-btn primary" id="v-fix-btn" style="display:none" onclick="runFix()">🔧 Data Fix</button>
+        <button class="dv-btn" onclick="runViewValidatedRanges()">📋 Checked Ranges</button>
+        <button class="dv-btn" onclick="runBgValidate()">🔄 BG Validate</button>
         <button class="dv-btn danger" style="margin-left:auto" onclick="runDeleteRealtime()">🗑 Delete Realtime Bars</button>
       </div>
       <div class="dv-summary" id="v-summary"></div>
@@ -1285,6 +1287,82 @@ function runValidateAll() {
     .catch(function(e) {
       summary.innerHTML = '❌ ' + e.message;
       showToast('Validate all failed: ' + e.message, 'error');
+    });
+}
+
+// ── View Validated Ranges ──────────────────────────────────────────────────
+function runViewValidatedRanges() {
+  var symbol = document.getElementById('v-symbol').value;
+  var timeframe = document.getElementById('v-timeframe').value;
+  var summary = document.getElementById('v-summary');
+  summary.style.display = '';
+  summary.innerHTML = '⏳ Loading validated ranges…';
+  document.getElementById('v-fix-btn').style.display = 'none';
+
+  fetch('/api/data/validated_ranges?symbol=' + symbol + '&timeframe=' + timeframe)
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      var merged = data.merged || [];
+      var ranges = data.ranges || [];
+
+      // Summary: show merged continuous ranges
+      if (merged.length === 0) {
+        summary.innerHTML = symbol + '/' + timeframe + ' — <span style="color:var(--text-dim)">No validated ranges yet</span>';
+      } else {
+        var totalSpan = merged.reduce(function(acc, r) { return acc + (r.to_ts - r.from_ts); }, 0);
+        var days = (totalSpan / 86400).toFixed(1);
+        summary.innerHTML = symbol + '/' + timeframe
+          + ' — <span style="color:var(--green)">' + merged.length + ' continuous range(s)</span>'
+          + ' | Total validated: <span style="color:var(--text)">' + days + ' days</span>';
+      }
+
+      // Table: show merged ranges
+      document.getElementById('v-thead').innerHTML =
+        '<tr>'
+        + '<th style="width:200px">From</th>'
+        + '<th style="width:200px">To</th>'
+        + '<th style="width:120px">Duration</th>'
+        + '</tr>';
+
+      var tbody = document.getElementById('v-tbody');
+      if (merged.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="3"><div class="empty-msg">No validated ranges. Run background validation to build up checked ranges.</div></td></tr>';
+        return;
+      }
+      tbody.innerHTML = merged.map(function(r) {
+        var dur = ((r.to_ts - r.from_ts) / 86400).toFixed(1);
+        return '<tr>'
+          + '<td>' + tsToLocal(r.from_ts) + '</td>'
+          + '<td>' + tsToLocal(r.to_ts) + '</td>'
+          + '<td class="num">' + dur + ' days</td>'
+          + '</tr>';
+      }).join('');
+
+      showToast(merged.length + ' validated range(s) found', merged.length > 0 ? 'success' : 'info');
+    })
+    .catch(function(e) {
+      summary.innerHTML = '❌ ' + e.message;
+      showToast('Failed to load validated ranges: ' + e.message, 'error');
+    });
+}
+
+// ── Trigger Background Validation ──────────────────────────────────────────
+function runBgValidate() {
+  if (!confirm('Start background data validation? This runs silently and validates all symbol/timeframe pairs.')) return;
+
+  var summary = document.getElementById('v-summary');
+  summary.style.display = '';
+  summary.innerHTML = '⏳ Starting background validation…';
+
+  fetch('/api/data/bg_validate', { method: 'POST' })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      summary.innerHTML = '<span style="color:var(--green)">✅ ' + data.message + '</span> — Results will be logged silently.';
+      showToast('Background validation started', 'success');
+    })
+    .catch(function(e) {
+      summary.innerHTML = '❌ ' + e.message;
+      showToast('Failed to start background validation: ' + e.message, 'error');
     });
 }
 
