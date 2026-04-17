@@ -1881,12 +1881,26 @@ async def api_data_query(
     to_ts: Optional[int] = None,
     page: int = 1,
     page_size: int = 50,
+    db_table: str = "bars",
 ):
     """Paginated query of bars from DB with flexible filter conditions.
     page_size is bounded to 1-500.
+    Supply *db_table* ('bars' or 'ib_fetch_cache') to choose the data source.
     Supply *contract_month* (e.g. '202503') to restrict results to bars
     belonging to that specific futures contract."""
+    # Whitelist allowed tables to prevent SQL injection
+    allowed_tables = {"bars", "ib_fetch_cache"}
+    if db_table not in allowed_tables:
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"Invalid db_table. Must be one of: {', '.join(sorted(allowed_tables))}"},
+        )
+
     page_size = min(max(1, page_size), 500)  # Bound page_size to 1-500
+
+    # ib_fetch_cache has 'fetched_at' instead of 'source'
+    is_cache = db_table == "ib_fetch_cache"
+
     where_clauses = []
     params: list = []
     if symbol:
@@ -1895,7 +1909,7 @@ async def api_data_query(
     if timeframe:
         where_clauses.append("timeframe=?")
         params.append(timeframe)
-    if source:
+    if not is_cache and source:
         where_clauses.append("source=?")
         params.append(source)
     if contract_month is not None:
@@ -1910,41 +1924,57 @@ async def api_data_query(
 
     where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
+    if is_cache:
+        select_cols = "symbol, timeframe, ts, open, high, low, close, volume, fetched_at, contract_month"
+    else:
+        select_cols = "symbol, timeframe, ts, open, high, low, close, volume, source, contract_month"
+
     with db._conn() as conn:
         # Total count
         count_row = conn.execute(
-            f"SELECT COUNT(*) FROM bars{where_sql}", params
+            f"SELECT COUNT(*) FROM {db_table}{where_sql}", params
         ).fetchone()
         total = count_row[0]
 
         # Paginated data
         offset = (max(1, page) - 1) * page_size
         data_sql = (
-            f"SELECT symbol, timeframe, ts, open, high, low, close, volume, source, contract_month "
-            f"FROM bars{where_sql} ORDER BY ts ASC LIMIT ? OFFSET ?"
+            f"SELECT {select_cols} "
+            f"FROM {db_table}{where_sql} ORDER BY ts ASC LIMIT ? OFFSET ?"
         )
         rows = conn.execute(data_sql, params + [page_size, offset]).fetchall()
 
-        # Available filter values
+        # Available filter values (from selected table)
         symbols = [r[0] for r in conn.execute(
-            "SELECT DISTINCT symbol FROM bars ORDER BY symbol"
+            f"SELECT DISTINCT symbol FROM {db_table} ORDER BY symbol"
         ).fetchall()]
         timeframes = [r[0] for r in conn.execute(
-            "SELECT DISTINCT timeframe FROM bars ORDER BY timeframe"
+            f"SELECT DISTINCT timeframe FROM {db_table} ORDER BY timeframe"
         ).fetchall()]
-        sources = [r[0] for r in conn.execute(
-            "SELECT DISTINCT source FROM bars ORDER BY source"
-        ).fetchall()]
+        if is_cache:
+            sources = []
+        else:
+            sources = [r[0] for r in conn.execute(
+                f"SELECT DISTINCT source FROM {db_table} ORDER BY source"
+            ).fetchall()]
         contract_months = [r[0] for r in conn.execute(
-            "SELECT DISTINCT contract_month FROM bars WHERE contract_month != '' ORDER BY contract_month"
+            f"SELECT DISTINCT contract_month FROM {db_table} WHERE contract_month != '' ORDER BY contract_month"
         ).fetchall()]
 
-    bars = [
-        {"symbol": r[0], "timeframe": r[1], "time": r[2],
-         "open": r[3], "high": r[4], "low": r[5], "close": r[6],
-         "volume": r[7], "source": r[8], "contract_month": r[9]}
-        for r in rows
-    ]
+    if is_cache:
+        bars = [
+            {"symbol": r[0], "timeframe": r[1], "time": r[2],
+             "open": r[3], "high": r[4], "low": r[5], "close": r[6],
+             "volume": r[7], "fetched_at": r[8], "contract_month": r[9]}
+            for r in rows
+        ]
+    else:
+        bars = [
+            {"symbol": r[0], "timeframe": r[1], "time": r[2],
+             "open": r[3], "high": r[4], "low": r[5], "close": r[6],
+             "volume": r[7], "source": r[8], "contract_month": r[9]}
+            for r in rows
+        ]
     total_pages = max(1, (total + page_size - 1) // page_size)
 
     return {
@@ -1953,6 +1983,7 @@ async def api_data_query(
         "page": page,
         "page_size": page_size,
         "total_pages": total_pages,
+        "db_table": db_table,
         "available_symbols": symbols,
         "available_timeframes": timeframes,
         "available_sources": sources,
