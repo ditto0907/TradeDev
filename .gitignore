@@ -60,6 +60,7 @@ coverage.xml
 # --- 数据库与日志 ---
 *.log
 logs/
+priceaction/log/
 *.sql
 *.dump
 RiskControl.log

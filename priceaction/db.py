@@ -277,6 +277,25 @@ def init_db() -> None:
                 "ALTER TABLE ib_fetch_cache ADD COLUMN contract_month TEXT NOT NULL DEFAULT ''"
             )
             logger.info("Migrated ib_fetch_cache table: added 'contract_month' column")
+        # ── Validated ranges — tracks already-checked time ranges ─────────
+        # Background validation persists which ranges have been validated so
+        # subsequent runs (or API queries) can skip them.
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS validated_ranges (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol     TEXT    NOT NULL,
+                timeframe  TEXT    NOT NULL,
+                from_ts    INTEGER NOT NULL,
+                to_ts      INTEGER NOT NULL,
+                checked_at TEXT    NOT NULL,
+                mismatches INTEGER NOT NULL DEFAULT 0,
+                fixed      INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_vr_sym_tf "
+            "ON validated_ranges (symbol, timeframe)"
+        )
     logger.info("Database ready: %s", _DB_PATH)
 
 
@@ -486,7 +505,125 @@ def get_distinct_contract_months(symbol: str, timeframe: str) -> List[str]:
     return [r[0] for r in rows]
 
 
-# ─── IB Fetch Cache ───────────────────────────────────────────────────────────
+# ─── Validated Ranges ─────────────────────────────────────────────────────────
+# Tracks time ranges that have been validated by the background task.
+
+def insert_validated_range(
+    symbol: str, timeframe: str, from_ts: int, to_ts: int,
+    mismatches: int = 0, fixed: int = 0,
+) -> int:
+    """Record that a time range has been validated. Returns row id."""
+    from datetime import datetime, timezone as _tz
+    checked_at = datetime.now(_tz.utc).isoformat()
+    with _conn() as conn:
+        cursor = conn.execute(
+            "INSERT INTO validated_ranges "
+            "(symbol, timeframe, from_ts, to_ts, checked_at, mismatches, fixed) "
+            "VALUES (?,?,?,?,?,?,?)",
+            (symbol, timeframe, from_ts, to_ts, checked_at, mismatches, fixed),
+        )
+        return cursor.lastrowid
+
+
+def get_validated_ranges(
+    symbol: Optional[str] = None,
+    timeframe: Optional[str] = None,
+) -> List[dict]:
+    """Return all validated ranges, optionally filtered by symbol/timeframe.
+    Sorted by from_ts descending (newest first)."""
+    where_clauses = []
+    params: list = []
+    if symbol:
+        where_clauses.append("symbol=?")
+        params.append(symbol)
+    if timeframe:
+        where_clauses.append("timeframe=?")
+        params.append(timeframe)
+    where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+    with _conn() as conn:
+        rows = conn.execute(
+            f"SELECT id, symbol, timeframe, from_ts, to_ts, checked_at, mismatches, fixed "
+            f"FROM validated_ranges{where_sql} ORDER BY from_ts DESC",
+            params,
+        ).fetchall()
+    return [
+        {"id": r[0], "symbol": r[1], "timeframe": r[2],
+         "from_ts": r[3], "to_ts": r[4], "checked_at": r[5],
+         "mismatches": r[6], "fixed": r[7]}
+        for r in rows
+    ]
+
+
+def get_merged_validated_ranges(
+    symbol: str,
+    timeframe: str,
+) -> List[dict]:
+    """Return merged (non-overlapping) validated ranges for a symbol/timeframe.
+    Adjacent and overlapping ranges are merged into continuous spans.
+    Returns [{from_ts, to_ts}] sorted ascending."""
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT from_ts, to_ts FROM validated_ranges "
+            "WHERE symbol=? AND timeframe=? ORDER BY from_ts",
+            (symbol, timeframe),
+        ).fetchall()
+    if not rows:
+        return []
+    # Merge overlapping/adjacent ranges
+    merged: list = []
+    cur_from, cur_to = rows[0]
+    for r_from, r_to in rows[1:]:
+        if r_from <= cur_to + 1:  # Merge if ranges overlap or are consecutive timestamps
+            cur_to = max(cur_to, r_to)
+        else:
+            merged.append({"from_ts": cur_from, "to_ts": cur_to})
+            cur_from, cur_to = r_from, r_to
+    merged.append({"from_ts": cur_from, "to_ts": cur_to})
+    return merged
+
+
+def is_range_validated(
+    symbol: str,
+    timeframe: str,
+    from_ts: int,
+    to_ts: int,
+) -> bool:
+    """Check if the entire [from_ts, to_ts] range is covered by validated ranges."""
+    merged = get_merged_validated_ranges(symbol, timeframe)
+    if not merged:
+        return False
+    # Check if [from_ts, to_ts] is fully contained in any merged range
+    for rng in merged:
+        if rng["from_ts"] <= from_ts and rng["to_ts"] >= to_ts:
+            return True
+    return False
+
+
+def get_unchecked_ranges(
+    symbol: str,
+    timeframe: str,
+    from_ts: int,
+    to_ts: int,
+) -> List[dict]:
+    """Return sub-ranges of [from_ts, to_ts] that have NOT been validated yet.
+    Returns [{from_ts, to_ts}] sorted ascending."""
+    merged = get_merged_validated_ranges(symbol, timeframe)
+    if not merged:
+        return [{"from_ts": from_ts, "to_ts": to_ts}]
+
+    unchecked: list = []
+    cursor = from_ts
+    for rng in merged:
+        if rng["to_ts"] < cursor:
+            continue
+        if rng["from_ts"] > cursor:
+            unchecked.append({"from_ts": cursor, "to_ts": min(rng["from_ts"] - 1, to_ts)})
+        cursor = max(cursor, rng["to_ts"] + 1)
+        if cursor > to_ts:
+            break
+    if cursor <= to_ts:
+        unchecked.append({"from_ts": cursor, "to_ts": to_ts})
+    return unchecked
 # Raw bars fetched from IB, kept as a local cache to avoid redundant IB requests.
 # Only used for caching purposes — never written to by any other logic.
 

@@ -427,6 +427,12 @@ body {
     <!-- ═══ Data Query Pane ══════════════════════════════════════════════ -->
     <div class="dv-pane active" id="pane-query">
       <div class="dv-toolbar">
+        <label>Database
+          <select id="q-db-table">
+            <option value="bars">K-Line (bars)</option>
+            <option value="ib_fetch_cache">IB Cache</option>
+          </select>
+        </label>
         <label>Symbol
           <select id="q-symbol">
             <option value="">All</option>
@@ -461,6 +467,7 @@ body {
             <tr>
               <th data-col="time" style="width:170px">Time <span class="sort-arrow">⇅</span></th>
               <th data-col="symbol" style="width:80px">Symbol <span class="sort-arrow">⇅</span></th>
+              <th data-col="contract" style="width:90px">Contract <span class="sort-arrow">⇅</span></th>
               <th data-col="timeframe" style="width:80px">Timeframe <span class="sort-arrow">⇅</span></th>
               <th data-col="open" style="width:90px">Open <span class="sort-arrow">⇅</span></th>
               <th data-col="high" style="width:90px">High <span class="sort-arrow">⇅</span></th>
@@ -471,7 +478,7 @@ body {
             </tr>
           </thead>
           <tbody id="q-tbody">
-            <tr><td colspan="9"><div class="empty-msg">Use the filters above and click Search</div></td></tr>
+            <tr><td colspan="10"><div class="empty-msg">Use the filters above and click Search</div></td></tr>
           </tbody>
         </table>
       </div>
@@ -518,6 +525,8 @@ body {
         <button class="dv-btn" onclick="runGaps()">🔍 Check Gaps</button>
         <button class="dv-btn" onclick="runValidate()">✅ Validate vs IB</button>
         <button class="dv-btn primary" id="v-fix-btn" style="display:none" onclick="runFix()">🔧 Data Fix</button>
+        <button class="dv-btn" onclick="runViewValidatedRanges()">📋 Checked Ranges</button>
+        <button class="dv-btn" onclick="runBgValidate()">🔄 BG Validate</button>
         <button class="dv-btn danger" style="margin-left:auto" onclick="runDeleteRealtime()">🗑 Delete Realtime Bars</button>
       </div>
       <div class="dv-summary" id="v-summary"></div>
@@ -663,6 +672,17 @@ function fmtVol(v) {
   return Number(v).toLocaleString();
 }
 
+// ── Contract month YYYYMM → display format (e.g. MESH6) ──────────────────
+var _MONTH_CODES = {1:'F',2:'G',3:'H',4:'J',5:'K',6:'M',7:'N',8:'Q',9:'U',10:'V',11:'X',12:'Z'};
+function fmtContract(symbol, contractMonth) {
+  if (!contractMonth || contractMonth.length < 6) return '';
+  var y = parseInt(contractMonth.substring(0, 4));
+  var m = parseInt(contractMonth.substring(4, 6));
+  var code = _MONTH_CODES[m] || '?';
+  var yearDigit = String(y).slice(-1);
+  return (symbol || '') + code + yearDigit;
+}
+
 // ── Table sorting ─────────────────────────────────────────────────────────
 var _sortState = {};
 var _sortInitialized = {};   // track which tables have handlers attached
@@ -736,7 +756,8 @@ var _qData = [];
 
 // Populate source dropdown on load
 (function loadSources() {
-  fetch('/api/data/query?page=1&page_size=1')
+  var dbTable = document.getElementById('q-db-table').value;
+  fetch('/api/data/query?page=1&page_size=1&db_table=' + dbTable)
     .then(function(r) { return r.json(); })
     .then(function(d) {
       var sel = document.getElementById('q-source');
@@ -763,29 +784,56 @@ document.getElementById('q-next').addEventListener('click', function() {
   queryData();
 });
 
+// Reset source dropdown and refetch when database table changes
+document.getElementById('q-db-table').addEventListener('change', function() {
+  var sel = document.getElementById('q-source');
+  sel.innerHTML = '<option value="">All</option>';
+  _qPage = 1;
+  // Show/hide source filter (ib_fetch_cache has no source column)
+  var srcLabel = sel.closest('label');
+  if (srcLabel) srcLabel.style.display = this.value === 'ib_fetch_cache' ? 'none' : '';
+  // Reload source options
+  fetch('/api/data/query?page=1&page_size=1&db_table=' + this.value)
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      (d.available_sources || []).forEach(function(s) {
+        var opt = document.createElement('option');
+        opt.value = s; opt.textContent = s;
+        sel.appendChild(opt);
+      });
+    }).catch(function() {});
+});
+
 function resetQueryFilters() {
+  document.getElementById('q-db-table').value = 'bars';
   document.getElementById('q-symbol').value = '';
   document.getElementById('q-timeframe').value = '';
   document.getElementById('q-source').value = '';
+  // Show source label again
+  var srcLabel = document.getElementById('q-source').closest('label');
+  if (srcLabel) srcLabel.style.display = '';
   document.getElementById('q-from').value = '';
   document.getElementById('q-to').value = '';
   _qPage = 1;
   document.getElementById('q-tbody').innerHTML =
-    '<tr><td colspan="9"><div class="empty-msg">Use the filters above and click Search</div></td></tr>';
+    '<tr><td colspan="10"><div class="empty-msg">Use the filters above and click Search</div></td></tr>';
   document.getElementById('q-pagination').style.display = 'none';
 }
 
 function queryData() {
+  var dbTable = document.getElementById('q-db-table').value;
   var symbol = document.getElementById('q-symbol').value;
   var timeframe = document.getElementById('q-timeframe').value;
   var source = document.getElementById('q-source').value;
   var fromDate = document.getElementById('q-from').value;
   var toDate = document.getElementById('q-to').value;
+  var isCache = dbTable === 'ib_fetch_cache';
 
   var params = new URLSearchParams();
+  params.set('db_table', dbTable);
   if (symbol) params.set('symbol', symbol);
   if (timeframe) params.set('timeframe', timeframe);
-  if (source) params.set('source', source);
+  if (!isCache && source) params.set('source', source);
   var fromTs = dateToTs(fromDate, false);
   var toTs = dateToTs(toDate, true);
   if (fromTs) params.set('from_ts', fromTs);
@@ -794,7 +842,7 @@ function queryData() {
   params.set('page_size', _qPageSize);
 
   var tbody = document.getElementById('q-tbody');
-  tbody.innerHTML = '<tr><td colspan="9"><div class="empty-msg">Loading…</div></td></tr>';
+  tbody.innerHTML = '<tr><td colspan="10"><div class="empty-msg">Loading…</div></td></tr>';
 
   fetch('/api/data/query?' + params.toString())
     .then(function(r) { return r.json(); })
@@ -832,31 +880,54 @@ function queryData() {
       document.getElementById('q-prev').disabled = (_qPage <= 1);
       document.getElementById('q-next').disabled = (_qPage >= totalPages);
 
+      // Update table header dynamically based on db_table
+      var qIsCache = (data.db_table === 'ib_fetch_cache');
+      var thead = document.getElementById('q-thead');
+      thead.innerHTML = '<tr>'
+        + '<th data-col="time" style="width:170px">Time <span class="sort-arrow">⇅</span></th>'
+        + '<th data-col="symbol" style="width:80px">Symbol <span class="sort-arrow">⇅</span></th>'
+        + '<th data-col="contract" style="width:90px">Contract <span class="sort-arrow">⇅</span></th>'
+        + '<th data-col="timeframe" style="width:80px">Timeframe <span class="sort-arrow">⇅</span></th>'
+        + '<th data-col="open" style="width:90px">Open <span class="sort-arrow">⇅</span></th>'
+        + '<th data-col="high" style="width:90px">High <span class="sort-arrow">⇅</span></th>'
+        + '<th data-col="low" style="width:90px">Low <span class="sort-arrow">⇅</span></th>'
+        + '<th data-col="close" style="width:90px">Close <span class="sort-arrow">⇅</span></th>'
+        + '<th data-col="volume" style="width:80px">Volume <span class="sort-arrow">⇅</span></th>'
+        + '<th data-col="source" style="width:110px">' + (qIsCache ? 'Fetched At' : 'Source') + ' <span class="sort-arrow">⇅</span></th>'
+        + '</tr>';
+      // Re-init sort handlers for updated header
+      _sortInitialized['q-table'] = false;
+
       initTableSort('q-table', _qData, renderQueryTable, 'time', 'asc');
     })
     .catch(function(e) {
       showToast('Query failed: ' + e.message, 'error');
-      tbody.innerHTML = '<tr><td colspan="9"><div class="empty-msg">Error loading data</div></td></tr>';
+      tbody.innerHTML = '<tr><td colspan="10"><div class="empty-msg">Error loading data</div></td></tr>';
     });
 }
 
 function renderQueryTable(bars) {
+  var qIsCache = document.getElementById('q-db-table').value === 'ib_fetch_cache';
   var tbody = document.getElementById('q-tbody');
   if (!bars || bars.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="9"><div class="empty-msg">No data found</div></td></tr>';
+    tbody.innerHTML = '<tr><td colspan="10"><div class="empty-msg">No data found</div></td></tr>';
     return;
   }
   tbody.innerHTML = bars.map(function(b) {
+    var srcCol = qIsCache
+      ? (b.fetched_at ? tsToLocal(b.fetched_at) : '\u2014')
+      : (b.source || '');
     return '<tr>'
       + '<td>' + tsToLocal(b.time) + '</td>'
       + '<td>' + (b.symbol || '') + '</td>'
+      + '<td>' + fmtContract(b.symbol, b.contract_month) + '</td>'
       + '<td>' + (b.timeframe || '') + '</td>'
       + '<td class="num">' + fmtNum(b.open) + '</td>'
       + '<td class="num">' + fmtNum(b.high) + '</td>'
       + '<td class="num">' + fmtNum(b.low) + '</td>'
       + '<td class="num">' + fmtNum(b.close) + '</td>'
       + '<td class="num">' + fmtVol(b.volume) + '</td>'
-      + '<td class="dim">' + (b.source || '') + '</td>'
+      + '<td class="dim">' + srcCol + '</td>'
       + '</tr>';
   }).join('');
 }
@@ -1000,6 +1071,7 @@ function _renderValidation(data) {
       '<tr>'
       + '<th style="width:32px"><input type="checkbox" id="v-chk-all" title="Select / deselect all" aria-label="Select or deselect all rows" checked/></th>'
       + '<th style="width:160px">Time</th>'
+      + '<th style="width:90px">Contract</th>'
       + '<th style="width:90px">Status</th>'
       + '<th style="width:200px">DB OHLCV</th>'
       + '<th style="width:200px">IB OHLCV</th>'
@@ -1016,6 +1088,7 @@ function _renderValidation(data) {
         + '<td><input type="checkbox" class="v-row-chk" data-ts="' + m.time + '"'
         + (alreadyFixed ? '' : ' checked') + (alreadyFixed ? ' disabled' : '') + '/></td>'
         + '<td>' + tsToLocal(m.time) + (alreadyFixed ? ' <span style="color:var(--green)">✅</span>' : '') + '</td>'
+        + '<td>' + fmtContract(data.symbol, m.db ? m.db.contract_month : (m.ib ? m.ib.contract_month : '')) + '</td>'
         + '<td class="down">⚠ Mismatch</td>'
         + '<td class="num" style="font-size:11px">'
         + 'O:' + fmtNum(m.db.open) + ' H:' + fmtNum(m.db.high)
@@ -1036,6 +1109,7 @@ function _renderValidation(data) {
         + '<td><input type="checkbox" class="v-row-chk" data-ts="' + b.time + '"'
         + (alreadyFixed ? '' : ' checked') + (alreadyFixed ? ' disabled' : '') + '/></td>'
         + '<td>' + tsToLocal(b.time) + (alreadyFixed ? ' <span style="color:var(--green)">✅</span>' : '') + '</td>'
+        + '<td>' + fmtContract(data.symbol, b.contract_month || '') + '</td>'
         + '<td class="down">❌ Missing</td>'
         + '<td>—</td>'
         + '<td class="num" style="font-size:11px">'
@@ -1064,13 +1138,14 @@ function _renderValidation(data) {
     document.getElementById('v-thead').innerHTML =
       '<tr>'
       + '<th style="width:160px">Time</th>'
+      + '<th style="width:90px">Contract</th>'
       + '<th style="width:90px">Status</th>'
       + '<th style="width:200px">DB OHLCV</th>'
       + '<th style="width:200px">IB OHLCV</th>'
       + '<th style="width:160px">Diffs</th>'
       + '</tr>';
     document.getElementById('v-tbody').innerHTML =
-      '<tr><td colspan="5"><div class="empty-msg">No mismatches — data is clean ✅</div></td></tr>';
+      '<tr><td colspan="6"><div class="empty-msg">No mismatches — data is clean ✅</div></td></tr>';
     document.getElementById('v-fix-btn').style.display = 'none';
   }
 }
@@ -1183,6 +1258,7 @@ function runValidateAll() {
       document.getElementById('v-thead').innerHTML =
         '<tr>'
         + '<th style="width:100px">Symbol</th>'
+        + '<th style="width:120px">Contracts</th>'
         + '<th style="width:100px">Timeframe</th>'
         + '<th style="width:120px">Mismatches</th>'
         + '</tr>';
@@ -1190,13 +1266,17 @@ function runValidateAll() {
       var details = data.details || [];
       var tbody = document.getElementById('v-tbody');
       if (details.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="3"><div class="empty-msg">No pairs found in database</div></td></tr>';
+        tbody.innerHTML = '<tr><td colspan="4"><div class="empty-msg">No pairs found in database</div></td></tr>';
         return;
       }
       tbody.innerHTML = details.map(function(d) {
         var mcls = d.total_mismatches > 0 ? 'warn' : 'up';
+        var contracts = (d.contracts || []).map(function(cm) {
+          return fmtContract(d.symbol, cm);
+        }).join(', ');
         return '<tr>'
           + '<td>' + (d.symbol || '') + '</td>'
+          + '<td class="dim" style="font-size:11px">' + (contracts || '—') + '</td>'
           + '<td>' + (d.timeframe || '') + '</td>'
           + '<td class="num ' + mcls + '">' + (d.total_mismatches || 0) + '</td>'
           + '</tr>';
@@ -1207,6 +1287,82 @@ function runValidateAll() {
     .catch(function(e) {
       summary.innerHTML = '❌ ' + e.message;
       showToast('Validate all failed: ' + e.message, 'error');
+    });
+}
+
+// ── View Validated Ranges ──────────────────────────────────────────────────
+function runViewValidatedRanges() {
+  var symbol = document.getElementById('v-symbol').value;
+  var timeframe = document.getElementById('v-timeframe').value;
+  var summary = document.getElementById('v-summary');
+  summary.style.display = '';
+  summary.innerHTML = '⏳ Loading validated ranges…';
+  document.getElementById('v-fix-btn').style.display = 'none';
+
+  fetch('/api/data/validated_ranges?symbol=' + symbol + '&timeframe=' + timeframe)
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      var merged = data.merged || [];
+      var ranges = data.ranges || [];
+
+      // Summary: show merged continuous ranges
+      if (merged.length === 0) {
+        summary.innerHTML = symbol + '/' + timeframe + ' — <span style="color:var(--text-dim)">No validated ranges yet</span>';
+      } else {
+        var totalSpan = merged.reduce(function(acc, r) { return acc + (r.to_ts - r.from_ts); }, 0);
+        var days = (totalSpan / 86400).toFixed(1);
+        summary.innerHTML = symbol + '/' + timeframe
+          + ' — <span style="color:var(--green)">' + merged.length + ' continuous range(s)</span>'
+          + ' | Total validated: <span style="color:var(--text)">' + days + ' days</span>';
+      }
+
+      // Table: show merged ranges
+      document.getElementById('v-thead').innerHTML =
+        '<tr>'
+        + '<th style="width:200px">From</th>'
+        + '<th style="width:200px">To</th>'
+        + '<th style="width:120px">Duration</th>'
+        + '</tr>';
+
+      var tbody = document.getElementById('v-tbody');
+      if (merged.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="3"><div class="empty-msg">No validated ranges. Run background validation to build up checked ranges.</div></td></tr>';
+        return;
+      }
+      tbody.innerHTML = merged.map(function(r) {
+        var dur = ((r.to_ts - r.from_ts) / 86400).toFixed(1);
+        return '<tr>'
+          + '<td>' + tsToLocal(r.from_ts) + '</td>'
+          + '<td>' + tsToLocal(r.to_ts) + '</td>'
+          + '<td class="num">' + dur + ' days</td>'
+          + '</tr>';
+      }).join('');
+
+      showToast(merged.length + ' validated range(s) found', merged.length > 0 ? 'success' : 'info');
+    })
+    .catch(function(e) {
+      summary.innerHTML = '❌ ' + e.message;
+      showToast('Failed to load validated ranges: ' + e.message, 'error');
+    });
+}
+
+// ── Trigger Background Validation ──────────────────────────────────────────
+function runBgValidate() {
+  if (!confirm('Start background data validation? This runs silently and validates all symbol/timeframe pairs.')) return;
+
+  var summary = document.getElementById('v-summary');
+  summary.style.display = '';
+  summary.innerHTML = '⏳ Starting background validation…';
+
+  fetch('/api/data/bg_validate', { method: 'POST' })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      summary.innerHTML = '<span style="color:var(--green)">✅ ' + data.message + '</span> — Results will be logged silently.';
+      showToast('Background validation started', 'success');
+    })
+    .catch(function(e) {
+      summary.innerHTML = '❌ ' + e.message;
+      showToast('Failed to start background validation: ' + e.message, 'error');
     });
 }
 
@@ -1280,6 +1436,7 @@ function runCoverageCheck() {
       document.getElementById('i-thead').innerHTML =
         '<tr>'
         + '<th style="width:100px">Symbol</th>'
+        + '<th style="width:120px">Contracts</th>'
         + '<th style="width:100px">Timeframe</th>'
         + '<th style="width:140px">Earliest</th>'
         + '<th style="width:140px">Latest</th>'
@@ -1288,12 +1445,16 @@ function runCoverageCheck() {
 
       if (data.length === 0) {
         document.getElementById('i-tbody').innerHTML =
-          '<tr><td colspan="5"><div class="empty-msg">No data in database</div></td></tr>';
+          '<tr><td colspan="6"><div class="empty-msg">No data in database</div></td></tr>';
         return;
       }
       document.getElementById('i-tbody').innerHTML = data.map(function(r) {
+        var contracts = (r.contracts || []).map(function(c) {
+          return fmtContract(r.symbol, c.contract_month);
+        }).join(', ');
         return '<tr>'
           + '<td>' + r.symbol + '</td>'
+          + '<td class="dim" style="font-size:11px">' + (contracts || '—') + '</td>'
           + '<td>' + r.timeframe + '</td>'
           + '<td>' + tsToLocal(r.min_ts) + '</td>'
           + '<td>' + tsToLocal(r.max_ts) + '</td>'

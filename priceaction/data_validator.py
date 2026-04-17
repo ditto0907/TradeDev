@@ -320,6 +320,7 @@ async def validate_bars(
     ib: Optional[IB] = None,
     fetcher: Optional["IBDataFetcher"] = None,
     contract_month: Optional[str] = None,
+    skip_validated: bool = False,
 ) -> dict:
     """Validate DB bars against IB for a given range.
 
@@ -332,9 +333,36 @@ async def validate_bars(
     contract are fetched from DB and compared — prevents cross-contract comparison
     of bars in the same time range.
 
+    If *skip_validated* is True, sub-ranges already in the ``validated_ranges``
+    table are skipped, reducing IB API calls.
+
     Uses the local IB fetch cache to avoid redundant IB requests.
     If *fetcher* is provided, uses its IB connection (avoids event-loop deadlocks).
     """
+    # When skip_validated is set, check if the entire range is already validated
+    if skip_validated and db.is_range_validated(symbol, timeframe, from_ts, to_ts):
+        logger.info("[DATA VALIDATE] %s/%s range already validated, skipping", symbol, timeframe)
+        db_bars = db.get_bars(symbol, timeframe, from_ts, to_ts, contract_month=contract_month)
+        return {
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "contract_month": contract_month or "",
+            "from_ts": from_ts,
+            "to_ts": to_ts,
+            "db_count": len(db_bars),
+            "ib_count": 0,
+            "mismatches": [],
+            "mismatch_count": 0,
+            "db_only_count": 0,
+            "ib_only_count": 0,
+            "ib_only": [],
+            "ohlcv_violations": [],
+            "ohlcv_violation_count": 0,
+            "calendar_missing_count": 0,
+            "calendar_missing": [],
+            "already_validated": True,
+        }
+
     rng = _fmt_range(from_ts, to_ts)
     cm_info = f"  contract={contract_month}" if contract_month else ""
     logger.info("=== [DATA VALIDATE] START  %s/%s  %s%s ===", symbol, timeframe, rng, cm_info)
@@ -668,4 +696,106 @@ async def validate_all(
             conn_ib.disconnect()
 
     return results
+
+
+# ─── Background Validation Task ──────────────────────────────────────────────
+
+
+async def background_validate(
+    fetcher: Optional["IBDataFetcher"] = None,
+    chunk_seconds: int = 86400,
+) -> None:
+    """Background task that silently validates data integrity.
+
+    For each symbol/timeframe pair, scans from the most recent stored data
+    backwards to the oldest, skipping ranges already validated (persisted in
+    the ``validated_ranges`` table).
+
+    Validated ranges are recorded after each chunk so the task is resumable
+    and never re-checks the same data.
+    """
+    logger.info("=== [BG VALIDATE] Starting background validation task ===")
+    t0 = time.monotonic()
+
+    # Skip data older than 365 days
+    max_age_ts = int(time.time()) - 365 * 86400
+
+    try:
+        with db._conn() as conn:
+            pairs = conn.execute(
+                "SELECT DISTINCT symbol, timeframe FROM bars"
+            ).fetchall()
+
+        for sym, tf in pairs:
+            earliest = db.get_earliest_ts(sym, tf)
+            latest = db.get_latest_ts(sym, tf)
+            if earliest is None or latest is None:
+                continue
+
+            _, interval = _key_to_ib(tf)
+
+            # Use larger chunks for daily bars
+            if tf == "1D":
+                effective_chunk = 30 * 86400
+            else:
+                effective_chunk = chunk_seconds
+
+            effective_earliest = max(earliest, max_age_ts)
+            if effective_earliest > latest:
+                logger.info("[BG VALIDATE] %s/%s: all data older than 1 year, skipping", sym, tf)
+                continue
+
+            # Get unchecked ranges (skip already validated)
+            unchecked = db.get_unchecked_ranges(sym, tf, effective_earliest, latest)
+            if not unchecked:
+                logger.info("[BG VALIDATE] %s/%s: fully validated, skipping", sym, tf)
+                continue
+
+            logger.info("[BG VALIDATE] %s/%s: %d unchecked range(s) to validate",
+                        sym, tf, len(unchecked))
+
+            for uc_range in unchecked:
+                # Process each unchecked range in chunks (newest first)
+                uc_from = uc_range["from_ts"]
+                uc_to = uc_range["to_ts"]
+
+                # Work backwards from newest to oldest
+                chunk_end = uc_to
+                while chunk_end >= uc_from:
+                    chunk_start = max(uc_from, chunk_end - effective_chunk)
+
+                    try:
+                        result = await validate_bars(
+                            sym, tf, chunk_start, chunk_end,
+                            fetcher=fetcher,
+                        )
+
+                        # Record this chunk as validated
+                        db.insert_validated_range(
+                            sym, tf, chunk_start, chunk_end,
+                            mismatches=result.get("mismatch_count", 0),
+                        )
+
+                        if result.get("mismatch_count", 0) > 0:
+                            logger.info(
+                                "[BG VALIDATE] %s/%s chunk [%s→%s]: %d mismatches found",
+                                sym, tf, chunk_start, chunk_end,
+                                result["mismatch_count"],
+                            )
+
+                    except Exception as e:
+                        logger.warning(
+                            "[BG VALIDATE] %s/%s chunk [%s→%s] failed: %s",
+                            sym, tf, chunk_start, chunk_end, e,
+                        )
+
+                    chunk_end = chunk_start - interval
+                    # IB pacing
+                    await asyncio.sleep(2)
+
+    except Exception as e:
+        logger.error("[BG VALIDATE] Background validation error: %s", e)
+
+    elapsed = time.monotonic() - t0
+    logger.info("=== [BG VALIDATE] Complete (%.1fs) ===", elapsed)
 
