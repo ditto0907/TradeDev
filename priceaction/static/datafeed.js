@@ -122,8 +122,17 @@ class MESDatafeed {
 
   // ── subscribeBars ──────────────────────────────────────────────────────────
 
-  subscribeBars(symbolInfo, resolution, onTick, listenerGuid) {
-    this._subscriptions[listenerGuid] = { resolution, onTick, symbol: symbolInfo.name };
+  subscribeBars(symbolInfo, resolution, onTick, listenerGuid, onResetCacheNeededCallback) {
+    // `onResetCacheNeededCallback` is invoked by TradingView to tell the
+    // chart to drop its internal bar cache — we store it so that when a
+    // background history batch completes we can call it and refresh the
+    // on-screen widget.
+    this._subscriptions[listenerGuid] = {
+      resolution,
+      onTick,
+      symbol: symbolInfo.name,
+      onResetCacheNeededCallback: onResetCacheNeededCallback || null,
+    };
     this._ensureWebSocket();
   }
 
@@ -167,6 +176,8 @@ class MESDatafeed {
 
       if (msg.type === 'bar') {
         this._handleBarUpdate(msg);
+      } else if (msg.type === 'history_ready') {
+        this._handleHistoryReady(msg);
       } else if (msg.type === 'analysis') {
         if (this._onAnalysis) this._onAnalysis(msg.data);
       } else if (msg.type === 'snapshot') {
@@ -201,6 +212,30 @@ class MESDatafeed {
     };
     for (const sub of Object.values(this._subscriptions)) {
       if (sub.resolution === barRes && sub.symbol === msgSymbol) sub.onTick(tvBar);
+    }
+  }
+
+  // ── _handleHistoryReady ──────────────────────────────────────────────────
+  //
+  // Server-side dataManager broadcasts a `history_ready` WS message after a
+  // background batch fetch completes for a (symbol, timeframe) range.  We
+  // invoke the TradingView-supplied `onResetCacheNeededCallback` for every
+  // matching active subscription so the chart re-queries `/api/history` and
+  // displays the freshly-populated bars without requiring a manual reload.
+  _handleHistoryReady(msg) {
+    const resMap = { '5min': '5', '15min': '15', '60min': '60', '1D': '1D' };
+    const tfRes = resMap[msg.timeframe];
+    if (!tfRes) return;
+    const msgSymbol = msg.symbol || 'MES';
+    console.log(`DataFeed: history_ready for ${msgSymbol}/${msg.timeframe} — refreshing widgets (+${msg.added_bars || 0} bars)`);
+    for (const sub of Object.values(this._subscriptions)) {
+      if (sub.resolution === tfRes && sub.symbol === msgSymbol && sub.onResetCacheNeededCallback) {
+        try {
+          sub.onResetCacheNeededCallback();
+        } catch (err) {
+          console.warn('onResetCacheNeededCallback failed:', err);
+        }
+      }
     }
   }
 }

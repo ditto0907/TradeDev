@@ -247,3 +247,86 @@ New **Integrity** tab in `datavalid.html`:
 - **DB rebuild**: Not required, but running `/api/data/fix_ohlcv` on all pairs after deployment is recommended to clean any pre-existing invalid bars.
 - **Config**: No changes to `config.py`. The `INSTRUMENTS` and `EXTRA_SYMBOLS` configurations are used as-is.
 - **Breaking changes**: None. All existing API contracts are preserved. New APIs are additive.
+
+---
+
+## 9. v2 Addendum — Service-Oriented Refactor (2026-04)
+
+The v1 refactor delivered calendar-driven gap detection and OHLCV
+validation.  The v2 refactor takes the next step: **one clear owner per
+responsibility**, so future work doesn't have to thread through `server.py`.
+
+### 9.1 New service boundaries
+
+| Module | Role (v2) |
+|---|---|
+| `server.py` | Routing / WS orchestration **only**. Does not call `db.insert_bars`. |
+| `data_manager.py` | **NEW** — read-only `get_bars`, WS broadcaster registration, `notify_history_ready` after batch fetches, `record_validated` façade. |
+| `realtime_builder.py` | **NEW** — `persist_completed_bar` (validate+write) and `persist_inprogress_bar`. Wraps `fetcher.persist_bars`. |
+| `data_validator.py` | Single validation entry point: adds `validate_bar`, `classify_gaps`, `data_gaps_only`. |
+| `contract_calendar.py` | **NEW** — official rollover dates per instrument (`config.INSTRUMENTS[*].rollover_rule`). Replaces the day-10 heuristic. |
+| `ib_data_fetcher.py` | Adds `persist_bars()` — the **sole** `db.insert_bars` wrapper used by the rest of the codebase. |
+| `scripts/migrate_v2.py` | **NEW** — idempotent migration using `PRAGMA user_version`; rewrites any `bars.contract_month` rows affected by the new calendar. |
+| `static/datafeed.js` | Subscribes to the `history_ready` WS message and calls TradingView's `onResetCacheNeededCallback` to refresh open chart widgets. |
+
+### 9.2 Write-path invariant
+
+```
+ANYTHING that writes bars  →  IBDataFetcher.persist_bars()  →  db.insert_bars
+```
+
+`grep 'db\.insert_bars' priceaction/server.py` must return **zero**
+matches.  This is the primary acceptance test for the v2 refactor.
+
+### 9.3 Contract-month rule
+
+Previously:
+
+```python
+# Legacy heuristic — REMOVED in v2
+if m < qm or (m == qm and d <= 10):
+    return f"{y}{qm:02d}"
+```
+
+Now:
+
+```python
+# config.INSTRUMENTS[symbol]["rollover_rule"] drives contract_calendar:
+#   CME MES / MNQ   → nth_business_day, n=8   (official CME Quarterly Roll)
+#   COMEX MGC       → n_bdays_before_ltd, n=1
+#   OSE NK225MC     → second_friday, offset_bdays=-1  (day before SQ)
+from contract_calendar import active_contract
+month = active_contract(ts, symbol)
+```
+
+`contract_calendar` never consults the system clock; it is a pure
+function of the instrument, year, and month — safe for back-fills.
+
+### 9.4 `history_ready` WS protocol
+
+```
+{
+  "type": "history_ready",
+  "symbol": "MES",
+  "timeframe": "5min",
+  "from": 1712345678,
+  "to":   1712432078,
+  "added_bars": 288
+}
+```
+
+Emitted by `data_manager.notify_history_ready` whenever background
+prefetch or internal-gap fill adds bars.  The TradingView datafeed
+invokes `onResetCacheNeededCallback()` on every subscription whose
+`(symbol, resolution)` matches.
+
+### 9.5 Migration
+
+See `doc/migration_v2.md`.  No schema changes; only existing
+`contract_month` column values near rollovers may be rewritten.
+
+### 9.6 Tests
+
+* `tests/test_contract_calendar.py` — 13 tests covering CME/COMEX/OSE
+  rollover dates, active-contract lookup, and the day-10 regression.
+
