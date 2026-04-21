@@ -170,8 +170,22 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;f
             <option value="realtime_bars">Realtime Bars</option>
           </select>
         </label>
-        <label>Symbol <select id="q-symbol"><option value="">All</option></select></label>
-        <label>Timeframe <select id="q-timeframe"><option value="">All</option></select></label>
+        <label>Symbol
+          <select id="q-symbol">
+            <option value="">All</option>
+            <option value="MES">MES</option>
+            <option value="MNQ">MNQ</option>
+            <option value="NK225MC">NK225MC</option>
+            <option value="MGC">MGC</option>
+          </select>
+        </label>
+        <label>Timeframe
+          <select id="q-timeframe">
+            <option value="">All</option>
+            <option value="5min">5min</option>
+            <option value="1D">1D</option>
+          </select>
+        </label>
         <label id="q-source-label">Source <select id="q-source"><option value="">All</option></select></label>
         <label id="q-contract-label">Contract <select id="q-contract"><option value="">All</option></select></label>
         <label>From <input type="datetime-local" id="q-from" min="2024-01-01T00:00"/></label>
@@ -441,11 +455,13 @@ function loadQueryMeta(){
   fetch('/api/data/query?page=1&page_size=1&db_table='+tbl)
     .then(function(r){return r.json();})
     .then(function(d){
-      _popSel('q-symbol',d.available_symbols||[],'');
-      _popSel('q-timeframe',d.available_timeframes||[],'');
-      _popSel('q-source',d.available_sources||[],'');
-      _popSel('q-contract',(d.available_contract_months||[]).map(function(m){return{val:m,lbl:m};}),'');
-    }).catch(function(){});
+      // Only update Symbol/TF if server returns non-empty lists; otherwise keep pre-loaded defaults
+      if(d.available_symbols&&d.available_symbols.length) _popSel('q-symbol',d.available_symbols,'');
+      if(d.available_timeframes&&d.available_timeframes.length) _popSel('q-timeframe',d.available_timeframes,'');
+      if(d.available_sources&&d.available_sources.length) _popSel('q-source',d.available_sources,'');
+      if(d.available_contract_months&&d.available_contract_months.length)
+        _popSel('q-contract',d.available_contract_months.map(function(m){return{val:m,lbl:m};}),'');
+    }).catch(function(e){ showToast('Could not load filter options: '+e.message,'warn'); });
 }
 
 document.getElementById('q-db-table').addEventListener('change',function(){_qPage=1;loadQueryMeta();});
@@ -486,10 +502,11 @@ function queryData(){
     .then(function(r){return r.json();})
     .then(function(d){
       _setQL(false);_qData=d.bars||[];_qPage=d.page;
-      _popSel('q-symbol',d.available_symbols||[],'');
-      _popSel('q-timeframe',d.available_timeframes||[],'');
-      _popSel('q-source',d.available_sources||[],'');
-      _popSel('q-contract',(d.available_contract_months||[]).map(function(m){return{val:m,lbl:m};}),'');
+      // Only update Source and Contract dropdowns (these depend on the current table/DB state).
+      // Do NOT rebuild Symbol/TF — they are already pre-populated and we want to keep user selection intact.
+      if(d.available_sources&&d.available_sources.length) _popSel('q-source',d.available_sources,'');
+      if(d.available_contract_months&&d.available_contract_months.length)
+        _popSel('q-contract',d.available_contract_months.map(function(m){return{val:m,lbl:m};}),'');
       var isC=(d.db_table==='ib_fetch_cache');
       document.getElementById('q-thead').innerHTML='<tr>'
         +'<th data-col="time" style="width:170px">Time <span class="sort-arrow">\u21C5</span></th>'
@@ -611,7 +628,7 @@ function loadStatusCalendar(){
   document.getElementById('s-stats').style.display='none';
   fetch('/api/data/coverage_calendar?symbol='+sym+'&timeframe='+tf+'&year='+yr)
     .then(function(r){return r.json();})
-    .then(function(d){document.getElementById('s-loading').style.display='';_renderCal(d);})
+    .then(function(d){_renderCal(d);})  // _renderCal itself hides s-loading
     .catch(function(e){
       document.getElementById('s-loading').style.display='none';
       document.getElementById('s-content').innerHTML='<div class="empty-msg">Error: '+e.message+'</div>';
@@ -787,7 +804,9 @@ function _renderGaps(gaps){
 function runValidate(){
   var p=_vP();
   var params=new URLSearchParams({symbol:p.sym,timeframe:p.tf});
-  if(p.from) params.set('from_dt',p.from); if(p.to) params.set('to_dt',p.to);
+  // Use UTC unix timestamps (same as batch mode) instead of Eastern datetime strings
+  var ft=dateToTs(p.from,false),tt=dateToTs(p.to,true);
+  if(ft) params.set('from_ts',ft); if(tt) params.set('to_ts',tt);
   var sum=document.getElementById('v-summary');
   sum.style.display='';sum.innerHTML='\u23F3 Validating against IB\u2026';
   document.getElementById('v-fix-btn').style.display='none';_vLast=null;_vFixed=new Set();
