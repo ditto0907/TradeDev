@@ -2143,8 +2143,7 @@ async def api_fix_ohlcv(
 
 
 @app.get("/api/data/calendar_gaps")
-async def api_calendar_gaps(
-    symbol: str = "MES",
+async def api_calendar_gaps(    symbol: str = "MES",
     timeframe: str = "5min",
     from_ts: Optional[int] = None,
     to_ts: Optional[int] = None,
@@ -2178,6 +2177,111 @@ async def api_calendar_gaps(
         "total_gaps": len(all_gaps),
         "data_gaps": len(data_gaps),
         "gaps": all_gaps,
+    }
+
+
+
+@app.get("/api/data/coverage_calendar")
+async def api_coverage_calendar(
+    symbol: str = "MES",
+    timeframe: str = "5min",
+    year: int = Query(default=None),
+):
+    """Per-day coverage data for a given symbol/timeframe/year.
+
+    Used by the DataStatus calendar view to colour each calendar cell
+    according to whether the day has bars, has been validated, or has
+    known data gaps.
+
+    Returns::
+
+        {
+          "symbol": "MES",
+          "timeframe": "5min",
+          "year": 2024,
+          "days": {
+            "2024-03-04": {
+              "count": 72,
+              "validated": true,
+              "has_data_gap": false
+            },
+            ...
+          }
+        }
+    """
+    import calendar as _cal
+    from datetime import date, timedelta
+
+    if year is None:
+        year = date.today().year
+
+    # Unix timestamps for year boundaries (UTC midnight)
+    import time as _t
+    from datetime import datetime, timezone
+    year_start = int(datetime(year, 1, 1, tzinfo=timezone.utc).timestamp())
+    year_end   = int(datetime(year + 1, 1, 1, tzinfo=timezone.utc).timestamp())
+
+    # Per-day bar counts
+    with db._conn() as conn:
+        day_rows = conn.execute(
+            "SELECT DATE(ts, 'unixepoch') AS day, COUNT(*) AS cnt "
+            "FROM bars "
+            "WHERE symbol=? AND timeframe=? AND ts>=? AND ts<? "
+            "GROUP BY day ORDER BY day",
+            (symbol, timeframe, year_start, year_end),
+        ).fetchall()
+
+    day_counts: dict = {r[0]: r[1] for r in day_rows}
+
+    # Validated ranges (merged) that fall within this year
+    merged = db.get_merged_validated_ranges(symbol, timeframe)
+    validated_days: set = set()
+    for rng in merged:
+        r_from = rng["from_ts"]
+        r_to   = rng["to_ts"]
+        if r_to < year_start or r_from >= year_end:
+            continue
+        # Walk each UTC day covered by this range
+        cur = max(r_from, year_start)
+        while cur < min(r_to, year_end):
+            day_str = datetime.fromtimestamp(cur, tz=timezone.utc).strftime("%Y-%m-%d")
+            validated_days.add(day_str)
+            cur += 86400
+
+    # Data gaps (calendar-aware) for the year
+    gap_days: set = set()
+    from trading_calendar import get_calendar
+    from ib_data_fetcher import _key_to_ib
+    try:
+        _, interval = _key_to_ib(timeframe)
+    except Exception:
+        interval = 300
+    try:
+        cal = get_calendar(symbol)
+        bars = db.get_bars(symbol, timeframe, from_ts=year_start, to_ts=year_end)
+        if len(bars) >= 2:
+            for g in cal.find_gaps(bars, interval):
+                if g["gap_type"] == "data_gap":
+                    # Tag the day of the gap start
+                    gs = datetime.fromtimestamp(g["gap_start"], tz=timezone.utc).strftime("%Y-%m-%d")
+                    gap_days.add(gs)
+    except Exception:
+        pass
+
+    # Assemble result: only days that appear in bar counts
+    days_out: dict = {}
+    for day_str, cnt in day_counts.items():
+        days_out[day_str] = {
+            "count":        cnt,
+            "validated":    day_str in validated_days,
+            "has_data_gap": day_str in gap_days,
+        }
+
+    return {
+        "symbol":    symbol,
+        "timeframe": timeframe,
+        "year":      year,
+        "days":      days_out,
     }
 
 

@@ -3,483 +3,187 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>TradeDev — Data Validation</title>
+<title>TradeDev — Data Management</title>
 <style>
-/* ── Variables ─────────────────────────────────────────────────────────────── */
 :root {
-  --bg:         #131722;
-  --panel:      #1e222d;
-  --border:     #2a2e39;
-  --text:       #d1d4dc;
-  --text-dim:   #787b86;
-  --text-faint: #4c505c;
-  --green:      #26a69a;
-  --green-bg:   #0d2b2a;
-  --red:        #ef5350;
-  --red-bg:     #2c1616;
-  --blue:       #2962ff;
-  --orange:     #ff9800;
-  --input-bg:   #0e1015;
-  --nav-w:      48px;
-  --topbar-h:   36px;
+  --bg:#131722;--panel:#1e222d;--panel2:#252a35;--border:#2a2e39;
+  --text:#d1d4dc;--text-dim:#787b86;--text-faint:#4c505c;
+  --green:#26a69a;--green-bg:#0d2b2a;
+  --red:#ef5350;--red-bg:#2c1616;
+  --blue:#2962ff;--blue-bg:rgba(41,98,255,.12);
+  --orange:#ff9800;
+  --input-bg:#0e1015;--nav-w:48px;--topbar-h:36px;
 }
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;overflow:hidden}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;font-size:13px;color:var(--text);background:var(--bg);display:flex}
 
-/* ── Reset ─────────────────────────────────────────────────────────────────── */
-*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-html, body { height: 100%; overflow: hidden; }
-body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen,
-               Ubuntu, Cantarell, 'Helvetica Neue', sans-serif;
-  font-size: 13px;
-  color: var(--text);
-  background: var(--bg);
-  display: flex;
-}
+#nav-sidebar{width:var(--nav-w);min-width:var(--nav-w);background:var(--panel);border-right:1px solid var(--border);display:flex;flex-direction:column;align-items:center;padding-top:8px;gap:4px;z-index:10}
+.nav-btn{width:40px;height:40px;display:flex;align-items:center;justify-content:center;border-radius:6px;cursor:pointer;color:var(--text-dim);border:none;background:transparent;position:relative;transition:color .15s,background .15s;text-decoration:none}
+.nav-btn:hover{color:var(--text);background:rgba(255,255,255,.05)}
+.nav-btn.active{color:var(--blue);background:rgba(41,98,255,.10)}
+.nav-btn.active::before{content:'';position:absolute;left:-4px;top:8px;bottom:8px;width:3px;border-radius:0 2px 2px 0;background:var(--blue)}
+.nav-btn svg{display:block}
 
-/* ── Left Navigation Sidebar ───────────────────────────────────────────────── */
-#nav-sidebar {
-  width: var(--nav-w);
-  min-width: var(--nav-w);
-  background: var(--panel);
-  border-right: 1px solid var(--border);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  padding-top: 8px;
-  gap: 4px;
-  z-index: 10;
-}
-.nav-btn {
-  width: 40px;
-  height: 40px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 6px;
-  cursor: pointer;
-  color: var(--text-dim);
-  border: none;
-  background: transparent;
-  position: relative;
-  transition: color .15s, background .15s;
-}
-.nav-btn:hover { color: var(--text); background: rgba(255,255,255,.05); }
-.nav-btn.active {
-  color: var(--blue);
-  background: rgba(41,98,255,.10);
-}
-.nav-btn.active::before {
-  content: '';
-  position: absolute;
-  left: -4px;
-  top: 8px;
-  bottom: 8px;
-  width: 3px;
-  border-radius: 0 2px 2px 0;
-  background: var(--blue);
-}
-.nav-btn svg { display: block; }
+#main-col{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:0}
+#topbar{height:var(--topbar-h);background:var(--panel);border-bottom:1px solid var(--border);display:flex;align-items:center;padding:0 14px;gap:14px;flex-shrink:0}
+.logo{font-size:14px;font-weight:700;letter-spacing:.5px;color:var(--text);white-space:nowrap}
+.logo span{color:var(--blue)}
+.topbar-label{font-size:12px;color:var(--text-dim);padding-left:10px;border-left:1px solid var(--border)}
 
-/* ── Main Column ───────────────────────────────────────────────────────────── */
-#main-col {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  min-width: 0;
-}
+#content-area{flex:1;display:flex;flex-direction:column;overflow:hidden}
+#tab-bar{display:flex;gap:0;background:var(--panel);border-bottom:1px solid var(--border);flex-shrink:0}
+.dv-tab{padding:8px 18px;font-size:13px;cursor:pointer;color:var(--text-dim);border-bottom:2px solid transparent;transition:color .15s,border-color .15s;white-space:nowrap;user-select:none}
+.dv-tab:hover{color:var(--text)}
+.dv-tab.active{color:var(--blue);border-bottom-color:var(--blue)}
 
-/* ── Top Bar ───────────────────────────────────────────────────────────────── */
-#topbar {
-  height: var(--topbar-h);
-  background: var(--panel);
-  border-bottom: 1px solid var(--border);
-  display: flex;
-  align-items: center;
-  padding: 0 14px;
-  gap: 14px;
-  flex-shrink: 0;
-}
-.logo {
-  font-size: 14px;
-  font-weight: 700;
-  letter-spacing: .5px;
-  color: var(--text);
-  white-space: nowrap;
-}
-.logo span { color: var(--blue); }
-.topbar-label {
-  font-size: 12px;
-  color: var(--text-dim);
-  padding-left: 10px;
-  border-left: 1px solid var(--border);
-}
+.dv-pane{display:none;flex:1;flex-direction:column;overflow:hidden}
+.dv-pane.active{display:flex}
 
-/* ── Content Tabs ──────────────────────────────────────────────────────────── */
-#content-area {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-#tab-bar {
-  display: flex;
-  gap: 0;
-  background: var(--panel);
-  border-bottom: 1px solid var(--border);
-  flex-shrink: 0;
-}
-.dv-tab {
-  padding: 8px 18px;
-  font-size: 13px;
-  cursor: pointer;
-  color: var(--text-dim);
-  border-bottom: 2px solid transparent;
-  transition: color .15s, border-color .15s;
-  white-space: nowrap;
-  user-select: none;
-}
-.dv-tab:hover { color: var(--text); }
-.dv-tab.active {
-  color: var(--blue);
-  border-bottom-color: var(--blue);
-}
+.dv-toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:8px 12px;background:var(--panel);border-bottom:1px solid var(--border);flex-shrink:0}
+.dv-toolbar label{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--text-dim);white-space:nowrap}
+.dv-toolbar select,.dv-toolbar input[type="datetime-local"],.dv-toolbar input[type="number"]{background:var(--input-bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:12px;font-family:inherit;outline:none;height:28px}
+.dv-toolbar select:focus,.dv-toolbar input:focus{border-color:var(--blue)}
+.dv-toolbar input[type="datetime-local"]::-webkit-calendar-picker-indicator{filter:invert(.7)}
 
-/* ── Tab Panes ─────────────────────────────────────────────────────────────── */
-.dv-pane {
-  display: none;
-  flex: 1;
-  flex-direction: column;
-  overflow: hidden;
-}
-.dv-pane.active {
-  display: flex;
-}
+.dv-btn{background:var(--input-bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 12px;font-size:12px;cursor:pointer;height:28px;white-space:nowrap;transition:border-color .15s,background .15s}
+.dv-btn:hover{border-color:var(--blue);background:var(--blue-bg)}
+.dv-btn.primary{background:var(--blue);color:#fff;border-color:var(--blue)}
+.dv-btn.primary:hover{background:#1b4fd4}
+.dv-btn.success{background:var(--green-bg);color:var(--green);border-color:var(--green)}
+.dv-btn.success:hover{background:#0f3533}
+.dv-btn.danger{border-color:var(--red);color:var(--red)}
+.dv-btn.danger:hover{background:var(--red-bg)}
+.dv-btn:disabled{opacity:.4;cursor:default;pointer-events:none}
 
-/* ── Filter Toolbar ────────────────────────────────────────────────────────── */
-.dv-toolbar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
-  background: var(--panel);
-  border-bottom: 1px solid var(--border);
-  flex-shrink: 0;
-}
-.dv-toolbar label {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 12px;
-  color: var(--text-dim);
-  white-space: nowrap;
-}
-.dv-toolbar select,
-.dv-toolbar input[type="datetime-local"] {
-  background: var(--input-bg);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 4px 8px;
-  font-size: 12px;
-  font-family: inherit;
-  outline: none;
-  height: 28px;
-}
-.dv-toolbar select:focus,
-.dv-toolbar input[type="datetime-local"]:focus {
-  border-color: var(--blue);
-}
-.dv-toolbar input[type="datetime-local"]::-webkit-calendar-picker-indicator {
-  filter: invert(.7);
-}
-.dv-btn {
-  background: var(--input-bg);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 4px 12px;
-  font-size: 12px;
-  cursor: pointer;
-  height: 28px;
-  white-space: nowrap;
-  transition: border-color .15s, background .15s;
-}
-.dv-btn:hover {
-  border-color: var(--blue);
-  background: rgba(41,98,255,.08);
-}
-.dv-btn.primary {
-  background: var(--blue);
-  color: #fff;
-  border-color: var(--blue);
-}
-.dv-btn.primary:hover {
-  background: #1b4fd4;
-}
-.dv-btn.danger {
-  border-color: var(--red);
-  color: var(--red);
-}
-.dv-btn.danger:hover {
-  background: var(--red-bg);
-}
+.dv-summary{display:none;padding:6px 12px;font-size:12px;background:rgba(41,98,255,.06);border-bottom:1px solid var(--border);flex-shrink:0;color:var(--text)}
 
-/* ── Summary Bar ───────────────────────────────────────────────────────────── */
-.dv-summary {
-  display: none;
-  padding: 6px 12px;
-  font-size: 12px;
-  background: rgba(41,98,255,.06);
-  border-bottom: 1px solid var(--border);
-  flex-shrink: 0;
-  color: var(--text);
-}
+.dv-table-wrap{flex:1;overflow:auto}
+.dv-data-table{width:100%;border-collapse:collapse;table-layout:fixed;font-size:12px}
+.dv-data-table thead{position:sticky;top:0;z-index:2}
+.dv-data-table th{background:var(--panel);color:var(--text-dim);font-weight:600;text-align:left;padding:6px 10px;border-bottom:1px solid var(--border);cursor:pointer;user-select:none;white-space:nowrap}
+.dv-data-table th:hover{color:var(--text)}
+.dv-data-table th .sort-arrow{font-size:10px;margin-left:3px;color:var(--text-faint)}
+.dv-data-table th .sort-arrow.active{color:var(--blue)}
+.dv-data-table td{padding:5px 10px;border-bottom:1px solid rgba(42,46,57,.4);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dv-data-table tbody tr:hover td{background:rgba(255,255,255,.02)}
+.dv-data-table .num{font-family:'SF Mono','Fira Code','Consolas',monospace;text-align:right}
+.dv-data-table .up{color:var(--green)}
+.dv-data-table .down{color:var(--red)}
+.dv-data-table .dim{color:var(--text-dim)}
+.dv-data-table .warn{color:var(--orange)}
+.dv-data-table td input[type="checkbox"],.dv-data-table th input[type="checkbox"]{cursor:pointer;accent-color:var(--blue);width:14px;height:14px}
+.empty-msg{padding:40px;text-align:center;color:var(--text-faint);font-size:13px}
 
-/* ── Data Table ────────────────────────────────────────────────────────────── */
-.dv-table-wrap {
-  flex: 1;
-  overflow: auto;
-}
-.dv-data-table {
-  width: 100%;
-  border-collapse: collapse;
-  table-layout: fixed;
-  font-size: 12px;
-}
-.dv-data-table thead {
-  position: sticky;
-  top: 0;
-  z-index: 2;
-}
-.dv-data-table th {
-  background: var(--panel);
-  color: var(--text-dim);
-  font-weight: 600;
-  text-align: left;
-  padding: 6px 10px;
-  border-bottom: 1px solid var(--border);
-  cursor: pointer;
-  user-select: none;
-  white-space: nowrap;
-  position: relative;
-}
-.dv-data-table th:hover { color: var(--text); }
-.dv-data-table th .sort-arrow {
-  font-size: 10px;
-  margin-left: 3px;
-  color: var(--text-faint);
-}
-.dv-data-table th .sort-arrow.active { color: var(--blue); }
-.dv-data-table td {
-  padding: 5px 10px;
-  border-bottom: 1px solid rgba(42,46,57,.4);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.dv-data-table tbody tr:hover td { background: rgba(255,255,255,.02); }
-.dv-data-table .num {
-  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
-  text-align: right;
-}
-.dv-data-table .up   { color: var(--green); }
-.dv-data-table .down { color: var(--red); }
-.dv-data-table .dim  { color: var(--text-dim); }
-.dv-data-table .warn { color: var(--orange); }
+.dv-pagination{display:flex;align-items:center;justify-content:space-between;padding:6px 12px;background:var(--panel);border-top:1px solid var(--border);font-size:12px;color:var(--text-dim);flex-shrink:0;gap:12px}
+.dv-pagination .pg-controls{display:flex;align-items:center;gap:6px}
+.pg-btn{background:var(--input-bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:3px 10px;font-size:12px;cursor:pointer}
+.pg-btn:hover{border-color:var(--blue)}
+.pg-btn:disabled{opacity:.35;cursor:default;border-color:var(--border)}
+.pg-select{background:var(--input-bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:3px 6px;font-size:12px}
 
-.empty-msg {
-  padding: 40px;
-  text-align: center;
-  color: var(--text-faint);
-  font-size: 13px;
-}
+#toast-container{position:fixed;bottom:16px;right:16px;display:flex;flex-direction:column-reverse;gap:8px;z-index:99999;pointer-events:none}
+.toast{background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:9px 16px;font-size:12px;color:var(--text);opacity:0;transform:translateX(30px);transition:opacity .25s,transform .25s;pointer-events:auto;max-width:400px;word-break:break-word}
+.toast.show{opacity:1;transform:translateX(0)}
+.toast.toast-success{border-color:var(--green);color:var(--green)}
+.toast.toast-error{border-color:var(--red);color:var(--red)}
+.toast.toast-info{border-color:var(--blue);color:var(--text)}
+.toast.toast-warn{border-color:var(--orange);color:var(--orange)}
 
-/* ── Pagination ────────────────────────────────────────────────────────────── */
-.dv-pagination {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 6px 12px;
-  background: var(--panel);
-  border-top: 1px solid var(--border);
-  font-size: 12px;
-  color: var(--text-dim);
-  flex-shrink: 0;
-  gap: 12px;
-}
-.dv-pagination .pg-info { white-space: nowrap; }
-.dv-pagination .pg-controls {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-.pg-btn {
-  background: var(--input-bg);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 3px 10px;
-  font-size: 12px;
-  cursor: pointer;
-}
-.pg-btn:hover { border-color: var(--blue); }
-.pg-btn:disabled {
-  opacity: .35;
-  cursor: default;
-  border-color: var(--border);
-}
-.pg-select {
-  background: var(--input-bg);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 3px 6px;
-  font-size: 12px;
-}
+::-webkit-scrollbar{width:8px;height:8px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
+::-webkit-scrollbar-thumb:hover{background:var(--text-faint)}
 
-/* ── Toast Notifications ───────────────────────────────────────────────────── */
-#toast-container {
-  position: fixed;
-  bottom: 16px;
-  right: 16px;
-  display: flex;
-  flex-direction: column-reverse;
-  gap: 8px;
-  z-index: 99999;
-  pointer-events: none;
-}
-.toast {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 9px 16px;
-  font-size: 12px;
-  color: var(--text);
-  opacity: 0;
-  transform: translateX(30px);
-  transition: opacity .25s, transform .25s;
-  pointer-events: auto;
-  max-width: 380px;
-  word-break: break-word;
-}
-.toast.show {
-  opacity: 1;
-  transform: translateX(0);
-}
-.toast.toast-success { border-color: var(--green); color: var(--green); }
-.toast.toast-error   { border-color: var(--red);   color: var(--red); }
-.toast.toast-ok      { border-color: var(--green); color: var(--green); }
-.toast.toast-info    { border-color: var(--blue);  color: var(--text); }
-.toast.toast-warn    { border-color: var(--orange); color: var(--orange); }
+/* ── DataStatus calendar ──────────────────────────────────────────────────── */
+.status-top{display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding:10px 16px;background:var(--panel);border-bottom:1px solid var(--border);flex-shrink:0}
+.status-stat{background:var(--panel2);border:1px solid var(--border);border-radius:6px;padding:8px 14px;text-align:center;min-width:100px}
+.status-stat .stat-val{font-size:18px;font-weight:700;color:var(--text)}
+.status-stat .stat-lbl{font-size:11px;color:var(--text-dim);margin-top:2px}
+.status-content{flex:1;overflow:auto;padding:16px}
+.year-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}
+@media(max-width:1100px){.year-grid{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:800px){.year-grid{grid-template-columns:repeat(2,1fr)}}
+.month-block{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:10px}
+.month-name{font-size:12px;font-weight:700;color:var(--text);margin-bottom:6px;text-align:center;letter-spacing:.3px}
+.month-dow-row{display:grid;grid-template-columns:repeat(7,1fr);margin-bottom:3px}
+.month-dow{font-size:10px;color:var(--text-faint);text-align:center;padding:1px 0}
+.month-days-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:2px}
+.day-cell{aspect-ratio:1;border-radius:3px;cursor:default;font-size:9px;display:flex;align-items:center;justify-content:center;color:transparent;position:relative}
+.day-cell.empty{background:transparent}
+.day-cell.no-data{background:rgba(255,255,255,.04);color:var(--text-faint)}
+.day-cell.weekend{background:transparent}
+.day-cell.has-data{background:rgba(38,166,154,.22);color:var(--green)}
+.day-cell.has-data.validated{background:rgba(38,166,154,.55)}
+.day-cell.has-data.has-gap{background:rgba(255,152,0,.30);color:var(--orange)}
+.day-cell.has-data.has-gap.validated{background:rgba(255,152,0,.52)}
+.day-cell:hover{opacity:.8}
+/* tooltip via title handled natively — custom tooltip for richer info */
+.cal-legend{display:flex;gap:14px;flex-wrap:wrap;padding:10px 16px;background:var(--panel);border-top:1px solid var(--border);flex-shrink:0}
+.legend-item{display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text-dim)}
+.legend-swatch{width:12px;height:12px;border-radius:2px;flex-shrink:0}
+.section-title{font-size:12px;font-weight:700;color:var(--text-dim);text-transform:uppercase;letter-spacing:.6px;margin-bottom:8px}
 
-/* ── Scrollbar ─────────────────────────────────────────────────────────────── */
-::-webkit-scrollbar { width: 8px; height: 8px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb {
-  background: var(--border);
-  border-radius: 4px;
-}
-::-webkit-scrollbar-thumb:hover { background: var(--text-faint); }
-
-/* ── Checkbox column ─────────────────────────────────────────────────────── */
-.dv-data-table td input[type="checkbox"],
-.dv-data-table th input[type="checkbox"] {
-  cursor: pointer;
-  accent-color: var(--blue);
-  width: 14px;
-  height: 14px;
-}
+/* ── DataValidate mode bar ─────────────────────────────────────────────────── */
+.validate-mode-bar{display:flex;align-items:center;gap:6px;padding:6px 12px;background:var(--panel2);border-bottom:1px solid var(--border);flex-shrink:0}
+.vmode-btn{padding:4px 14px;font-size:12px;border-radius:4px;cursor:pointer;border:1px solid var(--border);background:transparent;color:var(--text-dim);transition:all .15s}
+.vmode-btn.active{border-color:var(--blue);color:var(--blue);background:var(--blue-bg)}
+.vmode-btn:hover:not(.active){border-color:var(--text-dim);color:var(--text)}
+.batch-progress{display:none;padding:10px 14px;flex-shrink:0;background:var(--panel2);border-bottom:1px solid var(--border)}
+.batch-progress.visible{display:block}
+.progress-bar-wrap{height:6px;background:var(--border);border-radius:3px;overflow:hidden;margin-bottom:6px}
+.progress-bar-fill{height:100%;background:var(--blue);border-radius:3px;transition:width .3s;width:0%}
+.batch-status-text{font-size:11px;color:var(--text-dim)}
 </style>
 </head>
 <body>
 
-<!-- ── Left Navigation Sidebar ──────────────────────────────────────────── -->
 <nav id="nav-sidebar">
   <a class="nav-btn" href="/" title="Trade">
     <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18"/><path d="M7 16l4-8 4 4 4-8"/></svg>
   </a>
-  <a class="nav-btn active" href="/datavalid" title="Data Validation">
+  <a class="nav-btn active" href="/datavalid" title="Data Management">
     <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
   </a>
 </nav>
 
-<!-- ── Main Column ──────────────────────────────────────────────────────── -->
 <div id="main-col">
-
-  <!-- Top Bar -->
   <div id="topbar">
     <div class="logo">TRADE<span>DEV</span></div>
-    <div class="topbar-label">Data Validation</div>
+    <div class="topbar-label">Data Management</div>
   </div>
-
-  <!-- Content Area -->
   <div id="content-area">
-
-    <!-- Tab Bar -->
     <div id="tab-bar">
-      <div class="dv-tab active" data-pane="query">📋 Data Query</div>
-      <div class="dv-tab" data-pane="validate">✅ Data Validate</div>
-      <div class="dv-tab" data-pane="integrity">🔧 Integrity</div>
+      <div class="dv-tab active" data-pane="query">&#x1F4CB; DataQuery</div>
+      <div class="dv-tab" data-pane="status">&#x1F4CA; DataStatus</div>
+      <div class="dv-tab" data-pane="validate">&#x2705; DataValidate</div>
     </div>
 
-    <!-- ═══ Data Query Pane ══════════════════════════════════════════════ -->
+    <!-- ═══ DataQuery ══════════════════════════════════════════════════════ -->
     <div class="dv-pane active" id="pane-query">
       <div class="dv-toolbar">
-        <label>Database
+        <label>DB Table
           <select id="q-db-table">
             <option value="bars">K-Line (bars)</option>
             <option value="ib_fetch_cache">IB Cache</option>
+            <option value="validated_ranges">Validated Ranges</option>
+            <option value="realtime_bars">Realtime Bars</option>
           </select>
         </label>
-        <label>Symbol
-          <select id="q-symbol">
-            <option value="">All</option>
-            <option value="MES">MES</option>
-            <option value="MNQ">MNQ</option>
-            <option value="NK225MC">NK225MC</option>
-            <option value="MGC">MGC</option>
-          </select>
-        </label>
-        <label>Timeframe
-          <select id="q-timeframe">
-            <option value="">All</option>
-            <option value="5min">5min</option>
-            <option value="1D">1D</option>
-          </select>
-        </label>
-        <label>Source
-          <select id="q-source"><option value="">All</option></select>
-        </label>
-        <label>From
-          <input type="datetime-local" id="q-from" min="2024-01-01T00:00"/>
-        </label>
-        <label>To
-          <input type="datetime-local" id="q-to" min="2024-01-01T00:00"/>
-        </label>
-        <button class="dv-btn primary" onclick="queryData()">🔍 Search</button>
+        <label>Symbol <select id="q-symbol"><option value="">All</option></select></label>
+        <label>Timeframe <select id="q-timeframe"><option value="">All</option></select></label>
+        <label id="q-source-label">Source <select id="q-source"><option value="">All</option></select></label>
+        <label id="q-contract-label">Contract <select id="q-contract"><option value="">All</option></select></label>
+        <label>From <input type="datetime-local" id="q-from" min="2024-01-01T00:00"/></label>
+        <label>To   <input type="datetime-local" id="q-to"   min="2024-01-01T00:00"/></label>
+        <button class="dv-btn primary" onclick="queryData()">&#x1F50D; Search</button>
         <button class="dv-btn" onclick="resetQueryFilters()">Reset</button>
+        <span id="q-loading" style="display:none;font-size:11px;color:var(--text-dim)">Loading&#x2026;</span>
       </div>
       <div class="dv-table-wrap">
         <table class="dv-data-table" id="q-table">
-          <thead id="q-thead">
-            <tr>
-              <th data-col="time" style="width:170px">Time <span class="sort-arrow">⇅</span></th>
-              <th data-col="symbol" style="width:80px">Symbol <span class="sort-arrow">⇅</span></th>
-              <th data-col="contract" style="width:90px">Contract <span class="sort-arrow">⇅</span></th>
-              <th data-col="timeframe" style="width:80px">Timeframe <span class="sort-arrow">⇅</span></th>
-              <th data-col="open" style="width:90px">Open <span class="sort-arrow">⇅</span></th>
-              <th data-col="high" style="width:90px">High <span class="sort-arrow">⇅</span></th>
-              <th data-col="low" style="width:90px">Low <span class="sort-arrow">⇅</span></th>
-              <th data-col="close" style="width:90px">Close <span class="sort-arrow">⇅</span></th>
-              <th data-col="volume" style="width:80px">Volume <span class="sort-arrow">⇅</span></th>
-              <th data-col="source" style="width:110px">Source <span class="sort-arrow">⇅</span></th>
-            </tr>
-          </thead>
-          <tbody id="q-tbody">
-            <tr><td colspan="10"><div class="empty-msg">Use the filters above and click Search</div></td></tr>
-          </tbody>
+          <thead id="q-thead"><tr><th colspan="10">Choose a table and click Search</th></tr></thead>
+          <tbody id="q-tbody"><tr><td colspan="10"><div class="empty-msg">Use the filters above and click Search</div></td></tr></tbody>
         </table>
       </div>
       <div class="dv-pagination" id="q-pagination" style="display:none">
@@ -487,1088 +191,917 @@ body {
         <div class="pg-controls">
           <label>Page size
             <select class="pg-select" id="q-page-size">
-              <option value="25">25</option>
-              <option value="50" selected>50</option>
-              <option value="100">100</option>
+              <option value="25">25</option><option value="50" selected>50</option><option value="100">100</option>
             </select>
           </label>
-          <button class="pg-btn" id="q-prev" disabled>◀ Prev</button>
+          <button class="pg-btn" id="q-prev" disabled>&#x25C0; Prev</button>
           <span id="q-pg-num" style="min-width:70px;text-align:center">Page 1 / 1</span>
-          <button class="pg-btn" id="q-next" disabled>Next ▶</button>
+          <button class="pg-btn" id="q-next" disabled>Next &#x25B6;</button>
         </div>
       </div>
     </div>
 
-    <!-- ═══ Data Validate Pane ═══════════════════════════════════════════ -->
-    <div class="dv-pane" id="pane-validate">
+    <!-- ═══ DataStatus ═════════════════════════════════════════════════════ -->
+    <div class="dv-pane" id="pane-status">
       <div class="dv-toolbar">
         <label>Symbol
-          <select id="v-symbol">
-            <option value="MES">MES</option>
-            <option value="MNQ">MNQ</option>
-            <option value="NK225MC">NK225MC</option>
-            <option value="MGC">MGC</option>
+          <select id="s-symbol">
+            <option value="MES">MES</option><option value="MNQ">MNQ</option>
+            <option value="NK225MC">NK225MC</option><option value="MGC">MGC</option>
           </select>
         </label>
         <label>Timeframe
-          <select id="v-timeframe">
-            <option value="5min">5min</option>
-            <option value="1D">1D</option>
+          <select id="s-timeframe"><option value="5min">5min</option><option value="1D">1D</option></select>
+        </label>
+        <label>Year <input type="number" id="s-year" value="2025" min="2020" max="2035" style="width:70px"/></label>
+        <button class="dv-btn primary" onclick="loadStatusCalendar()">&#x1F4C5; Load Calendar</button>
+        <button class="dv-btn" onclick="loadCoverageAll()">&#x1F4CA; All Coverage</button>
+        <span id="s-loading" style="display:none;font-size:11px;color:var(--text-dim)">Loading&#x2026;</span>
+      </div>
+      <div class="status-top" id="s-stats" style="display:none">
+        <div class="status-stat"><div class="stat-val" id="s-stat-days">&#x2014;</div><div class="stat-lbl">Days w/ Data</div></div>
+        <div class="status-stat"><div class="stat-val" id="s-stat-bars">&#x2014;</div><div class="stat-lbl">Total Bars</div></div>
+        <div class="status-stat"><div class="stat-val" id="s-stat-validated" style="color:var(--green)">&#x2014;</div><div class="stat-lbl">Validated Days</div></div>
+        <div class="status-stat"><div class="stat-val" id="s-stat-gaps" style="color:var(--orange)">&#x2014;</div><div class="stat-lbl">Days w/ Gaps</div></div>
+      </div>
+      <div class="status-content" id="s-content">
+        <div class="empty-msg">Select symbol / timeframe / year and click Load Calendar</div>
+      </div>
+      <div class="cal-legend">
+        <div class="legend-item"><div class="legend-swatch" style="background:rgba(255,255,255,.04)"></div>No data</div>
+        <div class="legend-item"><div class="legend-swatch" style="background:rgba(38,166,154,.22)"></div>Has data</div>
+        <div class="legend-item"><div class="legend-swatch" style="background:rgba(38,166,154,.55)"></div>Data + Validated &#x2713;</div>
+        <div class="legend-item"><div class="legend-swatch" style="background:rgba(255,152,0,.30)"></div>Data gaps &#x26A0;</div>
+        <div class="legend-item"><div class="legend-swatch" style="background:rgba(255,152,0,.52)"></div>Gaps + Validated</div>
+      </div>
+    </div>
+
+    <!-- ═══ DataValidate ═══════════════════════════════════════════════════ -->
+    <div class="dv-pane" id="pane-validate">
+      <div class="validate-mode-bar">
+        <span style="font-size:11px;color:var(--text-dim);margin-right:4px">Mode:</span>
+        <button class="vmode-btn active" id="vm-single"    onclick="setVMode('single')">Single Range</button>
+        <button class="vmode-btn"        id="vm-batch"     onclick="setVMode('batch')">Batch (long range)</button>
+        <button class="vmode-btn"        id="vm-integrity" onclick="setVMode('integrity')">Integrity</button>
+        <div style="margin-left:auto;display:flex;gap:6px">
+          <button class="dv-btn" onclick="runBgValidate()" title="Background validate all">&#x1F504; BG Validate</button>
+          <button class="dv-btn danger" onclick="runDeleteRealtime()">&#x1F5D1; Del Realtime</button>
+        </div>
+      </div>
+
+      <!-- Single Range toolbar -->
+      <div class="dv-toolbar" id="v-toolbar-single">
+        <label>Symbol
+          <select id="v-symbol">
+            <option value="MES">MES</option><option value="MNQ">MNQ</option>
+            <option value="NK225MC">NK225MC</option><option value="MGC">MGC</option>
           </select>
         </label>
-        <label>From
-          <input type="datetime-local" id="v-from" min="2024-01-01T00:00"/>
-        </label>
-        <label>To
-          <input type="datetime-local" id="v-to" min="2024-01-01T00:00"/>
-        </label>
-        <button class="dv-btn" onclick="runGaps()">🔍 Check Gaps</button>
-        <button class="dv-btn" onclick="runValidate()">✅ Validate vs IB</button>
-        <button class="dv-btn primary" id="v-fix-btn" style="display:none" onclick="runFix()">🔧 Data Fix</button>
-        <button class="dv-btn" onclick="runViewValidatedRanges()">📋 Checked Ranges</button>
-        <button class="dv-btn" onclick="runBgValidate()">🔄 BG Validate</button>
-        <button class="dv-btn danger" style="margin-left:auto" onclick="runDeleteRealtime()">🗑 Delete Realtime Bars</button>
+        <label>TF <select id="v-timeframe"><option value="5min">5min</option><option value="1D">1D</option></select></label>
+        <label>From <input type="datetime-local" id="v-from" min="2024-01-01T00:00"/></label>
+        <label>To   <input type="datetime-local" id="v-to"   min="2024-01-01T00:00"/></label>
+        <button class="dv-btn" onclick="runGaps()">&#x1F50D; Check Gaps</button>
+        <button class="dv-btn" onclick="runValidate()">&#x2705; Validate vs IB</button>
+        <button class="dv-btn primary" id="v-fix-btn" style="display:none" onclick="runFix()">&#x1F527; Fix Selected</button>
+        <button class="dv-btn" onclick="runViewValidatedRanges()">&#x1F4CB; Checked Ranges</button>
       </div>
+
+      <!-- Batch toolbar -->
+      <div class="dv-toolbar" id="v-toolbar-batch" style="display:none">
+        <label>Symbol
+          <select id="vb-symbol">
+            <option value="MES">MES</option><option value="MNQ">MNQ</option>
+            <option value="NK225MC">NK225MC</option><option value="MGC">MGC</option>
+          </select>
+        </label>
+        <label>TF <select id="vb-timeframe"><option value="5min">5min</option><option value="1D">1D</option></select></label>
+        <label>From <input type="datetime-local" id="vb-from" min="2024-01-01T00:00"/></label>
+        <label>To   <input type="datetime-local" id="vb-to"   min="2024-01-01T00:00"/></label>
+        <label>Chunk (days) <input type="number" id="vb-chunk" value="7" min="1" max="90" style="width:60px"/></label>
+        <button class="dv-btn primary" id="vb-run-btn"  onclick="runBatchValidate()">&#x25B6; Start Batch</button>
+        <button class="dv-btn danger"  id="vb-stop-btn" style="display:none" onclick="stopBatch()">&#x23F9; Stop</button>
+        <button class="dv-btn success" onclick="runValidateAll()">&#x1F504; Validate All Symbols</button>
+      </div>
+
+      <!-- Integrity toolbar -->
+      <div class="dv-toolbar" id="v-toolbar-integrity" style="display:none">
+        <label>Symbol
+          <select id="i-symbol">
+            <option value="MES">MES</option><option value="MNQ">MNQ</option>
+            <option value="NK225MC">NK225MC</option><option value="MGC">MGC</option>
+          </select>
+        </label>
+        <label>TF <select id="i-timeframe"><option value="5min">5min</option><option value="1D">1D</option></select></label>
+        <label>From <input type="datetime-local" id="i-from" min="2024-01-01T00:00"/></label>
+        <label>To   <input type="datetime-local" id="i-to"   min="2024-01-01T00:00"/></label>
+        <button class="dv-btn primary" onclick="runIntegrity()">&#x1F4CB; Integrity Report</button>
+        <button class="dv-btn" onclick="runCalendarGaps()">&#x1F4C5; Calendar Gaps</button>
+        <button class="dv-btn danger" onclick="runFixOHLCV()">&#x1F527; Fix OHLCV</button>
+      </div>
+
+      <!-- Batch progress -->
+      <div class="batch-progress" id="v-batch-progress">
+        <div class="progress-bar-wrap"><div class="progress-bar-fill" id="v-progress-fill"></div></div>
+        <div class="batch-status-text" id="v-batch-status">Idle</div>
+      </div>
+
       <div class="dv-summary" id="v-summary"></div>
       <div class="dv-table-wrap">
         <table class="dv-data-table" id="v-table">
-          <thead id="v-thead">
-            <tr><th colspan="8">Select an action above to begin</th></tr>
-          </thead>
-          <tbody id="v-tbody">
-            <tr><td colspan="8"><div class="empty-msg">Select parameters and run a check</div></td></tr>
-          </tbody>
+          <thead id="v-thead"><tr><th colspan="8">Select a mode and action above</th></tr></thead>
+          <tbody id="v-tbody"><tr><td colspan="8"><div class="empty-msg">Select parameters and run a check</div></td></tr></tbody>
         </table>
       </div>
     </div>
 
-    <!-- ═══ Integrity Pane ═══════════════════════════════════════════════ -->
-    <div class="dv-pane" id="pane-integrity">
-      <div class="dv-toolbar">
-        <label>Symbol
-          <select id="i-symbol">
-            <option value="MES">MES</option>
-            <option value="MNQ">MNQ</option>
-            <option value="NK225MC">NK225MC</option>
-            <option value="MGC">MGC</option>
-          </select>
-        </label>
-        <label>Timeframe
-          <select id="i-timeframe">
-            <option value="5min">5min</option>
-            <option value="1D">1D</option>
-          </select>
-        </label>
-        <label>From
-          <input type="datetime-local" id="i-from" min="2024-01-01T00:00"/>
-        </label>
-        <label>To
-          <input type="datetime-local" id="i-to" min="2024-01-01T00:00"/>
-        </label>
-        <button class="dv-btn primary" onclick="runIntegrity()">🔍 Run Report</button>
-        <button class="dv-btn" onclick="runCoverageCheck()">📊 Coverage</button>
-        <button class="dv-btn" onclick="runCalendarGaps()">📅 Calendar Gaps</button>
-        <button class="dv-btn danger" onclick="runFixOHLCV()">🔧 Fix OHLCV</button>
-      </div>
-      <div class="dv-summary" id="i-summary"></div>
-      <div class="dv-table-wrap">
-        <table class="dv-data-table" id="i-table">
-          <thead id="i-thead">
-            <tr><th colspan="6">Run an integrity check to see results</th></tr>
-          </thead>
-          <tbody id="i-tbody">
-            <tr><td colspan="6"><div class="empty-msg">Select parameters and click Run Report</div></td></tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
-
-  </div><!-- /content-area -->
-</div><!-- /main-col -->
-
-<!-- Toast container -->
+  </div>
+</div>
 <div id="toast-container"></div>
 
 <script>
-/* ═══════════════════════════════════════════════════════════════════════════
-   TradeDev — Data Validation Page
-   ═══════════════════════════════════════════════════════════════════════════ */
+/* =============================================================================
+   TradeDev — Data Management
+   ============================================================================= */
 
-// ── Tab switching ──────────────────────────────────────────────────────────
-document.querySelectorAll('.dv-tab').forEach(tab => {
-  tab.addEventListener('click', () => {
-    document.querySelectorAll('.dv-tab').forEach(t => t.classList.remove('active'));
-    document.querySelectorAll('.dv-pane').forEach(p => p.classList.remove('active'));
+// Tab switching
+document.querySelectorAll('.dv-tab').forEach(function(tab){
+  tab.addEventListener('click',function(){
+    document.querySelectorAll('.dv-tab').forEach(function(t){t.classList.remove('active');});
+    document.querySelectorAll('.dv-pane').forEach(function(p){p.classList.remove('active');});
     tab.classList.add('active');
-    const pane = document.getElementById('pane-' + tab.dataset.pane);
-    if (pane) pane.classList.add('active');
+    var pane=document.getElementById('pane-'+tab.dataset.pane);
+    if(pane) pane.classList.add('active');
   });
 });
 
-// ── Initialize default filter values ──────────────────────────────────────
-function initDefaults() {
-  var now = new Date();
-  var toVal = now.getFullYear() + '-'
-    + String(now.getMonth() + 1).padStart(2, '0') + '-'
-    + String(now.getDate()).padStart(2, '0') + 'T00:00';
-  var from30 = new Date(now);
-  from30.setDate(from30.getDate() - 30);
-  var fromVal = from30.getFullYear() + '-'
-    + String(from30.getMonth() + 1).padStart(2, '0') + '-'
-    + String(from30.getDate()).padStart(2, '0') + 'T00:00';
+// Toast
+function showToast(msg,type){
+  type=type||'info';
+  var el=document.createElement('div');
+  el.className='toast toast-'+type;
+  el.textContent=msg;
+  var c=document.getElementById('toast-container');
+  c.appendChild(el);
+  requestAnimationFrame(function(){el.classList.add('show');});
+  setTimeout(function(){
+    el.classList.remove('show');
+    el.addEventListener('transitionend',function(){if(el.parentNode)el.remove();},{once:true});
+    setTimeout(function(){if(el.parentNode)el.remove();},500);
+  },3500);
+}
 
-  ['q', 'v'].forEach(function(p) {
-    var fromEl = document.getElementById(p + '-from');
-    var toEl = document.getElementById(p + '-to');
-    if (fromEl) fromEl.value = fromVal;
-    if (toEl) toEl.value = toVal;
-    var tf = document.getElementById(p + '-timeframe');
-    if (tf) tf.value = '5min';
+// Helpers
+function dateToTs(s,end){
+  if(!s) return null;
+  var d=s.includes('T')?new Date(s+':00'):new Date(s+(end?'T23:59:59':'T00:00:00'));
+  return Math.floor(d.getTime()/1000);
+}
+function tsToLocal(ts){return new Date(ts*1000).toLocaleString();}
+function fmtNum(v){if(v==null)return '\u2014';var n=Number(v);return isNaN(n)?String(v):n.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:6});}
+function fmtVol(v){if(v==null)return '\u2014';return Number(v).toLocaleString();}
+var _MC={1:'F',2:'G',3:'H',4:'J',5:'K',6:'M',7:'N',8:'Q',9:'U',10:'V',11:'X',12:'Z'};
+function fmtContract(sym,cm){
+  if(!cm||cm.length<6) return '';
+  var y=parseInt(cm.substring(0,4)),m=parseInt(cm.substring(4,6));
+  return (sym||'')+(_MC[m]||'?')+String(y).slice(-1);
+}
+
+function initDefaults(){
+  var now=new Date();
+  var toVal=now.getFullYear()+'-'+String(now.getMonth()+1).padStart(2,'0')+'-'+String(now.getDate()).padStart(2,'0')+'T00:00';
+  var f30=new Date(now); f30.setDate(f30.getDate()-30);
+  var fromVal=f30.getFullYear()+'-'+String(f30.getMonth()+1).padStart(2,'0')+'-'+String(f30.getDate()).padStart(2,'0')+'T00:00';
+  ['q','v','vb','i'].forEach(function(p){
+    var fe=document.getElementById(p+'-from'),te=document.getElementById(p+'-to');
+    if(fe&&!fe.value) fe.value=fromVal;
+    if(te&&!te.value) te.value=toVal;
   });
+  var sy=document.getElementById('s-year');
+  if(sy) sy.value=now.getFullYear();
 }
 initDefaults();
 
-// ── Toast notifications ───────────────────────────────────────────────────
-function showToast(message, type) {
-  type = type || 'info';
-  const el = document.createElement('div');
-  el.className = 'toast toast-' + type;
-  el.textContent = message;
-  const container = document.getElementById('toast-container');
-  container.appendChild(el);
-  requestAnimationFrame(() => el.classList.add('show'));
-  setTimeout(() => {
-    el.classList.remove('show');
-    el.addEventListener('transitionend', () => { if (el.parentNode) el.remove(); }, { once: true });
-    // Fallback in case transitionend doesn't fire
-    setTimeout(() => { if (el.parentNode) el.remove(); }, 500);
-  }, 3500);
-}
-
-// ── Helpers ────────────────────────────────────────────────────────────────
-function dateToTs(dateStr, endOfDay) {
-  if (!dateStr) return null;
-  // datetime-local format "YYYY-MM-DDTHH:MM" already has a time component;
-  // append ':00' for full seconds precision before parsing as local time.
-  // date-only format "YYYY-MM-DD" needs a time suffix based on endOfDay flag.
-  var d = dateStr.includes('T')
-    ? new Date(dateStr + ':00')
-    : new Date(dateStr + (endOfDay ? 'T23:59:59' : 'T00:00:00'));
-  return Math.floor(d.getTime() / 1000);
-}
-
-function tsToLocal(ts) {
-  return new Date(ts * 1000).toLocaleString();
-}
-
-function fmtNum(v) {
-  if (v == null) return '—';
-  var n = Number(v);
-  return isNaN(n) ? String(v) : n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 6 });
-}
-
-function fmtVol(v) {
-  if (v == null) return '—';
-  return Number(v).toLocaleString();
-}
-
-// ── Contract month YYYYMM → display format (e.g. MESH6) ──────────────────
-var _MONTH_CODES = {1:'F',2:'G',3:'H',4:'J',5:'K',6:'M',7:'N',8:'Q',9:'U',10:'V',11:'X',12:'Z'};
-function fmtContract(symbol, contractMonth) {
-  if (!contractMonth || contractMonth.length < 6) return '';
-  var y = parseInt(contractMonth.substring(0, 4));
-  var m = parseInt(contractMonth.substring(4, 6));
-  var code = _MONTH_CODES[m] || '?';
-  var yearDigit = String(y).slice(-1);
-  return (symbol || '') + code + yearDigit;
-}
-
-// ── Table sorting ─────────────────────────────────────────────────────────
-var _sortState = {};
-var _sortInitialized = {};   // track which tables have handlers attached
-
-function initTableSort(tableId, data, renderFn, defaultCol, defaultDir) {
-  var thead = document.getElementById(tableId.replace('-table', '-thead'));
-  if (!thead) return;
-
-  // Avoid stacking duplicate click handlers on repeated calls
-  if (!_sortInitialized[tableId]) {
-    _sortInitialized[tableId] = true;
-    thead.querySelectorAll('th[data-col]').forEach(function(th) {
-      th.addEventListener('click', function() {
-        var col = th.dataset.col;
-        var key = tableId + ':' + col;
-        var dir = _sortState[key] === 'asc' ? 'desc' : 'asc';
-        _applySortUI(thead, tableId, col, dir);
-        _sortDataAndRender(tableId, data, col, dir, renderFn);
+// Sorting
+var _sS={},_sI={};
+function initTableSort(tid,data,renderFn,defCol,defDir){
+  var thead=document.getElementById(tid.replace('-table','-thead'));
+  if(!thead) return;
+  if(!_sI[tid]){
+    _sI[tid]=true;
+    thead.querySelectorAll('th[data-col]').forEach(function(th){
+      th.addEventListener('click',function(){
+        var col=th.dataset.col,key=tid+':'+col;
+        var dir=_sS[key]==='asc'?'desc':'asc';
+        _apSortUI(thead,tid,col,dir);
+        _srtRender(data,col,dir,renderFn);
       });
     });
   }
-
-  // Apply default sort on each data load
-  if (defaultCol && defaultDir) {
-    _applySortUI(thead, tableId, defaultCol, defaultDir);
-    _sortDataAndRender(tableId, data, defaultCol, defaultDir, renderFn);
-  }
+  if(defCol&&defDir){_apSortUI(thead,tid,defCol,defDir);_srtRender(data,defCol,defDir,renderFn);}
 }
-
-function _applySortUI(thead, tableId, col, dir) {
-  // Reset all arrows in this table
-  thead.querySelectorAll('.sort-arrow').forEach(function(s) {
-    s.textContent = '⇅';
-    s.classList.remove('active');
+function _apSortUI(thead,tid,col,dir){
+  thead.querySelectorAll('.sort-arrow').forEach(function(s){s.textContent='\u21C5';s.classList.remove('active');});
+  var th=thead.querySelector('th[data-col="'+col+'"]');
+  if(th){var a=th.querySelector('.sort-arrow');if(a){a.textContent=dir==='asc'?'\u25B2':'\u25BC';a.classList.add('active');}}
+  _sS[tid+':'+col]=dir;
+}
+function _srtRender(data,col,dir,fn){
+  data.sort(function(a,b){
+    var va=a[col],vb=b[col];
+    if(va==null) return 1; if(vb==null) return -1;
+    var na=Number(va),nb=Number(vb);
+    if(!isNaN(na)&&!isNaN(nb)) return dir==='asc'?na-nb:nb-na;
+    return dir==='asc'?String(va).localeCompare(String(vb)):String(vb).localeCompare(String(va));
   });
-  var th = thead.querySelector('th[data-col="' + col + '"]');
-  if (th) {
-    var arrow = th.querySelector('.sort-arrow');
-    if (arrow) {
-      arrow.textContent = dir === 'asc' ? '▲' : '▼';
-      arrow.classList.add('active');
-    }
-  }
-  _sortState[tableId + ':col'] = col;
-  _sortState[tableId + ':' + col] = dir;
+  fn(data);
 }
 
-function _sortDataAndRender(tableId, data, col, dir, renderFn) {
-  data.sort(function(a, b) {
-    var va = a[col], vb = b[col];
-    if (va == null) return 1;
-    if (vb == null) return -1;
-    var na = Number(va), nb = Number(vb);
-    if (!isNaN(na) && !isNaN(nb)) {
-      return dir === 'asc' ? na - nb : nb - na;
-    }
-    return dir === 'asc'
-      ? String(va).localeCompare(String(vb))
-      : String(vb).localeCompare(String(va));
+/* ============================================================================
+   TAB 1 — DataQuery
+   ============================================================================ */
+var _qPage=1,_qPS=50,_qData=[];
+
+function _popSel(id,items,allVal){
+  var sel=document.getElementById(id),cur=sel.value;
+  sel.innerHTML='<option value="'+(allVal||'')+'">All</option>';
+  items.forEach(function(it){
+    var o=document.createElement('option');
+    if(typeof it==='object'){o.value=it.val;o.textContent=it.lbl;}else{o.value=it;o.textContent=it;}
+    sel.appendChild(o);
   });
-  renderFn(data);
+  if(cur) sel.value=cur;
 }
 
+function loadQueryMeta(){
+  var tbl=document.getElementById('q-db-table').value;
+  var special=(tbl==='validated_ranges'||tbl==='realtime_bars');
+  document.getElementById('q-source-label').style.display=special?'none':'';
+  document.getElementById('q-contract-label').style.display=special?'none':'';
+  if(special) return;
+  fetch('/api/data/query?page=1&page_size=1&db_table='+tbl)
+    .then(function(r){return r.json();})
+    .then(function(d){
+      _popSel('q-symbol',d.available_symbols||[],'');
+      _popSel('q-timeframe',d.available_timeframes||[],'');
+      _popSel('q-source',d.available_sources||[],'');
+      _popSel('q-contract',(d.available_contract_months||[]).map(function(m){return{val:m,lbl:m};}),'');
+    }).catch(function(){});
+}
 
-/* ═══════════════════════════════════════════════════════════════════════════
-   DATA QUERY TAB
-   ═══════════════════════════════════════════════════════════════════════════ */
-var _qPage = 1;
-var _qPageSize = 50;
-var _qData = [];
+document.getElementById('q-db-table').addEventListener('change',function(){_qPage=1;loadQueryMeta();});
+loadQueryMeta();
+document.getElementById('q-page-size').addEventListener('change',function(){_qPS=parseInt(this.value);_qPage=1;queryData();});
+document.getElementById('q-prev').addEventListener('click',function(){if(_qPage>1){_qPage--;queryData();}});
+document.getElementById('q-next').addEventListener('click',function(){_qPage++;queryData();});
 
-// Populate source dropdown on load
-(function loadSources() {
-  var dbTable = document.getElementById('q-db-table').value;
-  fetch('/api/data/query?page=1&page_size=1&db_table=' + dbTable)
-    .then(function(r) { return r.json(); })
-    .then(function(d) {
-      var sel = document.getElementById('q-source');
-      (d.available_sources || []).forEach(function(s) {
-        var opt = document.createElement('option');
-        opt.value = s;
-        opt.textContent = s;
-        sel.appendChild(opt);
-      });
+function resetQueryFilters(){
+  document.getElementById('q-db-table').value='bars';
+  ['q-symbol','q-timeframe','q-source','q-contract','q-from','q-to'].forEach(function(id){
+    var el=document.getElementById(id);if(el) el.value='';
+  });
+  _qPage=1;
+  document.getElementById('q-tbody').innerHTML='<tr><td colspan="10"><div class="empty-msg">Use the filters above and click Search</div></td></tr>';
+  document.getElementById('q-pagination').style.display='none';
+  loadQueryMeta();
+}
+
+function queryData(){
+  var tbl=document.getElementById('q-db-table').value;
+  if(tbl==='validated_ranges'){queryValidatedRanges();return;}
+  if(tbl==='realtime_bars'){queryRealtimeBars();return;}
+  var sym=document.getElementById('q-symbol').value;
+  var tf=document.getElementById('q-timeframe').value;
+  var src=document.getElementById('q-source').value;
+  var cm=document.getElementById('q-contract').value;
+  var p=new URLSearchParams({db_table:tbl,page:_qPage,page_size:_qPS});
+  if(sym) p.set('symbol',sym);
+  if(tf)  p.set('timeframe',tf);
+  if(src) p.set('source',src);
+  if(cm)  p.set('contract_month',cm);
+  var ft=dateToTs(document.getElementById('q-from').value,false);
+  var tt=dateToTs(document.getElementById('q-to').value,true);
+  if(ft) p.set('from_ts',ft); if(tt) p.set('to_ts',tt);
+  _setQL(true);
+  fetch('/api/data/query?'+p.toString())
+    .then(function(r){return r.json();})
+    .then(function(d){
+      _setQL(false);_qData=d.bars||[];_qPage=d.page;
+      _popSel('q-symbol',d.available_symbols||[],'');
+      _popSel('q-timeframe',d.available_timeframes||[],'');
+      _popSel('q-source',d.available_sources||[],'');
+      _popSel('q-contract',(d.available_contract_months||[]).map(function(m){return{val:m,lbl:m};}),'');
+      var isC=(d.db_table==='ib_fetch_cache');
+      document.getElementById('q-thead').innerHTML='<tr>'
+        +'<th data-col="time" style="width:170px">Time <span class="sort-arrow">\u21C5</span></th>'
+        +'<th data-col="symbol" style="width:80px">Symbol <span class="sort-arrow">\u21C5</span></th>'
+        +'<th data-col="contract_month" style="width:90px">Contract <span class="sort-arrow">\u21C5</span></th>'
+        +'<th data-col="timeframe" style="width:70px">TF <span class="sort-arrow">\u21C5</span></th>'
+        +'<th data-col="open"  style="width:90px">Open  <span class="sort-arrow">\u21C5</span></th>'
+        +'<th data-col="high"  style="width:90px">High  <span class="sort-arrow">\u21C5</span></th>'
+        +'<th data-col="low"   style="width:90px">Low   <span class="sort-arrow">\u21C5</span></th>'
+        +'<th data-col="close" style="width:90px">Close <span class="sort-arrow">\u21C5</span></th>'
+        +'<th data-col="volume" style="width:80px">Vol <span class="sort-arrow">\u21C5</span></th>'
+        +'<th data-col="source" style="width:120px">'+(isC?'Fetched At':'Source')+' <span class="sort-arrow">\u21C5</span></th>'
+        +'</tr>';
+      _sI['q-table']=false;
+      _renderQT(_qData); _updQPg(d.total,d.total_pages);
+      initTableSort('q-table',_qData,_renderQT,'time','asc');
     })
-    .catch(function() {});
-})();
-
-document.getElementById('q-page-size').addEventListener('change', function() {
-  _qPageSize = parseInt(this.value);
-  _qPage = 1;
-  queryData();
-});
-document.getElementById('q-prev').addEventListener('click', function() {
-  if (_qPage > 1) { _qPage--; queryData(); }
-});
-document.getElementById('q-next').addEventListener('click', function() {
-  _qPage++;
-  queryData();
-});
-
-// Reset source dropdown and refetch when database table changes
-document.getElementById('q-db-table').addEventListener('change', function() {
-  var sel = document.getElementById('q-source');
-  sel.innerHTML = '<option value="">All</option>';
-  _qPage = 1;
-  // Show/hide source filter (ib_fetch_cache has no source column)
-  var srcLabel = sel.closest('label');
-  if (srcLabel) srcLabel.style.display = this.value === 'ib_fetch_cache' ? 'none' : '';
-  // Reload source options
-  fetch('/api/data/query?page=1&page_size=1&db_table=' + this.value)
-    .then(function(r) { return r.json(); })
-    .then(function(d) {
-      (d.available_sources || []).forEach(function(s) {
-        var opt = document.createElement('option');
-        opt.value = s; opt.textContent = s;
-        sel.appendChild(opt);
-      });
-    }).catch(function() {});
-});
-
-function resetQueryFilters() {
-  document.getElementById('q-db-table').value = 'bars';
-  document.getElementById('q-symbol').value = '';
-  document.getElementById('q-timeframe').value = '';
-  document.getElementById('q-source').value = '';
-  // Show source label again
-  var srcLabel = document.getElementById('q-source').closest('label');
-  if (srcLabel) srcLabel.style.display = '';
-  document.getElementById('q-from').value = '';
-  document.getElementById('q-to').value = '';
-  _qPage = 1;
-  document.getElementById('q-tbody').innerHTML =
-    '<tr><td colspan="10"><div class="empty-msg">Use the filters above and click Search</div></td></tr>';
-  document.getElementById('q-pagination').style.display = 'none';
+    .catch(function(e){_setQL(false);showToast('Query failed: '+e.message,'error');});
 }
 
-function queryData() {
-  var dbTable = document.getElementById('q-db-table').value;
-  var symbol = document.getElementById('q-symbol').value;
-  var timeframe = document.getElementById('q-timeframe').value;
-  var source = document.getElementById('q-source').value;
-  var fromDate = document.getElementById('q-from').value;
-  var toDate = document.getElementById('q-to').value;
-  var isCache = dbTable === 'ib_fetch_cache';
+function _setQL(on){document.getElementById('q-loading').style.display=on?'':'none';}
 
-  var params = new URLSearchParams();
-  params.set('db_table', dbTable);
-  if (symbol) params.set('symbol', symbol);
-  if (timeframe) params.set('timeframe', timeframe);
-  if (!isCache && source) params.set('source', source);
-  var fromTs = dateToTs(fromDate, false);
-  var toTs = dateToTs(toDate, true);
-  if (fromTs) params.set('from_ts', fromTs);
-  if (toTs) params.set('to_ts', toTs);
-  params.set('page', _qPage);
-  params.set('page_size', _qPageSize);
-
-  var tbody = document.getElementById('q-tbody');
-  tbody.innerHTML = '<tr><td colspan="10"><div class="empty-msg">Loading…</div></td></tr>';
-
-  fetch('/api/data/query?' + params.toString())
-    .then(function(r) { return r.json(); })
-    .then(function(data) {
-      _qData = data.bars || [];
-      _qPage = data.page;
-      var total = data.total;
-      var totalPages = data.total_pages;
-
-      // Populate dynamic source options
-      var srcSel = document.getElementById('q-source');
-      var curVal = srcSel.value;
-      var existing = new Set();
-      srcSel.querySelectorAll('option').forEach(function(o) { existing.add(o.value); });
-      (data.available_sources || []).forEach(function(s) {
-        if (!existing.has(s)) {
-          var opt = document.createElement('option');
-          opt.value = s; opt.textContent = s;
-          srcSel.appendChild(opt);
-        }
-      });
-      srcSel.value = curVal;
-
-      renderQueryTable(_qData);
-
-      // Pagination
-      var pgBar = document.getElementById('q-pagination');
-      pgBar.style.display = 'flex';
-      var start = ((_qPage - 1) * _qPageSize) + 1;
-      var end = Math.min(_qPage * _qPageSize, total);
-      document.getElementById('q-pg-info').textContent =
-        'Showing ' + (total > 0 ? start : 0) + '-' + end + ' of ' + total;
-      document.getElementById('q-pg-num').textContent =
-        'Page ' + _qPage + ' / ' + totalPages;
-      document.getElementById('q-prev').disabled = (_qPage <= 1);
-      document.getElementById('q-next').disabled = (_qPage >= totalPages);
-
-      // Update table header dynamically based on db_table
-      var qIsCache = (data.db_table === 'ib_fetch_cache');
-      var thead = document.getElementById('q-thead');
-      thead.innerHTML = '<tr>'
-        + '<th data-col="time" style="width:170px">Time <span class="sort-arrow">⇅</span></th>'
-        + '<th data-col="symbol" style="width:80px">Symbol <span class="sort-arrow">⇅</span></th>'
-        + '<th data-col="contract" style="width:90px">Contract <span class="sort-arrow">⇅</span></th>'
-        + '<th data-col="timeframe" style="width:80px">Timeframe <span class="sort-arrow">⇅</span></th>'
-        + '<th data-col="open" style="width:90px">Open <span class="sort-arrow">⇅</span></th>'
-        + '<th data-col="high" style="width:90px">High <span class="sort-arrow">⇅</span></th>'
-        + '<th data-col="low" style="width:90px">Low <span class="sort-arrow">⇅</span></th>'
-        + '<th data-col="close" style="width:90px">Close <span class="sort-arrow">⇅</span></th>'
-        + '<th data-col="volume" style="width:80px">Volume <span class="sort-arrow">⇅</span></th>'
-        + '<th data-col="source" style="width:110px">' + (qIsCache ? 'Fetched At' : 'Source') + ' <span class="sort-arrow">⇅</span></th>'
-        + '</tr>';
-      // Re-init sort handlers for updated header
-      _sortInitialized['q-table'] = false;
-
-      initTableSort('q-table', _qData, renderQueryTable, 'time', 'asc');
-    })
-    .catch(function(e) {
-      showToast('Query failed: ' + e.message, 'error');
-      tbody.innerHTML = '<tr><td colspan="10"><div class="empty-msg">Error loading data</div></td></tr>';
-    });
-}
-
-function renderQueryTable(bars) {
-  var qIsCache = document.getElementById('q-db-table').value === 'ib_fetch_cache';
-  var tbody = document.getElementById('q-tbody');
-  if (!bars || bars.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="10"><div class="empty-msg">No data found</div></td></tr>';
-    return;
-  }
-  tbody.innerHTML = bars.map(function(b) {
-    var srcCol = qIsCache
-      ? (b.fetched_at ? tsToLocal(b.fetched_at) : '\u2014')
-      : (b.source || '');
+function _renderQT(bars){
+  var isC=document.getElementById('q-db-table').value==='ib_fetch_cache';
+  var tb=document.getElementById('q-tbody');
+  if(!bars||!bars.length){tb.innerHTML='<tr><td colspan="10"><div class="empty-msg">No data found</div></td></tr>';return;}
+  tb.innerHTML=bars.map(function(b){
+    var sc=isC?(b.fetched_at?tsToLocal(b.fetched_at):'\u2014'):(b.source||'');
     return '<tr>'
-      + '<td>' + tsToLocal(b.time) + '</td>'
-      + '<td>' + (b.symbol || '') + '</td>'
-      + '<td>' + fmtContract(b.symbol, b.contract_month) + '</td>'
-      + '<td>' + (b.timeframe || '') + '</td>'
-      + '<td class="num">' + fmtNum(b.open) + '</td>'
-      + '<td class="num">' + fmtNum(b.high) + '</td>'
-      + '<td class="num">' + fmtNum(b.low) + '</td>'
-      + '<td class="num">' + fmtNum(b.close) + '</td>'
-      + '<td class="num">' + fmtVol(b.volume) + '</td>'
-      + '<td class="dim">' + srcCol + '</td>'
-      + '</tr>';
+      +'<td>'+tsToLocal(b.time)+'</td>'
+      +'<td>'+(b.symbol||'')+'</td>'
+      +'<td class="dim">'+fmtContract(b.symbol,b.contract_month)+'</td>'
+      +'<td>'+(b.timeframe||'')+'</td>'
+      +'<td class="num">'+fmtNum(b.open)+'</td>'
+      +'<td class="num">'+fmtNum(b.high)+'</td>'
+      +'<td class="num">'+fmtNum(b.low)+'</td>'
+      +'<td class="num">'+fmtNum(b.close)+'</td>'
+      +'<td class="num">'+fmtVol(b.volume)+'</td>'
+      +'<td class="dim">'+sc+'</td>'
+      +'</tr>';
   }).join('');
 }
 
-
-/* ═══════════════════════════════════════════════════════════════════════════
-   DATA VALIDATE TAB
-   ═══════════════════════════════════════════════════════════════════════════ */
-
-// State preserved across validate → fix workflow
-var _vLastResult = null;   // last validate_bars response
-var _vFixedTs = new Set(); // timestamps already fixed in this session
-
-function _vParams() {
-  var symbol = document.getElementById('v-symbol').value;
-  var timeframe = document.getElementById('v-timeframe').value;
-  var p = new URLSearchParams({ symbol: symbol, timeframe: timeframe });
-  var from = document.getElementById('v-from').value;
-  var to = document.getElementById('v-to').value;
-  if (from) p.set('from_dt', from);
-  if (to) p.set('to_dt', to);
-  return { symbol: symbol, timeframe: timeframe, params: p };
+function _updQPg(total,tp){
+  var pg=document.getElementById('q-pagination');
+  pg.style.display='flex';
+  var s=((_qPage-1)*_qPS)+1,e=Math.min(_qPage*_qPS,total);
+  document.getElementById('q-pg-info').textContent='Showing '+(total>0?s:0)+'-'+e+' of '+total;
+  document.getElementById('q-pg-num').textContent='Page '+_qPage+' / '+tp;
+  document.getElementById('q-prev').disabled=(_qPage<=1);
+  document.getElementById('q-next').disabled=(_qPage>=tp);
 }
 
-// ── Check Gaps ─────────────────────────────────────────────────────────────
-function runGaps() {
-  var _ref = _vParams();
-  var symbol = _ref.symbol;
-  var timeframe = _ref.timeframe;
-  var fromDate = document.getElementById('v-from').value;
-  var toDate = document.getElementById('v-to').value;
-
-  var url = '/api/data/gaps?symbol=' + symbol + '&timeframe=' + timeframe;
-  var fromTs = dateToTs(fromDate, false);
-  var toTs = dateToTs(toDate, true);
-  if (fromTs) url += '&from_ts=' + fromTs;
-  if (toTs) url += '&to_ts=' + toTs;
-
-  var summary = document.getElementById('v-summary');
-  summary.style.display = '';
-  summary.innerHTML = '⏳ Checking gaps…';
-  document.getElementById('v-fix-btn').style.display = 'none';
-  _vLastResult = null;
-
-  fetch(url)
-    .then(function(r) { return r.json(); })
-    .then(function(data) {
-      // Summary
-      summary.innerHTML =
-        '<span>' + data.symbol + '/' + data.timeframe + '</span>'
-        + ' — <span style="color:var(--text)">' + data.total_gaps + ' gaps total</span>'
-        + ' | <span style="color:var(--orange)">' + data.weekday_gaps + ' weekday</span>'
-        + ' | <span style="color:var(--text-dim)">' + data.weekend_gaps + ' weekend</span>'
-        + ' | <span style="color:var(--text-dim)">' + data.holiday_gaps + ' holiday</span>';
-
-      // Table
-      document.getElementById('v-thead').innerHTML =
-        '<tr>'
-        + '<th data-col="gap_start" style="width:200px">Gap Start <span class="sort-arrow">⇅</span></th>'
-        + '<th data-col="gap_end" style="width:200px">Gap End <span class="sort-arrow">⇅</span></th>'
-        + '<th data-col="gap_seconds" style="width:120px">Duration <span class="sort-arrow">⇅</span></th>'
-        + '<th data-col="type" style="width:120px">Type <span class="sort-arrow">⇅</span></th>'
-        + '</tr>';
-
-      var gaps = (data.gaps || []).map(function(g) {
-        g.type = g.spans_weekend ? 'Weekend' : g.spans_holiday ? 'Holiday' : 'Weekday';
-        return g;
-      });
-      renderGapsTable(gaps);
-      initTableSort('v-table', gaps, renderGapsTable);
-
-      showToast(data.total_gaps + ' gaps found', data.total_gaps > 0 ? 'warn' : 'success');
+function queryValidatedRanges(){
+  _setQL(true);
+  fetch('/api/data/validated_ranges')
+    .then(function(r){return r.json();})
+    .then(function(d){
+      _setQL(false);
+      document.getElementById('q-pagination').style.display='none';
+      document.getElementById('q-thead').innerHTML='<tr>'
+        +'<th style="width:90px">Symbol</th><th style="width:70px">TF</th>'
+        +'<th style="width:190px">From</th><th style="width:190px">To</th>'
+        +'<th style="width:100px">Duration</th>'
+        +'<th style="width:100px">Mismatches</th><th style="width:80px">Fixed</th>'
+        +'</tr>';
+      var ranges=d.ranges||[];
+      if(!ranges.length){document.getElementById('q-tbody').innerHTML='<tr><td colspan="7"><div class="empty-msg">No validated ranges</div></td></tr>';return;}
+      document.getElementById('q-tbody').innerHTML=ranges.map(function(r){
+        var dur=((r.to_ts-r.from_ts)/86400).toFixed(1);
+        return '<tr>'
+          +'<td>'+(r.symbol||'')+'</td><td>'+(r.timeframe||'')+'</td>'
+          +'<td>'+tsToLocal(r.from_ts)+'</td><td>'+tsToLocal(r.to_ts)+'</td>'
+          +'<td class="num">'+dur+'d</td>'
+          +'<td class="num '+(r.mismatches>0?'warn':'up')+'">'+(r.mismatches||0)+'</td>'
+          +'<td class="num">'+(r.fixed||0)+'</td>'
+          +'</tr>';
+      }).join('');
     })
-    .catch(function(e) {
-      summary.innerHTML = '❌ ' + e.message;
-      showToast('Gap check failed: ' + e.message, 'error');
-    });
+    .catch(function(e){_setQL(false);showToast('Failed: '+e.message,'error');});
 }
 
-function renderGapsTable(gaps) {
-  var tbody = document.getElementById('v-tbody');
-  if (!gaps || gaps.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="4"><div class="empty-msg">No gaps found ✅</div></td></tr>';
-    return;
-  }
-  tbody.innerHTML = gaps.map(function(g) {
-    var cls = g.type === 'Weekday' ? 'warn' : 'dim';
-    return '<tr>'
-      + '<td>' + tsToLocal(g.gap_start) + '</td>'
-      + '<td>' + tsToLocal(g.gap_end) + '</td>'
-      + '<td class="num">' + (g.gap_seconds / 3600).toFixed(1) + 'h</td>'
-      + '<td class="' + cls + '">' + g.type + '</td>'
-      + '</tr>';
-  }).join('');
-}
-
-// ── Validate vs IB ─────────────────────────────────────────────────────────
-function runValidate() {
-  var _ref = _vParams();
-  var summary = document.getElementById('v-summary');
-  summary.style.display = '';
-  summary.innerHTML = '⏳ Validating against IB…';
-  document.getElementById('v-fix-btn').style.display = 'none';
-  _vLastResult = null;
-  _vFixedTs = new Set();
-
-  fetch('/api/data/validate?' + _ref.params.toString())
-    .then(function(r) { return r.json(); })
-    .then(function(data) {
-      _vLastResult = data;
-      _renderValidation(data);
-      var total = (data.mismatch_count || 0) + (data.ib_only_count || 0);
-      showToast('Mismatches: ' + (data.mismatch_count || 0) + '  Missing: ' + (data.ib_only_count || 0),
-                total ? 'warn' : 'success');
+function queryRealtimeBars(){
+  _setQL(true);
+  fetch('/api/data/query?db_table=bars&source=realtime_completed&page='+_qPage+'&page_size='+_qPS)
+    .then(function(r){return r.json();})
+    .then(function(d){
+      _setQL(false);_qData=d.bars||[];
+      document.getElementById('q-thead').innerHTML='<tr>'
+        +'<th data-col="time" style="width:170px">Time <span class="sort-arrow">\u21C5</span></th>'
+        +'<th data-col="symbol" style="width:80px">Symbol <span class="sort-arrow">\u21C5</span></th>'
+        +'<th data-col="timeframe" style="width:70px">TF <span class="sort-arrow">\u21C5</span></th>'
+        +'<th data-col="open"  style="width:90px">Open  <span class="sort-arrow">\u21C5</span></th>'
+        +'<th data-col="high"  style="width:90px">High  <span class="sort-arrow">\u21C5</span></th>'
+        +'<th data-col="low"   style="width:90px">Low   <span class="sort-arrow">\u21C5</span></th>'
+        +'<th data-col="close" style="width:90px">Close <span class="sort-arrow">\u21C5</span></th>'
+        +'<th data-col="volume" style="width:80px">Vol <span class="sort-arrow">\u21C5</span></th>'
+        +'<th data-col="source" style="width:160px">Source <span class="sort-arrow">\u21C5</span></th>'
+        +'</tr>';
+      _sI['q-table']=false;
+      _renderQT(_qData); _updQPg(d.total,d.total_pages);
+      initTableSort('q-table',_qData,_renderQT,'time','desc');
     })
-    .catch(function(e) {
-      summary.innerHTML = '❌ ' + e.message;
-      showToast('Validate failed: ' + e.message, 'error');
+    .catch(function(e){_setQL(false);showToast('Failed: '+e.message,'error');});
+}
+
+/* ============================================================================
+   TAB 2 — DataStatus
+   ============================================================================ */
+var MONTHS=['January','February','March','April','May','June','July','August','September','October','November','December'];
+var DOWS=['Su','Mo','Tu','We','Th','Fr','Sa'];
+
+function loadStatusCalendar(){
+  var sym=document.getElementById('s-symbol').value;
+  var tf=document.getElementById('s-timeframe').value;
+  var yr=parseInt(document.getElementById('s-year').value);
+  document.getElementById('s-loading').style.display='';
+  document.getElementById('s-content').innerHTML='<div class="empty-msg">Loading calendar\u2026</div>';
+  document.getElementById('s-stats').style.display='none';
+  fetch('/api/data/coverage_calendar?symbol='+sym+'&timeframe='+tf+'&year='+yr)
+    .then(function(r){return r.json();})
+    .then(function(d){document.getElementById('s-loading').style.display='';_renderCal(d);})
+    .catch(function(e){
+      document.getElementById('s-loading').style.display='none';
+      document.getElementById('s-content').innerHTML='<div class="empty-msg">Error: '+e.message+'</div>';
+      showToast('Calendar load failed','error');
     });
 }
 
-// ── Render validation results with checkboxes ─────────────────────────────
-function _renderValidation(data) {
-  var summary = document.getElementById('v-summary');
-  summary.style.display = '';
-  summary.innerHTML =
-    '<span>' + (data.symbol || '') + '/' + (data.timeframe || '') + '</span>'
-    + ' — DB: <span style="color:var(--text)">' + (data.db_count || 0) + '</span>'
-    + ' | IB: <span style="color:var(--text)">' + (data.ib_count || 0) + '</span>'
-    + ' | <span style="color:var(--orange)">Mismatches: ' + (data.mismatch_count || 0) + '</span>'
-    + ' | <span style="color:var(--red)">Missing in DB: ' + (data.ib_only_count || 0) + '</span>';
-
-  var rows = [];
-  var mismatches = data.mismatches || [];
-  var ibOnly = data.ib_only || [];
-  var hasIssues = mismatches.length > 0 || ibOnly.length > 0;
-
-  if (hasIssues) {
-    // Header with select-all checkbox
-    document.getElementById('v-thead').innerHTML =
-      '<tr>'
-      + '<th style="width:32px"><input type="checkbox" id="v-chk-all" title="Select / deselect all" aria-label="Select or deselect all rows" checked/></th>'
-      + '<th style="width:160px">Time</th>'
-      + '<th style="width:90px">Contract</th>'
-      + '<th style="width:90px">Status</th>'
-      + '<th style="width:200px">DB OHLCV</th>'
-      + '<th style="width:200px">IB OHLCV</th>'
-      + '<th style="width:160px">Diffs</th>'
-      + '</tr>';
-
-    // Mismatch rows
-    mismatches.forEach(function(m) {
-      var alreadyFixed = _vFixedTs.has(m.time);
-      var diffKeys = Object.keys(m.diffs || {});
-      var dbVol = m.db ? fmtVol(m.db.volume) : '—';
-      var ibVol = m.ib ? fmtVol(m.ib.volume) : '—';
-      rows.push('<tr data-ts="' + m.time + '">'
-        + '<td><input type="checkbox" class="v-row-chk" data-ts="' + m.time + '"'
-        + (alreadyFixed ? '' : ' checked') + (alreadyFixed ? ' disabled' : '') + '/></td>'
-        + '<td>' + tsToLocal(m.time) + (alreadyFixed ? ' <span style="color:var(--green)">✅</span>' : '') + '</td>'
-        + '<td>' + fmtContract(data.symbol, m.db ? m.db.contract_month : (m.ib ? m.ib.contract_month : '')) + '</td>'
-        + '<td class="down">⚠ Mismatch</td>'
-        + '<td class="num" style="font-size:11px">'
-        + 'O:' + fmtNum(m.db.open) + ' H:' + fmtNum(m.db.high)
-        + ' L:' + fmtNum(m.db.low) + ' C:' + fmtNum(m.db.close)
-        + ' V:' + dbVol + '</td>'
-        + '<td class="num" style="font-size:11px">'
-        + 'O:' + fmtNum(m.ib.open) + ' H:' + fmtNum(m.ib.high)
-        + ' L:' + fmtNum(m.ib.low) + ' C:' + fmtNum(m.ib.close)
-        + ' V:' + ibVol + '</td>'
-        + '<td class="warn">' + diffKeys.join(', ') + '</td>'
-        + '</tr>');
-    });
-
-    // IB-only (missing) rows
-    ibOnly.forEach(function(b) {
-      var alreadyFixed = _vFixedTs.has(b.time);
-      rows.push('<tr data-ts="' + b.time + '">'
-        + '<td><input type="checkbox" class="v-row-chk" data-ts="' + b.time + '"'
-        + (alreadyFixed ? '' : ' checked') + (alreadyFixed ? ' disabled' : '') + '/></td>'
-        + '<td>' + tsToLocal(b.time) + (alreadyFixed ? ' <span style="color:var(--green)">✅</span>' : '') + '</td>'
-        + '<td>' + fmtContract(data.symbol, b.contract_month || '') + '</td>'
-        + '<td class="down">❌ Missing</td>'
-        + '<td>—</td>'
-        + '<td class="num" style="font-size:11px">'
-        + 'O:' + fmtNum(b.open) + ' H:' + fmtNum(b.high)
-        + ' L:' + fmtNum(b.low) + ' C:' + fmtNum(b.close)
-        + ' V:' + fmtVol(b.volume) + '</td>'
-        + '<td class="dim">Need fix</td>'
-        + '</tr>');
-    });
-
-    document.getElementById('v-tbody').innerHTML = rows.join('');
-
-    // Wire up select-all checkbox
-    document.getElementById('v-chk-all').addEventListener('change', function() {
-      var checked = this.checked;
-      document.querySelectorAll('.v-row-chk:not([disabled])').forEach(function(c) {
-        c.checked = checked;
-      });
-    });
-
-    // Show Data Fix button
-    document.getElementById('v-fix-btn').style.display = '';
-
-  } else {
-    // No issues
-    document.getElementById('v-thead').innerHTML =
-      '<tr>'
-      + '<th style="width:160px">Time</th>'
-      + '<th style="width:90px">Contract</th>'
-      + '<th style="width:90px">Status</th>'
-      + '<th style="width:200px">DB OHLCV</th>'
-      + '<th style="width:200px">IB OHLCV</th>'
-      + '<th style="width:160px">Diffs</th>'
-      + '</tr>';
-    document.getElementById('v-tbody').innerHTML =
-      '<tr><td colspan="6"><div class="empty-msg">No mismatches — data is clean ✅</div></td></tr>';
-    document.getElementById('v-fix-btn').style.display = 'none';
-  }
-}
-
-// ── Data Fix (selective — only checked rows) ───────────────────────────────
-function runFix() {
-  if (!_vLastResult) {
-    showToast('Run Validate first', 'warn');
-    return;
-  }
-
-  // Collect selected timestamps
-  var selectedTs = [];
-  document.querySelectorAll('.v-row-chk:checked').forEach(function(c) {
-    selectedTs.push(parseInt(c.dataset.ts));
+function _renderCal(data){
+  document.getElementById('s-loading').style.display='none';
+  var days=data.days||{},yr=data.year,sym=data.symbol,tf=data.timeframe;
+  var totalDays=0,totalBars=0,valDays=0,gapDays=0;
+  Object.keys(days).forEach(function(k){
+    totalDays++;totalBars+=days[k].count;
+    if(days[k].validated) valDays++;
+    if(days[k].has_data_gap) gapDays++;
   });
+  document.getElementById('s-stat-days').textContent=totalDays;
+  document.getElementById('s-stat-bars').textContent=totalBars.toLocaleString();
+  document.getElementById('s-stat-validated').textContent=valDays;
+  document.getElementById('s-stat-gaps').textContent=gapDays;
+  document.getElementById('s-stats').style.display='flex';
 
-  if (selectedTs.length === 0) {
-    showToast('No rows selected', 'warn');
-    return;
+  var html='<div class="year-grid">';
+  for(var m=1;m<=12;m++) html+=_buildMonth(yr,m,days);
+  html+='</div>';
+
+  // Monthly summary table
+  html+='<div style="margin-top:20px"><div class="section-title">Monthly Summary \u2014 '+sym+' / '+tf+' / '+yr+'</div>';
+  html+='<table class="dv-data-table" style="width:auto"><thead><tr>'
+    +'<th style="width:90px">Month</th><th style="width:80px">Data Days</th>'
+    +'<th style="width:80px">Total Bars</th><th style="width:100px">Validated</th>'
+    +'<th style="width:80px">Gap Days</th></tr></thead><tbody>';
+  for(var m2=1;m2<=12;m2++){
+    var pfx=yr+'-'+String(m2).padStart(2,'0')+'-';
+    var md=0,mb=0,mv=0,mg=0;
+    Object.keys(days).forEach(function(k){
+      if(k.startsWith(pfx)){md++;mb+=days[k].count;if(days[k].validated)mv++;if(days[k].has_data_gap)mg++;}
+    });
+    var vc=mv===md&&md>0?'up':(mv>0?'':'dim');
+    html+='<tr><td>'+MONTHS[m2-1]+'</td>'
+      +'<td class="num">'+md+'</td><td class="num">'+mb.toLocaleString()+'</td>'
+      +'<td class="num '+vc+'">'+mv+' / '+md+'</td>'
+      +'<td class="num '+(mg>0?'warn':'')+'">'+mg+'</td></tr>';
   }
-
-  var symbol = document.getElementById('v-symbol').value;
-  var timeframe = document.getElementById('v-timeframe').value;
-  var fromDate = document.getElementById('v-from').value;
-  var toDate = document.getElementById('v-to').value;
-
-  var summary = document.getElementById('v-summary');
-  summary.style.display = '';
-  summary.innerHTML = '⏳ Fixing ' + selectedTs.length + ' bar(s) from IB cache…';
-
-  var body = {
-    symbol: symbol,
-    timeframe: timeframe,
-    timestamps: selectedTs,
-  };
-  if (fromDate) body.from_dt = fromDate;
-  if (toDate)   body.to_dt   = toDate;
-
-  fetch('/api/data/fix', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  })
-    .then(function(r) { return r.json(); })
-    .then(function(data) {
-      // Mark fixed timestamps so they show the green tick on re-render
-      selectedTs.forEach(function(ts) { _vFixedTs.add(ts); });
-
-      // Update the last result so re-render reflects which are fixed
-      _renderValidation(_vLastResult);
-
-      summary.style.display = '';
-      summary.innerHTML =
-        '<span style="color:var(--green)">✅ Fixed ' + (data.fixed_count || 0) + ' bar(s)</span>'
-        + ' — DB: ' + (data.db_count || 0)
-        + ' | IB: ' + (data.ib_count || 0)
-        + ' | Remaining mismatches: ' + ((data.mismatch_count || 0) - ((data.fixed_count || 0) > 0 ? selectedTs.length : 0));
-
-      showToast('Fixed ' + (data.fixed_count || 0) + ' bars', 'success');
-
-      // Hide fix button if nothing left to fix
-      var remaining = document.querySelectorAll('.v-row-chk:not([disabled])').length;
-      if (remaining === 0) {
-        document.getElementById('v-fix-btn').style.display = 'none';
-      }
-    })
-    .catch(function(e) {
-      summary.innerHTML = '❌ ' + e.message;
-      showToast('Fix failed: ' + e.message, 'error');
-    });
+  html+='</tbody></table></div>';
+  document.getElementById('s-content').innerHTML=html;
 }
 
-// ── Delete Realtime Bars ───────────────────────────────────────────────────
-function runDeleteRealtime() {
-  if (!confirm('Delete ALL realtime bars from the database? This cannot be undone.')) return;
-
-  var summary = document.getElementById('v-summary');
-  summary.style.display = '';
-  summary.innerHTML = '⏳ Deleting realtime bars…';
-
-  fetch('/api/data/delete_by_source?source=realtime', { method: 'POST' })
-    .then(function(r) { return r.json(); })
-    .then(function(data) {
-      summary.innerHTML = '🗑 Deleted <span style="color:var(--red)">' + data.deleted + '</span> realtime bars';
-      showToast('Deleted ' + data.deleted + ' realtime bars', 'success');
-    })
-    .catch(function(e) {
-      summary.innerHTML = '❌ ' + e.message;
-      showToast('Delete failed: ' + e.message, 'error');
-    });
+function _buildMonth(yr,m,days){
+  var dim=new Date(yr,m,0).getDate();
+  var fdow=new Date(yr,m-1,1).getDay();
+  var h='<div class="month-block"><div class="month-name">'+MONTHS[m-1]+'</div>';
+  h+='<div class="month-dow-row">'+DOWS.map(function(d){return '<div class="month-dow">'+d+'</div>';}).join('')+'</div>';
+  h+='<div class="month-days-grid">';
+  for(var e=0;e<fdow;e++) h+='<div class="day-cell empty"></div>';
+  for(var d=1;d<=dim;d++){
+    var ds=yr+'-'+String(m).padStart(2,'0')+'-'+String(d).padStart(2,'0');
+    var dow=new Date(yr,m-1,d).getDay();
+    var wknd=(dow===0||dow===6);
+    var info=days[ds];
+    var cls='day-cell',tt=ds;
+    if(wknd&&!info){cls+=' weekend';}
+    else if(!info){cls+=' no-data';tt+='\u00a0\u2014 no data';}
+    else{
+      cls+=' has-data';tt+='\u00a0\u2014 '+info.count+' bars';
+      if(info.validated){cls+=' validated';tt+=', validated \u2713';}
+      if(info.has_data_gap){cls+=' has-gap';tt+=', data gap \u26A0';}
+    }
+    h+='<div class="'+cls+'" title="'+tt+'">'+d+'</div>';
+  }
+  h+='</div></div>';
+  return h;
 }
 
-// ── Validate All ───────────────────────────────────────────────────────────
-function runValidateAll() {
-  if (!confirm('Validate ALL symbol/timeframe pairs against IB? This may take a while.')) return;
-
-  var summary = document.getElementById('v-summary');
-  summary.style.display = '';
-  summary.innerHTML = '⏳ Validating all pairs… this may take a while';
-
-  fetch('/api/data/validate_all', { method: 'POST' })
-    .then(function(r) { return r.json(); })
-    .then(function(data) {
-      summary.innerHTML =
-        'Pairs checked: <span style="color:var(--text)">' + data.pairs_checked + '</span>'
-        + ' | Total mismatches: <span style="color:var(--orange)">' + data.total_mismatches + '</span>'
-        + ' | Fixed: <span style="color:var(--green)">' + data.total_fixed + '</span>';
-
-      document.getElementById('v-thead').innerHTML =
-        '<tr>'
-        + '<th style="width:100px">Symbol</th>'
-        + '<th style="width:120px">Contracts</th>'
-        + '<th style="width:100px">Timeframe</th>'
-        + '<th style="width:120px">Mismatches</th>'
-        + '</tr>';
-
-      var details = data.details || [];
-      var tbody = document.getElementById('v-tbody');
-      if (details.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="4"><div class="empty-msg">No pairs found in database</div></td></tr>';
-        return;
-      }
-      tbody.innerHTML = details.map(function(d) {
-        var mcls = d.total_mismatches > 0 ? 'warn' : 'up';
-        var contracts = (d.contracts || []).map(function(cm) {
-          return fmtContract(d.symbol, cm);
-        }).join(', ');
-        return '<tr>'
-          + '<td>' + (d.symbol || '') + '</td>'
-          + '<td class="dim" style="font-size:11px">' + (contracts || '—') + '</td>'
-          + '<td>' + (d.timeframe || '') + '</td>'
-          + '<td class="num ' + mcls + '">' + (d.total_mismatches || 0) + '</td>'
-          + '</tr>';
-      }).join('');
-
-      showToast('Validated ' + data.pairs_checked + ' pairs', data.total_mismatches ? 'warn' : 'success');
-    })
-    .catch(function(e) {
-      summary.innerHTML = '❌ ' + e.message;
-      showToast('Validate all failed: ' + e.message, 'error');
-    });
-}
-
-// ── View Validated Ranges ──────────────────────────────────────────────────
-function runViewValidatedRanges() {
-  var symbol = document.getElementById('v-symbol').value;
-  var timeframe = document.getElementById('v-timeframe').value;
-  var summary = document.getElementById('v-summary');
-  summary.style.display = '';
-  summary.innerHTML = '⏳ Loading validated ranges…';
-  document.getElementById('v-fix-btn').style.display = 'none';
-
-  fetch('/api/data/validated_ranges?symbol=' + symbol + '&timeframe=' + timeframe)
-    .then(function(r) { return r.json(); })
-    .then(function(data) {
-      var merged = data.merged || [];
-      var ranges = data.ranges || [];
-
-      // Summary: show merged continuous ranges
-      if (merged.length === 0) {
-        summary.innerHTML = symbol + '/' + timeframe + ' — <span style="color:var(--text-dim)">No validated ranges yet</span>';
-      } else {
-        var totalSpan = merged.reduce(function(acc, r) { return acc + (r.to_ts - r.from_ts); }, 0);
-        var days = (totalSpan / 86400).toFixed(1);
-        summary.innerHTML = symbol + '/' + timeframe
-          + ' — <span style="color:var(--green)">' + merged.length + ' continuous range(s)</span>'
-          + ' | Total validated: <span style="color:var(--text)">' + days + ' days</span>';
-      }
-
-      // Table: show merged ranges
-      document.getElementById('v-thead').innerHTML =
-        '<tr>'
-        + '<th style="width:200px">From</th>'
-        + '<th style="width:200px">To</th>'
-        + '<th style="width:120px">Duration</th>'
-        + '</tr>';
-
-      var tbody = document.getElementById('v-tbody');
-      if (merged.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="3"><div class="empty-msg">No validated ranges. Run background validation to build up checked ranges.</div></td></tr>';
-        return;
-      }
-      tbody.innerHTML = merged.map(function(r) {
-        var dur = ((r.to_ts - r.from_ts) / 86400).toFixed(1);
-        return '<tr>'
-          + '<td>' + tsToLocal(r.from_ts) + '</td>'
-          + '<td>' + tsToLocal(r.to_ts) + '</td>'
-          + '<td class="num">' + dur + ' days</td>'
-          + '</tr>';
-      }).join('');
-
-      showToast(merged.length + ' validated range(s) found', merged.length > 0 ? 'success' : 'info');
-    })
-    .catch(function(e) {
-      summary.innerHTML = '❌ ' + e.message;
-      showToast('Failed to load validated ranges: ' + e.message, 'error');
-    });
-}
-
-// ── Trigger Background Validation ──────────────────────────────────────────
-function runBgValidate() {
-  if (!confirm('Start background data validation? This runs silently and validates all symbol/timeframe pairs.')) return;
-
-  var summary = document.getElementById('v-summary');
-  summary.style.display = '';
-  summary.innerHTML = '⏳ Starting background validation…';
-
-  fetch('/api/data/bg_validate', { method: 'POST' })
-    .then(function(r) { return r.json(); })
-    .then(function(data) {
-      summary.innerHTML = '<span style="color:var(--green)">✅ ' + data.message + '</span> — Results will be logged silently.';
-      showToast('Background validation started', 'success');
-    })
-    .catch(function(e) {
-      summary.innerHTML = '❌ ' + e.message;
-      showToast('Failed to start background validation: ' + e.message, 'error');
-    });
-}
-
-// ── Integrity tab functions ────────────────────────────────────────────────
-
-function runIntegrity() {
-  var sym  = document.getElementById('i-symbol').value;
-  var tf   = document.getElementById('i-timeframe').value;
-  var from = dateToTs(document.getElementById('i-from').value, false);
-  var to   = dateToTs(document.getElementById('i-to').value, true);
-  var summary = document.getElementById('i-summary');
-  summary.style.display = '';
-  summary.innerHTML = '⏳ Running integrity check…';
-
-  var url = '/api/data/integrity?symbol=' + sym + '&timeframe=' + tf;
-  if (from) url += '&from_ts=' + from;
-  if (to) url += '&to_ts=' + to;
-
-  fetch(url)
-    .then(function(r) { return r.json(); })
-    .then(function(data) {
-      summary.innerHTML =
-        'Total bars: <span style="color:var(--text)">' + data.total_bars + '</span>'
-        + ' | OHLCV violations: <span style="color:' + (data.ohlcv_violations > 0 ? 'var(--red)' : 'var(--green)') + '">' + data.ohlcv_violations + '</span>'
-        + ' | Duplicates: <span style="color:' + (data.duplicates > 0 ? 'var(--red)' : 'var(--green)') + '">' + data.duplicates + '</span>'
-        + ' | Earliest: <span style="color:var(--text-dim)">' + (data.earliest_ts ? tsToLocal(data.earliest_ts) : 'N/A') + '</span>'
-        + ' | Latest: <span style="color:var(--text-dim)">' + (data.latest_ts ? tsToLocal(data.latest_ts) : 'N/A') + '</span>';
-
-      // Source breakdown table
-      var sources = data.sources || {};
-      var srcKeys = Object.keys(sources);
-      document.getElementById('i-thead').innerHTML =
-        '<tr>'
-        + '<th style="width:200px">Source</th>'
-        + '<th style="width:120px">Bar Count</th>'
-        + '<th style="width:120px">Percentage</th>'
-        + '</tr>';
-      if (srcKeys.length === 0) {
-        document.getElementById('i-tbody').innerHTML =
-          '<tr><td colspan="3"><div class="empty-msg">No data found</div></td></tr>';
-        return;
-      }
-      document.getElementById('i-tbody').innerHTML = srcKeys.map(function(src) {
-        var cnt = sources[src];
-        var pct = data.total_bars > 0 ? (cnt / data.total_bars * 100).toFixed(1) : '0';
-        return '<tr>'
-          + '<td>' + src + '</td>'
-          + '<td class="num">' + cnt.toLocaleString() + '</td>'
-          + '<td class="num">' + pct + '%</td>'
-          + '</tr>';
-      }).join('');
-
-      showToast('Integrity check complete', data.ohlcv_violations > 0 ? 'warn' : 'success');
-    })
-    .catch(function(e) {
-      summary.innerHTML = '❌ ' + e.message;
-      showToast('Integrity check failed: ' + e.message, 'error');
-    });
-}
-
-function runCoverageCheck() {
-  var summary = document.getElementById('i-summary');
-  summary.style.display = '';
-  summary.innerHTML = '⏳ Checking coverage…';
-
+function loadCoverageAll(){
+  document.getElementById('s-loading').style.display='';
+  document.getElementById('s-stats').style.display='none';
+  document.getElementById('s-content').innerHTML='<div class="empty-msg">Loading\u2026</div>';
   fetch('/api/data/coverage')
-    .then(function(r) { return r.json(); })
-    .then(function(data) {
-      summary.innerHTML = 'Found <span style="color:var(--text)">' + data.length + '</span> symbol/timeframe pairs';
+    .then(function(r){return r.json();})
+    .then(function(data){
+      document.getElementById('s-loading').style.display='none';
+      var h='<div class="section-title">All Symbols Coverage</div>';
+      h+='<table class="dv-data-table" style="width:auto"><thead><tr>'
+        +'<th style="width:80px">Symbol</th><th style="width:70px">TF</th>'
+        +'<th style="width:140px">Earliest</th><th style="width:140px">Latest</th>'
+        +'<th style="width:90px">Bars</th><th style="width:150px">Contracts</th>'
+        +'</tr></thead><tbody>';
+      data.forEach(function(r){
+        var ct=(r.contracts||[]).map(function(c){return fmtContract(r.symbol,c.contract_month);}).join(', ');
+        h+='<tr><td><strong>'+r.symbol+'</strong></td><td>'+r.timeframe+'</td>'
+          +'<td>'+tsToLocal(r.min_ts)+'</td><td>'+tsToLocal(r.max_ts)+'</td>'
+          +'<td class="num">'+r.count.toLocaleString()+'</td>'
+          +'<td class="dim" style="font-size:11px">'+(ct||'\u2014')+'</td></tr>';
+      });
+      h+='</tbody></table>';
+      document.getElementById('s-content').innerHTML=h;
+      showToast(data.length+' symbol/TF pairs','success');
+    })
+    .catch(function(e){
+      document.getElementById('s-loading').style.display='none';
+      showToast('Coverage load failed','error');
+    });
+}
 
-      document.getElementById('i-thead').innerHTML =
-        '<tr>'
-        + '<th style="width:100px">Symbol</th>'
-        + '<th style="width:120px">Contracts</th>'
-        + '<th style="width:100px">Timeframe</th>'
-        + '<th style="width:140px">Earliest</th>'
-        + '<th style="width:140px">Latest</th>'
-        + '<th style="width:100px">Bar Count</th>'
-        + '</tr>';
+/* ============================================================================
+   TAB 3 — DataValidate
+   ============================================================================ */
+var _vMode='single';
+function setVMode(m){
+  _vMode=m;
+  ['single','batch','integrity'].forEach(function(k){
+    document.getElementById('vm-'+k).classList.toggle('active',k===m);
+    var tb=document.getElementById('v-toolbar-'+k);
+    if(tb) tb.style.display=(k===m)?'':'none';
+  });
+  document.getElementById('v-summary').style.display='none';
+  document.getElementById('v-fix-btn').style.display='none';
+  document.getElementById('v-batch-progress').classList.remove('visible');
+  document.getElementById('v-tbody').innerHTML='<tr><td colspan="8"><div class="empty-msg">Select parameters and run a check</div></td></tr>';
+  document.getElementById('v-thead').innerHTML='<tr><th colspan="8">Select an action above to begin</th></tr>';
+  stopBatch();
+}
 
-      if (data.length === 0) {
-        document.getElementById('i-tbody').innerHTML =
-          '<tr><td colspan="6"><div class="empty-msg">No data in database</div></td></tr>';
-        return;
+// ── Single Range ──────────────────────────────────────────────────────────────
+var _vLast=null,_vFixed=new Set();
+
+function _vP(){
+  return{sym:document.getElementById('v-symbol').value,
+         tf:document.getElementById('v-timeframe').value,
+         from:document.getElementById('v-from').value,
+         to:document.getElementById('v-to').value};
+}
+
+function runGaps(){
+  var p=_vP();
+  var url='/api/data/gaps?symbol='+p.sym+'&timeframe='+p.tf;
+  var ft=dateToTs(p.from,false),tt=dateToTs(p.to,true);
+  if(ft) url+='&from_ts='+ft; if(tt) url+='&to_ts='+tt;
+  var sum=document.getElementById('v-summary');
+  sum.style.display='';sum.innerHTML='\u23F3 Checking gaps\u2026';
+  document.getElementById('v-fix-btn').style.display='none';_vLast=null;
+  fetch(url).then(function(r){return r.json();}).then(function(d){
+    sum.innerHTML=p.sym+'/'+p.tf
+      +' \u2014 Total: <strong>'+d.total_gaps+'</strong>'
+      +' | Data: <span style="color:var(--orange)">'+(d.data_gaps||0)+'</span>'
+      +' | Weekend: <span style="color:var(--text-dim)">'+(d.weekend_gaps||0)+'</span>'
+      +' | Holiday: <span style="color:var(--text-dim)">'+(d.holiday_gaps||0)+'</span>';
+    document.getElementById('v-thead').innerHTML='<tr>'
+      +'<th data-col="gap_start" style="width:200px">Gap Start <span class="sort-arrow">\u21C5</span></th>'
+      +'<th data-col="gap_end" style="width:200px">Gap End <span class="sort-arrow">\u21C5</span></th>'
+      +'<th data-col="gap_seconds" style="width:110px">Duration <span class="sort-arrow">\u21C5</span></th>'
+      +'<th data-col="gap_type" style="width:120px">Type <span class="sort-arrow">\u21C5</span></th>'
+      +'</tr>';
+    var gaps=d.gaps||[];
+    _renderGaps(gaps);initTableSort('v-table',gaps,_renderGaps);
+    showToast(d.total_gaps+' gaps',d.data_gaps>0?'warn':'success');
+  }).catch(function(e){document.getElementById('v-summary').innerHTML='\u274C '+e.message;showToast('Gap check failed','error');});
+}
+
+function _renderGaps(gaps){
+  var tb=document.getElementById('v-tbody');
+  if(!gaps||!gaps.length){tb.innerHTML='<tr><td colspan="4"><div class="empty-msg">No gaps found \u2705</div></td></tr>';return;}
+  tb.innerHTML=gaps.map(function(g){
+    var t=g.gap_type||(g.spans_weekend?'weekend':g.spans_holiday?'holiday':'data_gap');
+    var cls=t==='data_gap'?'warn':'dim';
+    var dur=g.gap_seconds<3600?Math.round(g.gap_seconds/60)+'m':(g.gap_seconds/3600).toFixed(1)+'h';
+    return '<tr><td>'+tsToLocal(g.gap_start)+'</td><td>'+tsToLocal(g.gap_end)+'</td>'
+      +'<td class="num">'+dur+'</td><td class="'+cls+'">'+t+'</td></tr>';
+  }).join('');
+}
+
+function runValidate(){
+  var p=_vP();
+  var params=new URLSearchParams({symbol:p.sym,timeframe:p.tf});
+  if(p.from) params.set('from_dt',p.from); if(p.to) params.set('to_dt',p.to);
+  var sum=document.getElementById('v-summary');
+  sum.style.display='';sum.innerHTML='\u23F3 Validating against IB\u2026';
+  document.getElementById('v-fix-btn').style.display='none';_vLast=null;_vFixed=new Set();
+  fetch('/api/data/validate?'+params.toString())
+    .then(function(r){return r.json();})
+    .then(function(d){_vLast=d;_renderVal(d);var tot=(d.mismatch_count||0)+(d.ib_only_count||0);showToast('Mismatch:'+( d.mismatch_count||0)+' Missing:'+(d.ib_only_count||0),tot?'warn':'success');})
+    .catch(function(e){sum.innerHTML='\u274C '+e.message;showToast('Validate failed','error');});
+}
+
+function _renderVal(d){
+  var sum=document.getElementById('v-summary');
+  sum.style.display='';
+  sum.innerHTML='<span>'+(d.symbol||'')+'/'+(d.timeframe||'')+'</span>'
+    +' \u2014 DB:<span style="color:var(--text)"> '+(d.db_count||0)+'</span>'
+    +' | IB:<span style="color:var(--text)"> '+(d.ib_count||0)+'</span>'
+    +' | <span style="color:var(--orange)">Mismatch: '+(d.mismatch_count||0)+'</span>'
+    +' | <span style="color:var(--red)">Missing: '+(d.ib_only_count||0)+'</span>';
+  var mm=d.mismatches||[],io=d.ib_only||[];
+  if(mm.length||io.length){
+    document.getElementById('v-thead').innerHTML='<tr>'
+      +'<th style="width:32px"><input type="checkbox" id="v-chk-all" checked/></th>'
+      +'<th style="width:155px">Time</th><th style="width:90px">Contract</th>'
+      +'<th style="width:85px">Status</th><th style="width:190px">DB OHLCV</th>'
+      +'<th style="width:190px">IB OHLCV</th><th style="width:130px">Diffs</th>'
+      +'</tr>';
+    var rows=[];
+    mm.forEach(function(m){
+      var af=_vFixed.has(m.time);
+      var dbv=m.db?fmtVol(m.db.volume):'\u2014';var ibv=m.ib?fmtVol(m.ib.volume):'\u2014';
+      rows.push('<tr data-ts="'+m.time+'">'
+        +'<td><input type="checkbox" class="v-rc" data-ts="'+m.time+'"'+(af?'':' checked')+(af?' disabled':'')+'></td>'
+        +'<td>'+tsToLocal(m.time)+(af?' <span style="color:var(--green)">\u2705</span>':'')+'</td>'
+        +'<td>'+fmtContract(d.symbol,m.db?m.db.contract_month:(m.ib?m.ib.contract_month:''))+'</td>'
+        +'<td class="down">\u26A0 Mismatch</td>'
+        +'<td class="num" style="font-size:11px">O:'+fmtNum(m.db.open)+' H:'+fmtNum(m.db.high)+' L:'+fmtNum(m.db.low)+' C:'+fmtNum(m.db.close)+' V:'+dbv+'</td>'
+        +'<td class="num" style="font-size:11px">O:'+fmtNum(m.ib.open)+' H:'+fmtNum(m.ib.high)+' L:'+fmtNum(m.ib.low)+' C:'+fmtNum(m.ib.close)+' V:'+ibv+'</td>'
+        +'<td class="warn">'+Object.keys(m.diffs||{}).join(', ')+'</td></tr>');
+    });
+    io.forEach(function(b){
+      var af=_vFixed.has(b.time);
+      rows.push('<tr data-ts="'+b.time+'">'
+        +'<td><input type="checkbox" class="v-rc" data-ts="'+b.time+'"'+(af?'':' checked')+(af?' disabled':'')+'></td>'
+        +'<td>'+tsToLocal(b.time)+(af?' <span style="color:var(--green)">\u2705</span>':'')+'</td>'
+        +'<td>'+fmtContract(d.symbol,b.contract_month||'')+'</td>'
+        +'<td class="down">\u274C Missing</td>'
+        +'<td>\u2014</td>'
+        +'<td class="num" style="font-size:11px">O:'+fmtNum(b.open)+' H:'+fmtNum(b.high)+' L:'+fmtNum(b.low)+' C:'+fmtNum(b.close)+' V:'+fmtVol(b.volume)+'</td>'
+        +'<td class="dim">Need fix</td></tr>');
+    });
+    document.getElementById('v-tbody').innerHTML=rows.join('');
+    document.getElementById('v-chk-all').addEventListener('change',function(){
+      var ck=this.checked;document.querySelectorAll('.v-rc:not([disabled])').forEach(function(c){c.checked=ck;});
+    });
+    document.getElementById('v-fix-btn').style.display='';
+  } else {
+    document.getElementById('v-thead').innerHTML='<tr>'
+      +'<th style="width:155px">Time</th><th style="width:90px">Contract</th>'
+      +'<th style="width:85px">Status</th><th style="width:190px">DB OHLCV</th>'
+      +'<th style="width:190px">IB OHLCV</th><th style="width:130px">Diffs</th></tr>';
+    document.getElementById('v-tbody').innerHTML='<tr><td colspan="6"><div class="empty-msg">No mismatches \u2014 data is clean \u2705</div></td></tr>';
+    document.getElementById('v-fix-btn').style.display='none';
+  }
+}
+
+function runFix(){
+  if(!_vLast){showToast('Run Validate first','warn');return;}
+  var ts=[];document.querySelectorAll('.v-rc:checked').forEach(function(c){ts.push(parseInt(c.dataset.ts));});
+  if(!ts.length){showToast('No rows selected','warn');return;}
+  var p=_vP();
+  var sum=document.getElementById('v-summary');
+  sum.style.display='';sum.innerHTML='\u23F3 Fixing '+ts.length+' bar(s)\u2026';
+  var body={symbol:p.sym,timeframe:p.tf,timestamps:ts};
+  if(p.from) body.from_dt=p.from; if(p.to) body.to_dt=p.to;
+  fetch('/api/data/fix',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      ts.forEach(function(t){_vFixed.add(t);});
+      _renderVal(_vLast);
+      sum.style.display='';
+      sum.innerHTML='<span style="color:var(--green)">\u2705 Fixed '+(d.fixed_count||0)+' bar(s)</span>'
+        +' \u2014 DB:'+(d.db_count||0)+' | IB:'+(d.ib_count||0);
+      showToast('Fixed '+(d.fixed_count||0)+' bars','success');
+      if(!document.querySelectorAll('.v-rc:not([disabled])').length)
+        document.getElementById('v-fix-btn').style.display='none';
+    })
+    .catch(function(e){sum.innerHTML='\u274C '+e.message;showToast('Fix failed','error');});
+}
+
+function runViewValidatedRanges(){
+  var p=_vP();
+  var sum=document.getElementById('v-summary');
+  sum.style.display='';sum.innerHTML='\u23F3 Loading validated ranges\u2026';
+  document.getElementById('v-fix-btn').style.display='none';
+  fetch('/api/data/validated_ranges?symbol='+p.sym+'&timeframe='+p.tf)
+    .then(function(r){return r.json();})
+    .then(function(d){
+      var merged=d.merged||[];
+      if(!merged.length){sum.innerHTML=p.sym+'/'+p.tf+' \u2014 <span style="color:var(--text-dim)">No validated ranges yet</span>';}
+      else{
+        var ts=merged.reduce(function(a,r){return a+(r.to_ts-r.from_ts);},0);
+        sum.innerHTML=p.sym+'/'+p.tf+' \u2014 <span style="color:var(--green)">'+merged.length+' range(s)</span> | Total: <span style="color:var(--text)">'+(ts/86400).toFixed(1)+' days</span>';
       }
-      document.getElementById('i-tbody').innerHTML = data.map(function(r) {
-        var contracts = (r.contracts || []).map(function(c) {
-          return fmtContract(r.symbol, c.contract_month);
-        }).join(', ');
-        return '<tr>'
-          + '<td>' + r.symbol + '</td>'
-          + '<td class="dim" style="font-size:11px">' + (contracts || '—') + '</td>'
-          + '<td>' + r.timeframe + '</td>'
-          + '<td>' + tsToLocal(r.min_ts) + '</td>'
-          + '<td>' + tsToLocal(r.max_ts) + '</td>'
-          + '<td class="num">' + r.count.toLocaleString() + '</td>'
-          + '</tr>';
+      document.getElementById('v-thead').innerHTML='<tr>'
+        +'<th style="width:200px">From</th><th style="width:200px">To</th>'
+        +'<th style="width:120px">Duration</th></tr>';
+      if(!merged.length){document.getElementById('v-tbody').innerHTML='<tr><td colspan="3"><div class="empty-msg">No validated ranges. Run background validation first.</div></td></tr>';return;}
+      document.getElementById('v-tbody').innerHTML=merged.map(function(r){
+        return '<tr><td>'+tsToLocal(r.from_ts)+'</td><td>'+tsToLocal(r.to_ts)+'</td>'
+          +'<td class="num">'+((r.to_ts-r.from_ts)/86400).toFixed(1)+' days</td></tr>';
       }).join('');
-
-      showToast('Coverage check complete', 'success');
+      showToast(merged.length+' range(s)','success');
     })
-    .catch(function(e) {
-      summary.innerHTML = '❌ ' + e.message;
-      showToast('Coverage check failed: ' + e.message, 'error');
-    });
+    .catch(function(e){sum.innerHTML='\u274C '+e.message;showToast('Failed','error');});
 }
 
-function runCalendarGaps() {
-  var sym  = document.getElementById('i-symbol').value;
-  var tf   = document.getElementById('i-timeframe').value;
-  var from = dateToTs(document.getElementById('i-from').value, false);
-  var to   = dateToTs(document.getElementById('i-to').value, true);
-  var summary = document.getElementById('i-summary');
-  summary.style.display = '';
-  summary.innerHTML = '⏳ Detecting calendar gaps…';
+// ── Batch Range ───────────────────────────────────────────────────────────────
+var _batchStop=false,_batchRunning=false;
 
-  var url = '/api/data/calendar_gaps?symbol=' + sym + '&timeframe=' + tf;
-  if (from) url += '&from_ts=' + from;
-  if (to) url += '&to_ts=' + to;
+function stopBatch(){
+  _batchStop=true;_batchRunning=false;
+  document.getElementById('vb-run-btn').style.display='';
+  document.getElementById('vb-stop-btn').style.display='none';
+}
 
-  fetch(url)
-    .then(function(r) { return r.json(); })
-    .then(function(data) {
-      if (data.error) {
-        summary.innerHTML = '❌ ' + data.error;
-        return;
-      }
-      var gaps = data.gaps || [];
-      var dataGapCount = data.data_gaps || 0;
-      summary.innerHTML =
-        'Total gaps: <span style="color:var(--text)">' + data.total_gaps + '</span>'
-        + ' | Data gaps: <span style="color:' + (dataGapCount > 0 ? 'var(--red)' : 'var(--green)') + '">' + dataGapCount + '</span>';
+function runBatchValidate(){
+  if(_batchRunning) return;
+  var sym=document.getElementById('vb-symbol').value;
+  var tf=document.getElementById('vb-timeframe').value;
+  var fromTs=dateToTs(document.getElementById('vb-from').value,false);
+  var toTs=dateToTs(document.getElementById('vb-to').value,true);
+  var chunkDays=parseInt(document.getElementById('vb-chunk').value)||7;
+  if(!fromTs||!toTs||fromTs>=toTs){showToast('Invalid date range','warn');return;}
 
-      document.getElementById('i-thead').innerHTML =
-        '<tr>'
-        + '<th style="width:160px">Gap Start</th>'
-        + '<th style="width:160px">Gap End</th>'
-        + '<th style="width:100px">Duration</th>'
-        + '<th style="width:110px">Type</th>'
-        + '<th style="width:100px">Expected Bars</th>'
-        + '</tr>';
+  var chunkSec=chunkDays*86400;
+  var chunks=[];
+  var cur=fromTs;
+  while(cur<toTs){var end=Math.min(cur+chunkSec,toTs);chunks.push({from:cur,to:end});cur=end;}
 
-      if (gaps.length === 0) {
-        document.getElementById('i-tbody').innerHTML =
-          '<tr><td colspan="5"><div class="empty-msg">No gaps found</div></td></tr>';
-        return;
-      }
-      document.getElementById('i-tbody').innerHTML = gaps.map(function(g) {
-        var typeCls = g.gap_type === 'data_gap' ? 'warn' : '';
-        var dur = g.gap_seconds < 3600
-          ? Math.round(g.gap_seconds / 60) + 'm'
-          : (g.gap_seconds / 3600).toFixed(1) + 'h';
-        return '<tr>'
-          + '<td>' + tsToLocal(g.gap_start) + '</td>'
-          + '<td>' + tsToLocal(g.gap_end) + '</td>'
-          + '<td class="num">' + dur + '</td>'
-          + '<td class="' + typeCls + '">' + (g.gap_type || '') + '</td>'
-          + '<td class="num">' + (g.expected_bars || 0) + '</td>'
-          + '</tr>';
+  var total=chunks.length,done=0,totalMismatch=0,totalMissing=0;
+  _batchStop=false;_batchRunning=true;
+  document.getElementById('vb-run-btn').style.display='none';
+  document.getElementById('vb-stop-btn').style.display='';
+  document.getElementById('v-batch-progress').classList.add('visible');
+  document.getElementById('v-progress-fill').style.width='0%';
+
+  var rows=[];
+  document.getElementById('v-thead').innerHTML='<tr>'
+    +'<th style="width:160px">Chunk Start</th><th style="width:160px">Chunk End</th>'
+    +'<th style="width:80px">DB</th><th style="width:80px">IB</th>'
+    +'<th style="width:90px">Mismatch</th><th style="width:80px">Missing</th>'
+    +'<th style="width:80px">Status</th></tr>';
+  document.getElementById('v-tbody').innerHTML='';
+
+  function runChunk(i){
+    if(_batchStop||i>=chunks.length){
+      _batchRunning=false;
+      document.getElementById('vb-run-btn').style.display='';
+      document.getElementById('vb-stop-btn').style.display='none';
+      var sum=document.getElementById('v-summary');
+      sum.style.display='';
+      sum.innerHTML='Batch complete: <span style="color:var(--text)">'+done+'/'+total+' chunks</span>'
+        +' | Mismatch: <span style="color:var(--orange)">'+totalMismatch+'</span>'
+        +' | Missing: <span style="color:var(--red)">'+totalMissing+'</span>';
+      document.getElementById('v-batch-status').textContent=_batchStop?'Stopped after '+done+' chunks':'Completed '+done+'/'+total+' chunks';
+      showToast('Batch done: '+done+' chunks, '+totalMismatch+' mismatches',totalMismatch?'warn':'success');
+      return;
+    }
+    var c=chunks[i];
+    var pct=Math.round((i/total)*100);
+    document.getElementById('v-progress-fill').style.width=pct+'%';
+    document.getElementById('v-batch-status').textContent='Chunk '+(i+1)+'/'+total+' \u2014 '+sym+'/'+tf+' '+tsToLocal(c.from)+' \u2192 '+tsToLocal(c.to);
+
+    var params=new URLSearchParams({symbol:sym,timeframe:tf,from_ts:c.from,to_ts:c.to});
+    fetch('/api/data/validate?'+params.toString())
+      .then(function(r){return r.json();})
+      .then(function(d){
+        done++;
+        var mm=d.mismatch_count||0,io=d.ib_only_count||0;
+        totalMismatch+=mm;totalMissing+=io;
+        var ok=mm===0&&io===0;
+        rows.push('<tr>'
+          +'<td>'+tsToLocal(c.from)+'</td><td>'+tsToLocal(c.to)+'</td>'
+          +'<td class="num">'+(d.db_count||0)+'</td><td class="num">'+(d.ib_count||0)+'</td>'
+          +'<td class="num '+(mm?'warn':'up')+'">'+mm+'</td>'
+          +'<td class="num '+(io?'down':'up')+'">'+io+'</td>'
+          +'<td class="'+(ok?'up':'warn')+'">'+(ok?'\u2705 OK':'\u26A0 Issues')+'</td></tr>');
+        document.getElementById('v-tbody').innerHTML=rows.join('');
+        document.getElementById('v-progress-fill').style.width=Math.round(((i+1)/total)*100)+'%';
+        runChunk(i+1);
+      })
+      .catch(function(e){
+        rows.push('<tr><td>'+tsToLocal(c.from)+'</td><td>'+tsToLocal(c.to)+'</td>'
+          +'<td colspan="4" class="dim">Error: '+e.message+'</td><td class="down">\u274C Error</td></tr>');
+        document.getElementById('v-tbody').innerHTML=rows.join('');
+        runChunk(i+1);
+      });
+  }
+
+  runChunk(0);
+}
+
+function runValidateAll(){
+  if(!confirm('Validate ALL symbol/timeframe pairs against IB? This may take a while.')) return;
+  var sum=document.getElementById('v-summary');
+  sum.style.display='';sum.innerHTML='\u23F3 Validating all pairs\u2026';
+  fetch('/api/data/validate_all',{method:'POST'})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      sum.innerHTML='Pairs: <span style="color:var(--text)">'+d.pairs_checked+'</span>'
+        +' | Mismatch: <span style="color:var(--orange)">'+d.total_mismatches+'</span>'
+        +' | Fixed: <span style="color:var(--green)">'+d.total_fixed+'</span>';
+      document.getElementById('v-thead').innerHTML='<tr>'
+        +'<th style="width:90px">Symbol</th><th style="width:70px">TF</th>'
+        +'<th style="width:140px">Contracts</th><th style="width:100px">Mismatches</th></tr>';
+      var det=d.details||[];
+      if(!det.length){document.getElementById('v-tbody').innerHTML='<tr><td colspan="4"><div class="empty-msg">No pairs in DB</div></td></tr>';return;}
+      document.getElementById('v-tbody').innerHTML=det.map(function(r){
+        var ct=(r.contracts||[]).map(function(cm){return fmtContract(r.symbol,cm);}).join(', ');
+        return '<tr><td>'+r.symbol+'</td><td>'+r.timeframe+'</td>'
+          +'<td class="dim" style="font-size:11px">'+(ct||'\u2014')+'</td>'
+          +'<td class="num '+(r.total_mismatches>0?'warn':'up')+'">'+r.total_mismatches+'</td></tr>';
       }).join('');
-
-      showToast('Calendar gap check complete', dataGapCount > 0 ? 'warn' : 'success');
+      showToast('Validated '+d.pairs_checked+' pairs',d.total_mismatches?'warn':'success');
     })
-    .catch(function(e) {
-      summary.innerHTML = '❌ ' + e.message;
-      showToast('Calendar gap check failed: ' + e.message, 'error');
-    });
+    .catch(function(e){sum.innerHTML='\u274C '+e.message;showToast('Validate all failed','error');});
 }
 
-function runFixOHLCV() {
-  var sym  = document.getElementById('i-symbol').value;
-  var tf   = document.getElementById('i-timeframe').value;
-  var from = dateToTs(document.getElementById('i-from').value, false);
-  var to   = dateToTs(document.getElementById('i-to').value, true);
-
-  if (!confirm('Fix OHLCV violations for ' + sym + '/' + tf + '? This will swap high/low, clamp open/close to [low,high], and delete bars with non-positive prices.')) return;
-
-  var summary = document.getElementById('i-summary');
-  summary.style.display = '';
-  summary.innerHTML = '⏳ Fixing OHLCV violations…';
-
-  var url = '/api/data/fix_ohlcv?symbol=' + sym + '&timeframe=' + tf;
-  if (from) url += '&from_ts=' + from;
-  if (to) url += '&to_ts=' + to;
-
-  fetch(url, { method: 'POST' })
-    .then(function(r) { return r.json(); })
-    .then(function(data) {
-      summary.innerHTML =
-        'Fixed: <span style="color:var(--green)">' + data.fixed + '</span> bars for '
-        + data.symbol + '/' + data.timeframe;
-      showToast('Fixed ' + data.fixed + ' OHLCV violations', data.fixed > 0 ? 'success' : 'info');
-    })
-    .catch(function(e) {
-      summary.innerHTML = '❌ ' + e.message;
-      showToast('Fix OHLCV failed: ' + e.message, 'error');
-    });
+// ── Integrity ─────────────────────────────────────────────────────────────────
+function _iP(){
+  return{sym:document.getElementById('i-symbol').value,tf:document.getElementById('i-timeframe').value,
+         from:dateToTs(document.getElementById('i-from').value,false),
+         to:dateToTs(document.getElementById('i-to').value,true)};
 }
 
-// Initialize integrity tab defaults
-(function() {
-  var fromEl = document.getElementById('i-from');
-  var toEl = document.getElementById('i-to');
-  if (fromEl && !fromEl.value) fromEl.value = document.getElementById('q-from').value;
-  if (toEl && !toEl.value) toEl.value = document.getElementById('q-to').value;
-})();
+function runIntegrity(){
+  var p=_iP();
+  var url='/api/data/integrity?symbol='+p.sym+'&timeframe='+p.tf;
+  if(p.from) url+='&from_ts='+p.from; if(p.to) url+='&to_ts='+p.to;
+  var sum=document.getElementById('v-summary');
+  sum.style.display='';sum.innerHTML='\u23F3 Running integrity check\u2026';
+  fetch(url).then(function(r){return r.json();}).then(function(d){
+    sum.innerHTML='Total bars: <span style="color:var(--text)">'+d.total_bars+'</span>'
+      +' | OHLCV violations: <span style="color:'+(d.ohlcv_violations>0?'var(--red)':'var(--green)')+'">'+d.ohlcv_violations+'</span>'
+      +' | Duplicates: <span style="color:'+(d.duplicates>0?'var(--red)':'var(--green)')+'">'+d.duplicates+'</span>'
+      +' | Earliest: <span style="color:var(--text-dim)">'+(d.earliest_ts?tsToLocal(d.earliest_ts):'N/A')+'</span>'
+      +' | Latest: <span style="color:var(--text-dim)">'+(d.latest_ts?tsToLocal(d.latest_ts):'N/A')+'</span>';
+    var srcs=d.sources||{};var sk=Object.keys(srcs);
+    document.getElementById('v-thead').innerHTML='<tr>'
+      +'<th style="width:200px">Source</th><th style="width:120px">Bar Count</th><th style="width:120px">Pct</th></tr>';
+    if(!sk.length){document.getElementById('v-tbody').innerHTML='<tr><td colspan="3"><div class="empty-msg">No data found</div></td></tr>';return;}
+    document.getElementById('v-tbody').innerHTML=sk.map(function(s){
+      var cnt=srcs[s],pct=d.total_bars>0?(cnt/d.total_bars*100).toFixed(1):'0';
+      return '<tr><td>'+s+'</td><td class="num">'+cnt.toLocaleString()+'</td><td class="num">'+pct+'%</td></tr>';
+    }).join('');
+    showToast('Integrity complete',d.ohlcv_violations>0?'warn':'success');
+  }).catch(function(e){document.getElementById('v-summary').innerHTML='\u274C '+e.message;showToast('Integrity failed','error');});
+}
+
+function runCalendarGaps(){
+  var p=_iP();
+  var url='/api/data/calendar_gaps?symbol='+p.sym+'&timeframe='+p.tf;
+  if(p.from) url+='&from_ts='+p.from; if(p.to) url+='&to_ts='+p.to;
+  var sum=document.getElementById('v-summary');
+  sum.style.display='';sum.innerHTML='\u23F3 Detecting calendar gaps\u2026';
+  fetch(url).then(function(r){return r.json();}).then(function(d){
+    if(d.error){sum.innerHTML='\u274C '+d.error;return;}
+    var dg=d.data_gaps||0;
+    sum.innerHTML='Total gaps: <span style="color:var(--text)">'+d.total_gaps+'</span>'
+      +' | Data gaps: <span style="color:'+(dg>0?'var(--red)':'var(--green)')+'">'+dg+'</span>';
+    document.getElementById('v-thead').innerHTML='<tr>'
+      +'<th style="width:155px">Gap Start</th><th style="width:155px">Gap End</th>'
+      +'<th style="width:90px">Duration</th><th style="width:110px">Type</th>'
+      +'<th style="width:100px">Exp. Bars</th></tr>';
+    var gaps=d.gaps||[];
+    if(!gaps.length){document.getElementById('v-tbody').innerHTML='<tr><td colspan="5"><div class="empty-msg">No gaps found</div></td></tr>';return;}
+    document.getElementById('v-tbody').innerHTML=gaps.map(function(g){
+      var dur=g.gap_seconds<3600?Math.round(g.gap_seconds/60)+'m':(g.gap_seconds/3600).toFixed(1)+'h';
+      return '<tr><td>'+tsToLocal(g.gap_start)+'</td><td>'+tsToLocal(g.gap_end)+'</td>'
+        +'<td class="num">'+dur+'</td><td class="'+(g.gap_type==='data_gap'?'warn':'dim')+'">'+g.gap_type+'</td>'
+        +'<td class="num">'+(g.expected_bars||0)+'</td></tr>';
+    }).join('');
+    showToast('Calendar gap check done',dg>0?'warn':'success');
+  }).catch(function(e){document.getElementById('v-summary').innerHTML='\u274C '+e.message;showToast('Calendar gaps failed','error');});
+}
+
+function runFixOHLCV(){
+  var p=_iP();
+  if(!confirm('Fix OHLCV violations for '+p.sym+'/'+p.tf+'? This will swap high/low, clamp open/close, and delete bars with non-positive prices.')) return;
+  var url='/api/data/fix_ohlcv?symbol='+p.sym+'&timeframe='+p.tf;
+  if(p.from) url+='&from_ts='+p.from; if(p.to) url+='&to_ts='+p.to;
+  var sum=document.getElementById('v-summary');
+  sum.style.display='';sum.innerHTML='\u23F3 Fixing OHLCV violations\u2026';
+  fetch(url,{method:'POST'}).then(function(r){return r.json();}).then(function(d){
+    sum.innerHTML='Fixed: <span style="color:var(--green)">'+d.fixed+'</span> bars for '+d.symbol+'/'+d.timeframe;
+    showToast('Fixed '+d.fixed+' OHLCV violations',d.fixed>0?'success':'info');
+  }).catch(function(e){sum.innerHTML='\u274C '+e.message;showToast('Fix OHLCV failed','error');});
+}
+
+// ── Shared actions ────────────────────────────────────────────────────────────
+function runBgValidate(){
+  if(!confirm('Start background data validation? This runs silently.')) return;
+  fetch('/api/data/bg_validate',{method:'POST'})
+    .then(function(r){return r.json();})
+    .then(function(d){showToast(d.message||'Background validation started','success');})
+    .catch(function(e){showToast('Failed to start: '+e.message,'error');});
+}
+
+function runDeleteRealtime(){
+  if(!confirm('Delete ALL realtime bars from the database? This cannot be undone.')) return;
+  fetch('/api/data/delete_by_source?source=realtime',{method:'POST'})
+    .then(function(r){return r.json();})
+    .then(function(d){showToast('Deleted '+d.deleted+' realtime bars','success');})
+    .catch(function(e){showToast('Delete failed: '+e.message,'error');});
+}
 </script>
 </body>
 </html>
