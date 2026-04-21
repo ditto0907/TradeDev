@@ -29,6 +29,8 @@ from price_action_analyzer import PriceActionAnalyzer
 from order_manager import IBOrderManager
 from trade_log_parser import load_all_trades, parse_csv_content
 import strategy_backtest
+import data_manager
+import realtime_builder
 
 # ─── Logging Setup ─────────────────────────────────────────────────────────────
 # Console handler (existing behavior)
@@ -123,14 +125,15 @@ def on_new_bar(bar_size_key: str, bar: dict, symbol: str = None):
     prev_key = (symbol, bar_size_key)
     prev = _prev_completed_bar.get(prev_key)
     if prev is not None and bar["time"] > prev["time"]:
-        # The previous bar just completed — write it to DB immediately so
-        # getBars requests won't miss it while waiting for IB historical fetch.
-        # Use source="realtime_completed" so IB historical can overwrite later.
-        try:
-            db.insert_bars(symbol, bar_size_key, [prev], source="realtime_completed")
-            logger.debug("Completed bar written to DB: %s/%s ts=%s", symbol, bar_size_key, prev["time"])
-        except Exception as e:
-            logger.warning("Failed to write completed bar for %s/%s: %s", symbol, bar_size_key, e)
+        # The previous bar just completed — persist via realtime_builder so
+        # OHLCV validation runs and the DB write flows through the single
+        # IBfetch.persist_bars proxy (server does NOT call db.insert_bars).
+        saved = realtime_builder.persist_completed_bar(
+            fetcher, symbol, bar_size_key, prev,
+        )
+        if saved:
+            logger.debug("Completed bar written to DB: %s/%s ts=%s",
+                         symbol, bar_size_key, prev["time"])
         # Also buffer for Google Sheets
         if symbol == MES_SYM:
             sheets.buffer_bar(bar_size_key, prev)
@@ -138,14 +141,8 @@ def on_new_bar(bar_size_key: str, bar: dict, symbol: str = None):
 
     # Persist the in-progress realtime bar to its own table so it survives
     # a server restart and the chart shows the latest bar immediately on reload.
-    # Wrap in try-except to prevent SQLite concurrency errors from flooding logs.
-    try:
-        db.upsert_realtime_bar(symbol, bar_size_key, bar)
-    except Exception as e:
-        # Silently ignore DB errors in high-frequency callbacks — realtime_bars
-        # is only for crash recovery, occasional failures won't break functionality.
-        # Log at DEBUG level to avoid noise but still troubleshoot if needed.
-        logger.debug("Failed to upsert realtime bar for %s/%s: %s", symbol, bar_size_key, e)
+    # Delegated to realtime_builder which swallows SQLite concurrency errors.
+    realtime_builder.persist_inprogress_bar(symbol, bar_size_key, bar)
 
     # Re-run price-action analysis only when a new 5min bar opens (MES only)
     analysis_updated = False
@@ -216,7 +213,7 @@ async def _fill_internal_gaps(sym: str, tf: str, fetcher_obj, max_age_days: int 
                 gap_bars = [b for b in ib_bars
                             if from_ts < b["time"] < to_ts]
                 if gap_bars:
-                    saved = db.insert_bars(sym, tf, gap_bars, source="ib_historical")
+                    saved = fetcher_obj.persist_bars(sym, tf, gap_bars, source="ib_historical")
                     total_filled += saved
                     logger.info("[%s/%s] Filled %d bars for gap %s→%s (%ds)",
                                 sym, tf, saved, from_ts, to_ts, gap_sec)
@@ -235,6 +232,19 @@ async def _fill_internal_gaps(sym: str, tf: str, fetcher_obj, max_age_days: int 
         logger.info("[%s/%s] Gap fill complete: %d bars inserted", sym, tf, total_filled)
     else:
         logger.info("[%s/%s] Gap fill complete: no new bars needed", sym, tf)
+
+    # Notify the frontend so any open chart widgets for this symbol/tf
+    # drop their cache and re-request the affected range.
+    if total_filled:
+        try:
+            await data_manager.notify_history_ready(
+                sym, tf,
+                from_ts=cutoff_ts,
+                to_ts=int(time.time()),
+                added_bars=total_filled,
+            )
+        except Exception as e:
+            logger.debug("history_ready broadcast skipped: %s", e)
 
 
 # ─── Startup / Shutdown ───────────────────────────────────────────────────────
@@ -301,9 +311,19 @@ async def _prefetch_extra_symbols(fetcher, ib_ok):
                     if filter_since:
                         bars5 = [b for b in bars5 if b["time"] > filter_since]
                     if bars5:
-                        saved = db.insert_bars(sym_name, "5min", bars5,
-                                               source="ib_historical")
+                        saved = fetcher.persist_bars(sym_name, "5min", bars5,
+                                                     source="ib_historical")
                         logger.info("[%s] Saved %d new 5min bars to DB", sym_name, saved)
+                        if saved:
+                            try:
+                                await data_manager.notify_history_ready(
+                                    sym_name, "5min",
+                                    from_ts=bars5[0]["time"],
+                                    to_ts=bars5[-1]["time"],
+                                    added_bars=saved,
+                                )
+                            except Exception:
+                                pass
                     else:
                         logger.info("[%s] IB returned 0 new 5min bars", sym_name)
 
@@ -326,8 +346,8 @@ async def _prefetch_extra_symbols(fetcher, ib_ok):
             )
             bars_1d = [_bar_to_dict(b) for b in raw_1d]
             if bars_1d:
-                saved_1d = db.insert_bars(sym_name, "1D", bars_1d,
-                                          source="ib_historical")
+                saved_1d = fetcher.persist_bars(sym_name, "1D", bars_1d,
+                                                source="ib_historical")
                 logger.info("[%s] Saved %d 1D bars to DB", sym_name, saved_1d)
 
             # ── Fill internal gaps in 5min data ──────────────────────
@@ -356,8 +376,8 @@ async def _ib_background_init():
 
         # Persist the freshly fetched bars
         if fetcher.bars["5min"]:
-            saved = db.insert_bars(MES_SYM, "5min", fetcher.bars["5min"],
-                                   source="ib_historical")
+            saved = fetcher.persist_bars(MES_SYM, "5min", fetcher.bars["5min"],
+                                         source="ib_historical")
             logger.info("Saved %d 5min bars to DB", saved)
 
         # Fill internal gaps in MES 5min data (e.g. server downtime)
@@ -446,8 +466,8 @@ async def _ib_reconnect_loop():
             since_5min = db.get_latest_ts(MES_SYM, "5min")
             await fetcher.load_history(since_5min=since_5min)
             if fetcher.bars["5min"]:
-                saved = db.insert_bars(MES_SYM, "5min", fetcher.bars["5min"],
-                                       source="ib_historical")
+                saved = fetcher.persist_bars(MES_SYM, "5min", fetcher.bars["5min"],
+                                             source="ib_historical")
                 logger.info("[IB Reconnect] Saved %d new 5min bars to DB", saved)
 
             # Realtime subscription (guard against duplicate callbacks)
@@ -485,6 +505,11 @@ async def lifespan(app: FastAPI):
     global _order_mgr
 
     logger.info("Starting up…")
+
+    # Wire data_manager's WS broadcaster so background history_ready
+    # notifications reach the frontend (datafeed subscribes to the
+    # "history_ready" message type to refresh its widget cache).
+    data_manager.set_broadcaster(broadcast)
 
     # ── Step 1: init DB and load historical bars (fast, ~100ms) ──────────────
     db.init_db()
@@ -860,8 +885,8 @@ async def get_history(
             try:
                 fetched = await fetcher.fetch_range(key, f_from, f_to, symbol=sym)
                 if fetched:
-                    saved = db.insert_bars(sym, key, fetched,
-                                           source="ib_historical")
+                    saved = fetcher.persist_bars(sym, key, fetched,
+                                                 source="ib_historical")
                     logger.info(
                         "[%s/%s] IB fetch OK: %d bars fetched, %d saved to DB",
                         sym, key, len(fetched), saved,
@@ -940,8 +965,8 @@ async def get_history(
                                 gap_bars = [b for b in ib_bars
                                             if g_from < b["time"] < g_to]
                                 if gap_bars:
-                                    saved = db.insert_bars(sym, key, gap_bars,
-                                                           source="ib_historical")
+                                    saved = fetcher.persist_bars(sym, key, gap_bars,
+                                                                 source="ib_historical")
                                     filled_any = True
                                     logger.info(
                                         "[%s/%s] Filled chunk %s→%s: %d bars",

@@ -799,3 +799,94 @@ async def background_validate(
     elapsed = time.monotonic() - t0
     logger.info("=== [BG VALIDATE] Complete (%.1fs) ===", elapsed)
 
+
+# ─── Public helper API (single validation entry point) ────────────────────────
+#
+# These are thin façades over existing logic.  Callers outside this module
+# (server, data_manager, realtime_builder, IBfetch) should use ONLY these
+# helpers — not ``trading_calendar`` or ``db``'s private gap/OHLCV checks.
+
+def validate_bar(bar: dict, symbol: str = "MES") -> List[str]:
+    """Return a list of OHLCV integrity violations for a single bar.
+
+    An empty list means the bar is valid.  Delegates to
+    :meth:`trading_calendar.TradingCalendar.validate_bar` which performs
+    high/low, non-positive price, and OHLC relational checks.
+
+    Callers (realtime_builder, IBfetch) should reject any bar returning a
+    non-empty list instead of persisting it.
+    """
+    try:
+        from trading_calendar import get_calendar
+        cal = get_calendar(symbol)
+        return list(cal.validate_bar(bar))
+    except Exception as e:
+        logger.debug("validate_bar(%s) fallback (%s)", symbol, e)
+        # Fallback: simplified local check.
+        violations: List[str] = []
+        try:
+            o, h, l, c = bar["open"], bar["high"], bar["low"], bar["close"]
+            v = bar["volume"]
+            if h < l:
+                violations.append(f"high({h}) < low({l})")
+            if any(p <= 0 for p in (o, h, l, c)):
+                violations.append(f"non-positive price O={o} H={h} L={l} C={c}")
+            if v < 0:
+                violations.append(f"negative volume {v}")
+        except Exception as e2:
+            violations.append(f"malformed bar: {e2}")
+        return violations
+
+
+def classify_gaps(
+    bars: List[dict],
+    symbol: str,
+    interval: int,
+) -> List[dict]:
+    """Classify gaps between consecutive bars using the trading calendar.
+
+    Returns records with keys::
+
+        {"gap_start", "gap_end", "gap_seconds",
+         "gap_type": "weekend"|"holiday"|"maintenance"|"data_gap"|"normal"}
+
+    This is the single place gap-type logic lives; data_manager and
+    server both call it.  Falls back to a simple interval-multiple
+    heuristic only if the calendar is unavailable.
+    """
+    if not bars or len(bars) < 2:
+        return []
+    try:
+        from trading_calendar import get_calendar
+        cal = get_calendar(symbol)
+        return list(cal.find_gaps(bars, interval))
+    except Exception as e:
+        logger.debug("classify_gaps(%s) fallback (%s)", symbol, e)
+        out: List[dict] = []
+        for i in range(1, len(bars)):
+            gap = bars[i]["time"] - bars[i - 1]["time"]
+            if gap > interval * 2:
+                out.append({
+                    "gap_start":   bars[i - 1]["time"],
+                    "gap_end":     bars[i]["time"],
+                    "gap_seconds": gap,
+                    "gap_type":    "data_gap",
+                })
+        return out
+
+
+def data_gaps_only(
+    bars: List[dict],
+    symbol: str,
+    interval: int,
+) -> List[Tuple[int, int, int]]:
+    """Convenience wrapper: return only ``data_gap`` gaps as
+    ``(from_ts, to_ts, gap_seconds)`` tuples suitable for IB refill.
+    """
+    return [
+        (g["gap_start"], g["gap_end"], g["gap_seconds"])
+        for g in classify_gaps(bars, symbol, interval)
+        if g.get("gap_type") == "data_gap"
+    ]
+
+

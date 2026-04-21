@@ -93,22 +93,24 @@ def ib_duration(gap_sec: int, max_days: int = 30) -> str:
 # ─── Contract Rollover ───────────────────────────────────────────────────────
 #
 # For each symbol, determine the front-month contract at a given timestamp.
-# Rollover is approximated as day 10 of the contract month.
+# Rollover follows the official exchange convention as declared in
+# ``config.INSTRUMENTS[symbol]["rollover_rule"]`` and resolved by
+# ``contract_calendar.active_contract``.  The previous "day <= 10 of the
+# month" heuristic has been removed.
 # Uses config.INSTRUMENTS for per-symbol contract cycle.
 
 
 def _contract_month_for_ts(ts: int, symbol: str = "MES") -> str:
-    """Return YYYYMM for the contract likely front-month at timestamp *ts*."""
-    inst = config.INSTRUMENTS.get(symbol)
-    months = inst["contract_months"] if inst else [3, 6, 9, 12]
+    """Return YYYYMM for the contract that is front-month at timestamp *ts*.
 
-    dt = datetime.fromtimestamp(ts, tz=timezone.utc)
-    y, m, d = dt.year, dt.month, dt.day
-    for qm in months:
-        if m < qm or (m == qm and d <= 10):
-            return f"{y}{qm:02d}"
-    # Wrap to next year, first contract month
-    return f"{y + 1}{months[0]:02d}"
+    Dispatches to :func:`contract_calendar.active_contract`, which applies
+    the exchange-specific rollover rule (CME equity-index = 8th business
+    day; COMEX = 1 business day before LTD; OSE = 1 business day before
+    2nd-Friday SQ).  For US equity-index futures this always returns one
+    of the quarterly months (3/6/9/12) — never an auto-derived month.
+    """
+    from contract_calendar import active_contract
+    return active_contract(int(ts), symbol)
 
 
 def _prev_contract_month(yyyymm: str, symbol: str = "MES") -> str:
@@ -209,6 +211,50 @@ class IBDataFetcher:
         sym_key = "MES"
         if sym_key in self._symbol_bars and "5min" in self._symbol_bars[sym_key]:
             self.bars["5min"] = self._symbol_bars[sym_key]["5min"]
+
+    # ─── DB-write proxy ──────────────────────────────────────────────────────
+    #
+    # `persist_bars` is the ONLY approved path from application code to
+    # ``db.insert_bars``.  Server / data_manager / realtime_builder must go
+    # through this method so that (a) every write is logged consistently
+    # and (b) future work (e.g. routing writes through dataValidator or
+    # writing to the IB-raw cache) can be centralised here.
+
+    def persist_bars(
+        self,
+        symbol: str,
+        timeframe: str,
+        bars: List[dict],
+        source: str = "unknown",
+    ) -> int:
+        """Write *bars* to the SQLite ``bars`` table.
+
+        This is the single DB-write entry point for the priceaction
+        codebase.  All other modules must call this rather than invoking
+        :func:`db.insert_bars` directly.
+
+        Returns the number of rows upserted (after OHLCV validation inside
+        ``db.insert_bars``).
+        """
+        if not bars:
+            return 0
+        # Imported locally to keep this module free of import-time side
+        # effects if db.py is not yet ready.
+        import db as _db
+        try:
+            saved = _db.insert_bars(symbol, timeframe, bars, source=source)
+        except Exception as e:
+            logger.warning(
+                "persist_bars %s/%s (%d bars, source=%s) failed: %s",
+                symbol, timeframe, len(bars), source, e,
+            )
+            return 0
+        if saved:
+            logger.debug(
+                "persist_bars %s/%s: wrote %d bars (source=%s)",
+                symbol, timeframe, saved, source,
+            )
+        return saved
 
     # ─── Connection ──────────────────────────────────────────────────────────
 

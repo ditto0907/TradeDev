@@ -48,6 +48,9 @@ INSTRUMENTS = {
         "contract_months": [3, 6, 9, 12],      # H M U Z
         "rth_start": (9, 30),                   # local-time RTH window
         "rth_end":   (16, 0),
+        # CME equity-index rollover: 8th business day of the contract
+        # month (published as the CME "Quarterly Roll" date).
+        "rollover_rule": {"type": "nth_business_day", "n": 8},
     },
     "MNQ": {
         "ib_symbol": "MNQ",
@@ -58,6 +61,7 @@ INSTRUMENTS = {
         "contract_months": [3, 6, 9, 12],
         "rth_start": (9, 30),
         "rth_end":   (16, 0),
+        "rollover_rule": {"type": "nth_business_day", "n": 8},
     },
     "NK225MC": {
         "ib_symbol": "N225MC",
@@ -68,6 +72,9 @@ INSTRUMENTS = {
         "contract_months": list(range(1, 13)),  # every month
         "rth_start": (8, 45),                   # JST RTH window
         "rth_end":   (15, 45),
+        # OSE monthly: Special Quotation is the 2nd Friday; the front
+        # month rolls one business day before SQ.
+        "rollover_rule": {"type": "second_friday", "offset_bdays": -1},
     },
     "MGC": {
         "ib_symbol": "MGC",
@@ -78,6 +85,9 @@ INSTRUMENTS = {
         "contract_months": [2, 4, 6, 8, 10, 12],
         "rth_start": (9, 30),
         "rth_end":   (17, 0),
+        # COMEX metal: roll one business day before Last Trading Day
+        # (which is itself the 3rd-to-last business day of the month).
+        "rollover_rule": {"type": "n_bdays_before_ltd", "n": 1},
     },
 }
 
