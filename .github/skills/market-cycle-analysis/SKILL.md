@@ -15,7 +15,8 @@ argument-hint: "Symbol and timeframe to analyze, e.g. 'MES 5min RTH today' or 'M
 | TTR | Tight Trading Range | 紧缩交易区间：极窄的TR，通常是BO前的蓄力 |
 | BO | Breakout | 突破：价格强力离开TR或形态 |
 | FT | Follow-Through | 跟进：BO后的后续确认K线 |
-| BC | Bull Channel | 牛市通道：一系列更高高点(HH)和更高低点(HL)构成的上升通道 |
+| BLCH | Bull Channel | 牛市通道：一系列更高高点(HH)和更高低点(HL)构成的上升通道 |
+| BRCH | Bear Channel | 熊市通道：一系列更底高点(LH)和更低低点(LL)构成的下降通道 |
 | SC | Sell Climax | 卖出高潮：极度恐慌性下跌，通常预示反转；也缩写为Bear Climax |
 | BuC | Buy Climax | 买入高潮：极度追涨，通常预示反转 |
 | MTR | Major Trend Reversal | 主趋势反转：趋势方向改变，需要第二次测试确认 |
