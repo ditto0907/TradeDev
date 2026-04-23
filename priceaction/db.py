@@ -641,7 +641,7 @@ def insert_ib_cache_bars(symbol: str, timeframe: str, bars: List[dict]) -> int:
     for b in bars:
         o, h, l, c = b["open"], b["high"], b["low"], b["close"]
         v = b["volume"]
-        if h < l or any(p <= 0 for p in (o, h, l, c)) or v < 0:
+        if h < l or any(p <= 0 for p in (o, h, l, c)) or v <= 0:
             logger.warning("IB cache: skipping invalid bar %s/%s ts=%s O=%.4f H=%.4f L=%.4f C=%.4f V=%.1f",
                            symbol, timeframe, b["time"], o, h, l, c, v)
             continue
