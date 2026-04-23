@@ -6,6 +6,81 @@ argument-hint: "Symbol and timeframe to analyze, e.g. 'MES 5min RTH today' or 'M
 
 # Market Cycle Analysis — Al Brooks Price Action
 
+## Abbreviation Glossary
+
+### Price Action Phases & Patterns
+| 缩写 | 全称 | 说明 |
+|------|------|------|
+| TR | Trading Range | 交易区间：价格在支撑/阻力之间震荡，无明确方向 |
+| TTR | Tight Trading Range | 紧缩交易区间：极窄的TR，通常是BO前的蓄力 |
+| BO | Breakout | 突破：价格强力离开TR或形态 |
+| FT | Follow-Through | 跟进：BO后的后续确认K线 |
+| BC | Bull Channel | 牛市通道：一系列更高高点(HH)和更高低点(HL)构成的上升通道 |
+| SC | Sell Climax | 卖出高潮：极度恐慌性下跌，通常预示反转；也缩写为Bear Climax |
+| BuC | Buy Climax | 买入高潮：极度追涨，通常预示反转 |
+| MTR | Major Trend Reversal | 主趋势反转：趋势方向改变，需要第二次测试确认 |
+| MM | Measured Move | 量度涨跌幅：用第一腿长度预测第二腿目标位 |
+| OR | Opening Range | 开盘区间：RTH开盘后前1-6根K线（通常前5-30分钟）形成的高低范围 |
+| PB | Pullback | 回调：趋势中的短暂反向移动 |
+| 2L PB | Two-Legged Pullback | 两腿回调：由两个连续回调腿组成的复杂回调 |
+| ioi | Inside-Outside-Inside | 内包-外包-内包K线形态 |
+| ii | Inside-Inside | 连续内包K线，TTR信号 |
+| oo | Outside-Outside | 连续外包K线 |
+| DB | Double Bottom | 双底：两个相近低点，潜在牛市反转信号 |
+| DT | Double Top | 双顶：两个相近高点，潜在熊市反转信号 |
+| H1/H2 | High 1 / High 2 | 第1/2次更高高点，牛市回调入场信号 |
+| L1/L2 | Low 1 / Low 2 | 第1/2次更低低点，熊市回调入场信号 |
+
+### Price Level Abbreviations
+| 缩写 | 全称 | 说明 |
+|------|------|------|
+| PDH | Prior Day High | 前一交易日最高价，作为关键阻力/磁铁 |
+| PDL | Prior Day Low | 前一交易日最低价，作为关键支撑/磁铁 |
+| PDC | Prior Day Close | 前一交易日收盘价，作为关键参考位 |
+| PDO | Prior Day Open | 前一交易日开盘价 |
+| HOD | High of Day | 当日最高价 |
+| LOD | Low of Day | 当日最低价 |
+| S/R | Support / Resistance | 支撑/阻力 |
+| EMA | Exponential Moving Average | 指数移动平均线（通常指20EMA） |
+
+### Bar & Candle Characteristics
+| 缩写 | 全称 | 说明 |
+|------|------|------|
+| HH | Higher High | 更高高点：当前K线高点高于前一K线高点 |
+| HL | Higher Low | 更高低点：当前K线低点高于前一K线低点 |
+| LH | Lower High | 更低高点：当前K线高点低于前一K线高点，熊市信号 |
+| LL | Lower Low | 更低低点：当前K线低点低于前一K线低点 |
+| WBC | Weak Bull Candle | 弱多头K线：实体小、影线长或收盘靠近低点 |
+| SBC | Strong Bull Candle | 强多头K线：大实体、收盘靠近高点、影线小 |
+| WBrC | Weak Bear Candle | 弱空头K线：实体小、影线长或收盘靠近高点 |
+| SBrC | Strong Bear Candle | 强空头K线：大实体、收盘靠近低点、影线小 |
+| Doji | Doji | 十字星：开收盘接近，多空均衡，方向不明 |
+
+### Sessions & Timeframes
+| 缩写 | 全称 | 说明 |
+|------|------|------|
+| RTH | Regular Trading Hours | 正式交易时段：09:30-16:00 ET |
+| ETH | Extended Trading Hours | 延长交易时段：含盘前盘后，全天 |
+| D1 | Daily | 日线时间框架 |
+| H1 | 1-Hour | 1小时时间框架 |
+| M15 | 15-Minute | 15分钟时间框架 |
+| M5 | 5-Minute | 5分钟时间框架 |
+| MTF | Multi-TimeFrame | 多时间框架分析 |
+| HTF | Higher TimeFrame | 更高时间框架（如分析M5时，M15/H1/D1均为HTF） |
+
+### Trading Actions & Concepts
+| 缩写 | 全称 | 说明 |
+|------|------|------|
+| PA | Price Action | 价格行为：直接依据裸K线分析市场 |
+| LE | Long Entry | 多头入场 |
+| SE | Short Entry | 空头入场 |
+| SL | Stop Loss | 止损 |
+| PT | Profit Target | 利润目标 |
+| Magnet | — | 磁铁：价格倾向被吸引的目标位，如PDH/PDL/MM目标/整数关口 |
+| Gap | — | 跳空：K线与前一K线之间无价格重叠 |
+
+---
+
 ## Purpose
 
 Analyze market structure and cycles strictly following Al Brooks' price action methodology. Read K-line data from the TradeDev backend, identify the current market phase, key S/R levels, and annotate the chart with structured findings.
