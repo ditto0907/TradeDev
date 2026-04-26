@@ -1,103 +1,437 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8"/>
-<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>TradeDev — Data Management</title>
-<style>
-:root {
-  --bg:#131722;--panel:#1e222d;--panel2:#252a35;--border:#2a2e39;
-  --text:#d1d4dc;--text-dim:#787b86;--text-faint:#4c505c;
-  --green:#26a69a;--green-bg:#0d2b2a;
-  --red:#ef5350;--red-bg:#2c1616;
-  --blue:#2962ff;--blue-bg:rgba(41,98,255,.12);
-  --orange:#ff9800;
-  --input-bg:#0e1015;--nav-w:48px;--topbar-h:36px;
-}
-*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-html,body{height:100%;overflow:hidden}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;font-size:13px;color:var(--text);background:var(--bg);display:flex}
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TradeDev — Data Management</title>
+  <style>
+    /* ── Reset & Base ──────────────────────────────────────────────────────── */
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
 
-#nav-sidebar{width:var(--nav-w);min-width:var(--nav-w);background:var(--panel);border-right:1px solid var(--border);display:flex;flex-direction:column;align-items:center;padding-top:8px;gap:4px;z-index:10}
-.nav-btn{width:40px;height:40px;display:flex;align-items:center;justify-content:center;border-radius:6px;cursor:pointer;color:var(--text-dim);border:none;background:transparent;position:relative;transition:color .15s,background .15s;text-decoration:none}
-.nav-btn:hover{color:var(--text);background:rgba(255,255,255,.05)}
-.nav-btn.active{color:var(--blue);background:rgba(41,98,255,.10)}
-.nav-btn.active::before{content:'';position:absolute;left:-4px;top:8px;bottom:8px;width:3px;border-radius:0 2px 2px 0;background:var(--blue)}
-.nav-btn svg{display:block}
+    :root {
+      --bg:           #131722;
+      --panel:        #1e222d;
+      --panel-hover:  #2a2e3d;
+      --border:       #2a2e39;
+      --text:         #d1d4dc;
+      --text-dim:     #787b86;
+      --text-faint:   #4c505c;
+      --green:        #26a69a;
+      --green-bg:     #0d2b2a;
+      --green-hover:  #1e9c90;
+      --red:          #ef5350;
+      --red-bg:       #2c1616;
+      --red-hover:    #d94240;
+      --blue:         #2962ff;
+      --orange:       #ff9800;
+      --input-bg:     #0e1015;
+      --topbar-h:     36px;
+    }
 
-#main-col{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:0}
-#topbar{height:var(--topbar-h);background:var(--panel);border-bottom:1px solid var(--border);display:flex;align-items:center;padding:0 14px;gap:14px;flex-shrink:0}
-.logo{font-size:14px;font-weight:700;letter-spacing:.5px;color:var(--text);white-space:nowrap}
-.logo span{color:var(--blue)}
-.topbar-label{font-size:12px;color:var(--text-dim);padding-left:10px;border-left:1px solid var(--border)}
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Trebuchet MS", "Segoe UI", sans-serif;
+      font-size: 13px;
+      overflow: hidden;
+    }
 
-#content-area{flex:1;display:flex;flex-direction:column;overflow:hidden}
-#tab-bar{display:flex;gap:0;background:var(--panel);border-bottom:1px solid var(--border);flex-shrink:0}
-.dv-tab{padding:8px 18px;font-size:13px;cursor:pointer;color:var(--text-dim);border-bottom:2px solid transparent;transition:color .15s,border-color .15s;white-space:nowrap;user-select:none}
-.dv-tab:hover{color:var(--text)}
-.dv-tab.active{color:var(--blue);border-bottom-color:var(--blue)}
+    /* ── Top Bar ───────────────────────────────────────────────────────────── */
+    #topbar {
+      height: var(--topbar-h);
+      background: var(--panel);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      padding: 0 12px;
+      gap: 10px;
+      flex-shrink: 0;
+      z-index: 100;
+    }
 
-.dv-pane{display:none;flex:1;flex-direction:column;overflow:hidden}
-.dv-pane.active{display:flex}
+    .logo {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--text);
+      letter-spacing: 0.5px;
+      white-space: nowrap;
+    }
+    .logo span { color: var(--blue); }
 
-.dv-toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:8px 12px;background:var(--panel);border-bottom:1px solid var(--border);flex-shrink:0}
-.dv-toolbar label{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--text-dim);white-space:nowrap}
-.dv-toolbar select,.dv-toolbar input[type="datetime-local"],.dv-toolbar input[type="number"]{background:var(--input-bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:12px;font-family:inherit;outline:none;height:28px}
-.dv-toolbar select:focus,.dv-toolbar input:focus{border-color:var(--blue)}
-.dv-toolbar input[type="datetime-local"]::-webkit-calendar-picker-indicator{filter:invert(.7)}
+    .topbar-label {
+      font-size: 12px;
+      color: var(--text-dim);
+      padding-left: 10px;
+      border-left: 1px solid var(--border);
+    }
 
-.dv-btn{background:var(--input-bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 12px;font-size:12px;cursor:pointer;height:28px;white-space:nowrap;transition:border-color .15s,background .15s}
-.dv-btn:hover{border-color:var(--blue);background:var(--blue-bg)}
-.dv-btn.primary{background:var(--blue);color:#fff;border-color:var(--blue)}
-.dv-btn.primary:hover{background:#1b4fd4}
-.dv-btn.success{background:var(--green-bg);color:var(--green);border-color:var(--green)}
-.dv-btn.success:hover{background:#0f3533}
-.dv-btn.danger{border-color:var(--red);color:var(--red)}
-.dv-btn.danger:hover{background:var(--red-bg)}
-.dv-btn:disabled{opacity:.4;cursor:default;pointer-events:none}
+    /* ── Main Layout ───────────────────────────────────────────────────────── */
+    #app-wrapper {
+      display: flex;
+      height: calc(100vh - var(--topbar-h));
+    }
 
-.dv-summary{display:none;padding:6px 12px;font-size:12px;background:rgba(41,98,255,.06);border-bottom:1px solid var(--border);flex-shrink:0;color:var(--text)}
+    /* ── Left Navigation Sidebar ──────────────────────────────────────────── */
+    #nav-sidebar {
+      width: 48px;
+      background: var(--panel);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding-top: 8px;
+      gap: 4px;
+      flex-shrink: 0;
+      z-index: 50;
+    }
+    .nav-item {
+      width: 40px; height: 40px;
+      display: flex; align-items: center; justify-content: center;
+      border-radius: 6px;
+      cursor: pointer;
+      color: var(--text-dim);
+      transition: background 0.15s, color 0.15s;
+      border-left: 3px solid transparent;
+      position: relative;
+      text-decoration: none;
+    }
+    .nav-item:hover { background: var(--panel-hover); color: var(--text); }
+    .nav-item.active { color: var(--blue); border-left-color: var(--blue); background: rgba(41,98,255,0.08); }
+    .nav-item svg { width: 20px; height: 20px; }
+    .nav-tooltip {
+      display: none;
+      position: absolute;
+      left: 48px;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 4px 8px;
+      font-size: 11px;
+      white-space: nowrap;
+      z-index: 100;
+      color: var(--text);
+    }
+    .nav-item:hover .nav-tooltip { display: block; }
 
-.dv-table-wrap{flex:1;overflow:auto}
-.dv-data-table{width:100%;border-collapse:collapse;table-layout:fixed;font-size:12px}
-.dv-data-table thead{position:sticky;top:0;z-index:2}
-.dv-data-table th{background:var(--panel);color:var(--text-dim);font-weight:600;text-align:left;padding:6px 10px;border-bottom:1px solid var(--border);cursor:pointer;user-select:none;white-space:nowrap}
-.dv-data-table th:hover{color:var(--text)}
-.dv-data-table th .sort-arrow{font-size:10px;margin-left:3px;color:var(--text-faint)}
-.dv-data-table th .sort-arrow.active{color:var(--blue)}
-.dv-data-table td{padding:5px 10px;border-bottom:1px solid rgba(42,46,57,.4);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.dv-data-table tbody tr:hover td{background:rgba(255,255,255,.02)}
-.dv-data-table .num{font-family:'SF Mono','Fira Code','Consolas',monospace;text-align:right}
-.dv-data-table .up{color:var(--green)}
-.dv-data-table .down{color:var(--red)}
-.dv-data-table .dim{color:var(--text-dim)}
-.dv-data-table .warn{color:var(--orange)}
-.dv-data-table td input[type="checkbox"],.dv-data-table th input[type="checkbox"]{cursor:pointer;accent-color:var(--blue);width:14px;height:14px}
-.empty-msg{padding:40px;text-align:center;color:var(--text-faint);font-size:13px}
+    #main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
 
-.dv-pagination{display:flex;align-items:center;justify-content:space-between;padding:6px 12px;background:var(--panel);border-top:1px solid var(--border);font-size:12px;color:var(--text-dim);flex-shrink:0;gap:12px}
-.dv-pagination .pg-controls{display:flex;align-items:center;gap:6px}
-.pg-btn{background:var(--input-bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:3px 10px;font-size:12px;cursor:pointer}
-.pg-btn:hover{border-color:var(--blue)}
-.pg-btn:disabled{opacity:.35;cursor:default;border-color:var(--border)}
-.pg-select{background:var(--input-bg);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:3px 6px;font-size:12px}
+    #main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
 
-#toast-container{position:fixed;bottom:16px;right:16px;display:flex;flex-direction:column-reverse;gap:8px;z-index:99999;pointer-events:none}
-.toast{background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:9px 16px;font-size:12px;color:var(--text);opacity:0;transform:translateX(30px);transition:opacity .25s,transform .25s;pointer-events:auto;max-width:400px;word-break:break-word}
-.toast.show{opacity:1;transform:translateX(0)}
-.toast.toast-success{border-color:var(--green);color:var(--green)}
-.toast.toast-error{border-color:var(--red);color:var(--red)}
-.toast.toast-info{border-color:var(--blue);color:var(--text)}
-.toast.toast-warn{border-color:var(--orange);color:var(--orange)}
+    /* ── Content Area ──────────────────────────────────────────────────────── */
+    #content-area {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
 
-::-webkit-scrollbar{width:8px;height:8px}
-::-webkit-scrollbar-track{background:transparent}
-::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
-::-webkit-scrollbar-thumb:hover{background:var(--text-faint)}
+    #tab-bar {
+      display: flex;
+      gap: 0;
+      background: var(--panel);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    .dv-tab {
+      padding: 8px 18px;
+      font-size: 13px;
+      cursor: pointer;
+      color: var(--text-dim);
+      border-bottom: 2px solid transparent;
+      transition: color 0.15s, border-color 0.15s;
+      white-space: nowrap;
+      user-select: none;
+    }
+    .dv-tab:hover { color: var(--text); }
+    .dv-tab.active { color: var(--blue); border-bottom-color: var(--blue); }
 
-/* ── DataStatus calendar ──────────────────────────────────────────────────── */
-.status-top{display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding:10px 16px;background:var(--panel);border-bottom:1px solid var(--border);flex-shrink:0}
-.status-stat{background:var(--panel2);border:1px solid var(--border);border-radius:6px;padding:8px 14px;text-align:center;min-width:100px}
+    .dv-pane {
+      display: none;
+      flex: 1;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .dv-pane.active { display: flex; }
+
+    .dv-toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      background: var(--panel);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    .dv-toolbar label {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 12px;
+      color: var(--text-dim);
+      white-space: nowrap;
+    }
+    .dv-toolbar select,
+    .dv-toolbar input[type="datetime-local"],
+    .dv-toolbar input[type="number"] {
+      background: var(--input-bg);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 4px 8px;
+      font-size: 12px;
+      font-family: inherit;
+      outline: none;
+      height: 28px;
+    }
+    .dv-toolbar select:focus,
+    .dv-toolbar input:focus {
+      border-color: var(--blue);
+    }
+    .dv-toolbar input[type="datetime-local"]::-webkit-calendar-picker-indicator {
+      filter: invert(0.7);
+    }
+
+    .dv-btn {
+      background: var(--input-bg);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 4px 12px;
+      font-size: 12px;
+      cursor: pointer;
+      height: 28px;
+      white-space: nowrap;
+      transition: border-color 0.15s, background 0.15s;
+    }
+    .dv-btn:hover {
+      border-color: var(--blue);
+      background: rgba(41,98,255,0.12);
+    }
+    .dv-btn.primary {
+      background: var(--blue);
+      color: #fff;
+      border-color: var(--blue);
+    }
+    .dv-btn.primary:hover { background: #1b4fd4; }
+    .dv-btn.success {
+      background: var(--green-bg);
+      color: var(--green);
+      border-color: var(--green);
+    }
+    .dv-btn.success:hover { background: #0f3533; }
+    .dv-btn.danger {
+      border-color: var(--red);
+      color: var(--red);
+    }
+    .dv-btn.danger:hover { background: var(--red-bg); }
+    .dv-btn:disabled {
+      opacity: 0.4;
+      cursor: default;
+      pointer-events: none;
+    }
+
+    .dv-summary {
+      display: none;
+      padding: 6px 12px;
+      font-size: 12px;
+      background: rgba(41,98,255,0.06);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+      color: var(--text);
+    }
+
+    .dv-table-wrap {
+      flex: 1;
+      overflow: auto;
+    }
+    .dv-data-table {
+      width: 100%;
+      border-collapse: collapse;
+      table-layout: fixed;
+      font-size: 12px;
+    }
+    .dv-data-table thead {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+    }
+    .dv-data-table th {
+      background: var(--panel);
+      color: var(--text-dim);
+      font-weight: 600;
+      text-align: left;
+      padding: 6px 10px;
+      border-bottom: 1px solid var(--border);
+      cursor: pointer;
+      user-select: none;
+      white-space: nowrap;
+    }
+    .dv-data-table th:hover { color: var(--text); }
+    .dv-data-table th .sort-arrow {
+      font-size: 10px;
+      margin-left: 3px;
+      color: var(--text-faint);
+    }
+    .dv-data-table th .sort-arrow.active { color: var(--blue); }
+    .dv-data-table td {
+      padding: 5px 10px;
+      border-bottom: 1px solid rgba(42,46,57,0.4);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .dv-data-table tbody tr:hover td {
+      background: rgba(255,255,255,0.02);
+    }
+    .dv-data-table .num {
+      font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+      text-align: right;
+    }
+    .dv-data-table .up { color: var(--green); }
+    .dv-data-table .down { color: var(--red); }
+    .dv-data-table .dim { color: var(--text-dim); }
+    .dv-data-table .warn { color: var(--orange); }
+    .dv-data-table td input[type="checkbox"],
+    .dv-data-table th input[type="checkbox"] {
+      cursor: pointer;
+      accent-color: var(--blue);
+      width: 14px;
+      height: 14px;
+    }
+    .empty-msg {
+      padding: 40px;
+      text-align: center;
+      color: var(--text-faint);
+      font-size: 13px;
+    }
+
+    .dv-pagination {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 12px;
+      background: var(--panel);
+      border-top: 1px solid var(--border);
+      font-size: 12px;
+      color: var(--text-dim);
+      flex-shrink: 0;
+      gap: 12px;
+    }
+    .dv-pagination .pg-controls {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .pg-btn {
+      background: var(--input-bg);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 3px 10px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .pg-btn:hover { border-color: var(--blue); }
+    .pg-btn:disabled {
+      opacity: 0.35;
+      cursor: default;
+      border-color: var(--border);
+    }
+    .pg-select {
+      background: var(--input-bg);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 3px 6px;
+      font-size: 12px;
+    }
+
+    #toast-container {
+      position: fixed;
+      bottom: 16px;
+      right: 16px;
+      display: flex;
+      flex-direction: column-reverse;
+      gap: 8px;
+      z-index: 99999;
+      pointer-events: none;
+    }
+    .toast {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 9px 16px;
+      font-size: 12px;
+      color: var(--text);
+      opacity: 0;
+      transform: translateX(30px);
+      transition: opacity 0.25s, transform 0.25s;
+      pointer-events: auto;
+      max-width: 400px;
+      word-break: break-word;
+    }
+    .toast.show {
+      opacity: 1;
+      transform: translateX(0);
+    }
+    .toast.toast-success {
+      border-color: var(--green);
+      color: var(--green);
+    }
+    .toast.toast-error {
+      border-color: var(--red);
+      color: var(--red);
+    }
+    .toast.toast-info {
+      border-color: var(--blue);
+      color: var(--text);
+    }
+    .toast.toast-warn {
+      border-color: var(--orange);
+      color: var(--orange);
+    }
+
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb {
+      background: var(--border);
+      border-radius: 4px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: var(--text-faint);
+    }
+
+    /* ── DataStatus calendar ──────────────────────────────────────────────────── */
+    .status-top {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 12px;
+      padding: 10px 16px;
+      background: var(--panel);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    .status-stat {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 8px 14px;
+      text-align: center;
+      min-width: 100px;
+    }
 .status-stat .stat-val{font-size:18px;font-weight:700;color:var(--text)}
 .status-stat .stat-lbl{font-size:11px;color:var(--text-dim);margin-top:2px}
 .status-content{flex:1;overflow:auto;padding:16px}
@@ -133,33 +467,39 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;f
 .batch-progress.visible{display:block}
 .progress-bar-wrap{height:6px;background:var(--border);border-radius:3px;overflow:hidden;margin-bottom:6px}
 .progress-bar-fill{height:100%;background:var(--blue);border-radius:3px;transition:width .3s;width:0%}
-.batch-status-text{font-size:11px;color:var(--text-dim)}
 </style>
 </head>
 <body>
 
-<nav id="nav-sidebar">
-  <a class="nav-btn" href="/" title="Trade">
-    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18"/><path d="M7 16l4-8 4 4 4-8"/></svg>
-  </a>
-  <a class="nav-btn active" href="/datavalid" title="Data Management">
-    <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
-  </a>
-</nav>
+<div id="topbar">
+  <div class="logo">TRADE<span>DEV</span></div>
+  <div class="topbar-label">Data Management</div>
+</div>
 
-<div id="main-col">
-  <div id="topbar">
-    <div class="logo">TRADE<span>DEV</span></div>
-    <div class="topbar-label">Data Management</div>
-  </div>
-  <div id="content-area">
-    <div id="tab-bar">
-      <div class="dv-tab active" data-pane="query">&#x1F4CB; DataQuery</div>
-      <div class="dv-tab" data-pane="status">&#x1F4CA; DataStatus</div>
-      <div class="dv-tab" data-pane="validate">&#x2705; DataValidate</div>
-    </div>
+<div id="app-wrapper">
+  <nav id="nav-sidebar">
+    <a class="nav-item" href="/" title="Trade">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18"/><path d="M7 16l4-8 4 4 4-8"/></svg>
+      <span class="nav-tooltip">Trade</span>
+    </a>
+    <a class="nav-item active" href="/datavalid" title="Data Management">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
+      <span class="nav-tooltip">Data Management</span>
+    </a>
+    <a class="nav-item" href="/trademgmt" title="Trade Management">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
+      <span class="nav-tooltip">Trade Management</span>
+    </a>
+  </nav>
 
-    <!-- ═══ DataQuery ══════════════════════════════════════════════════════ -->
+  <div id="main">
+    <div id="content-area">
+      <div id="tab-bar">
+        <div class="dv-tab active" data-pane="query">&#x1F4CB; DataQuery</div>
+        <div class="dv-tab" data-pane="status">&#x1F4CA; DataStatus</div>
+        <div class="dv-tab" data-pane="validate">&#x2705; DataValidate</div>
+        <div class="dv-tab" data-pane="issues" id="tab-issues">&#x26A0; DataIssues</div>
+      </div>
     <div class="dv-pane active" id="pane-query">
       <div class="dv-toolbar">
         <label>DB Table
@@ -328,8 +668,42 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;f
       </div>
     </div>
 
+    <!-- ═══ DataIssues ════════════════════════════════════════════════════ -->
+    <div class="dv-pane" id="pane-issues">
+      <div class="dv-toolbar">
+        <label>Symbol
+          <select id="is-symbol">
+            <option value="">All</option>
+            <option value="MES">MES</option>
+            <option value="MNQ">MNQ</option>
+            <option value="NK225MC">NK225MC</option>
+            <option value="MGC">MGC</option>
+          </select>
+        </label>
+        <label>Timeframe
+          <select id="is-timeframe">
+            <option value="">All</option>
+            <option value="5min">5min</option>
+            <option value="1D">1D</option>
+          </select>
+        </label>
+        <button class="dv-btn primary" onclick="loadIssues()">&#x1F504; Refresh</button>
+        <button class="dv-btn danger" onclick="fixAllIssues()" title="Start background fix for all dirty ranges">&#x1F527; Fix All (BG)</button>
+        <span id="is-loading" style="display:none;font-size:11px;color:var(--text-dim)">Loading&#x2026;</span>
+      </div>
+      <div class="dv-summary" id="is-summary"></div>
+      <div class="dv-table-wrap">
+        <table class="dv-data-table" id="is-table">
+          <thead id="is-thead"><tr><th colspan="8">Click Refresh to check for data issues</th></tr></thead>
+          <tbody id="is-tbody"><tr><td colspan="8"><div class="empty-msg">Click &#x1F504; Refresh to load</div></td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+  </div>
   </div>
 </div>
+
 <div id="toast-container"></div>
 
 <script>
@@ -1104,6 +1478,109 @@ function runFixOHLCV(){
     showToast('Fixed '+d.fixed+' OHLCV violations',d.fixed>0?'success':'info');
   }).catch(function(e){sum.innerHTML='\u274C '+e.message;showToast('Fix OHLCV failed','error');});
 }
+
+/* ============================================================================
+   TAB 4 — DataIssues
+   ============================================================================ */
+
+function loadIssues(){
+  var sym=document.getElementById('is-symbol').value;
+  var tf=document.getElementById('is-timeframe').value;
+  var p=new URLSearchParams();
+  if(sym) p.set('symbol',sym);
+  if(tf)  p.set('timeframe',tf);
+  document.getElementById('is-loading').style.display='';
+  var sum=document.getElementById('is-summary');
+  sum.style.display='none';
+  fetch('/api/data/issues?'+p.toString())
+    .then(function(r){return r.json();})
+    .then(function(d){
+      document.getElementById('is-loading').style.display='none';
+      _renderIssues(d);
+    })
+    .catch(function(e){
+      document.getElementById('is-loading').style.display='none';
+      showToast('Issues load failed: '+e.message,'error');
+    });
+}
+
+function _renderIssues(d){
+  var sum=document.getElementById('is-summary');
+  var ranges=d.ranges||[];
+  sum.style.display='';
+  // Update tab badge
+  var tabEl=document.getElementById('tab-issues');
+  if(tabEl) tabEl.textContent=ranges.length>0?'\u26A0 DataIssues ('+ranges.length+')':'\u2705 DataIssues';
+
+  if(!ranges.length){
+    sum.innerHTML='<span style="color:var(--green)">&#x2705; All data is clean &#x2014; no outstanding issues</span>';
+    document.getElementById('is-thead').innerHTML='<tr><th colspan="8">No issues found</th></tr>';
+    document.getElementById('is-tbody').innerHTML='<tr><td colspan="8"><div class="empty-msg">&#x2705; All data clean</div></td></tr>';
+    return;
+  }
+
+  sum.innerHTML='<span style="color:var(--orange)">&#x26A0; '+ranges.length+' range(s) with issues</span>'
+    +' &#x2014; Total: <span style="color:var(--red)">'+d.total_issues+' issue(s)</span>';
+
+  document.getElementById('is-thead').innerHTML='<tr>'
+    +'<th style="width:80px">Symbol</th>'
+    +'<th style="width:70px">TF</th>'
+    +'<th style="width:160px">From</th>'
+    +'<th style="width:160px">To</th>'
+    +'<th style="width:75px">Issues</th>'
+    +'<th style="width:65px">Fixed</th>'
+    +'<th style="width:175px">Last Checked</th>'
+    +'<th style="width:110px">Actions</th>'
+    +'</tr>';
+
+  document.getElementById('is-tbody').innerHTML=ranges.map(function(r){
+    var ca=r.checked_at?new Date(r.checked_at).toLocaleString():'\u2014';
+    return '<tr id="issue-row-'+r.id+'">'
+      +'<td><strong>'+(r.symbol||'')+'</strong></td>'
+      +'<td>'+(r.timeframe||'')+'</td>'
+      +'<td>'+tsToLocal(r.from_ts)+'</td>'
+      +'<td>'+tsToLocal(r.to_ts)+'</td>'
+      +'<td class="num warn">'+(r.mismatches||0)+'</td>'
+      +'<td class="num dim">'+(r.fixed||0)+'</td>'
+      +'<td class="dim" style="font-size:11px">'+ca+'</td>'
+      +'<td><button class="dv-btn" style="font-size:11px;padding:2px 8px;height:22px" '
+      +'onclick="_fixIssueRow(\''+r.symbol+'\',\''+r.timeframe+'\','+r.from_ts+','+r.to_ts+',this)">'
+      +'&#x1F527; Fix</button></td>'
+      +'</tr>';
+  }).join('');
+}
+
+function _fixIssueRow(sym,tf,fromTs,toTs,btn){
+  btn.disabled=true;
+  btn.textContent='\u23F3';
+  var body={symbol:sym,timeframe:tf,from_ts:fromTs,to_ts:toTs};
+  fetch('/api/data/fix',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+    .then(function(r){return r.json();})
+    .then(function(d){
+      btn.textContent='\u2705 '+d.fixed_count;
+      showToast('Fixed '+(d.fixed_count||0)+' bars for '+sym+'/'+tf,'success');
+      setTimeout(loadIssues,1200);
+    })
+    .catch(function(e){
+      btn.disabled=false;
+      btn.textContent='\uD83D\uDD27 Fix';
+      showToast('Fix failed: '+e.message,'error');
+    });
+}
+
+function fixAllIssues(){
+  fetch('/api/data/bg_validate?fix=true',{method:'POST'})
+    .then(function(r){return r.json();})
+    .then(function(d){showToast(d.message||'Background fix started \u2014 refresh in a few minutes','info');})
+    .catch(function(e){showToast('Failed: '+e.message,'error');});
+}
+
+// Auto-load issues when the tab is activated
+document.querySelectorAll('.dv-tab').forEach(function(tab){
+  tab.addEventListener('click',function(){
+    if(tab.dataset.pane==='issues') loadIssues();
+  });
+});
 
 // ── Shared actions ────────────────────────────────────────────────────────────
 function runBgValidate(){

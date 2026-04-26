@@ -27,7 +27,12 @@ from ib_data_fetcher import IBDataFetcher, _bar_to_dict
 from google_sheets_sync import GoogleSheetsSync
 from price_action_analyzer import PriceActionAnalyzer
 from order_manager import IBOrderManager
-from trade_log_parser import load_all_trades, parse_csv_content
+from trade_log_parser import (
+    load_all_trades,
+    parse_csv_content,
+    set_match_strategy,
+    MATCH_STRATEGY,
+)
 import strategy_backtest
 import data_manager
 import realtime_builder
@@ -514,6 +519,15 @@ async def lifespan(app: FastAPI):
     # ── Step 1: init DB and load historical bars (fast, ~100ms) ──────────────
     db.init_db()
 
+    # Ingest broker trade logs from data/ into DB (preserves user annotations)
+    try:
+        _trades = load_all_trades()
+        if _trades:
+            n = db.upsert_trade_logs(_trades)
+            logger.info("Ingested %d trade log rows from data/", n)
+    except Exception as exc:
+        logger.warning("Trade log ingestion at startup failed: %s", exc)
+
     # Load ALL symbols (including MES) through the unified per-symbol store
     all_symbols = [MES_SYM] + [cfg["symbol"] for cfg in config.EXTRA_SYMBOLS]
     for _sym_name in all_symbols:
@@ -561,14 +575,19 @@ async def lifespan(app: FastAPI):
 
     # ── Step 6: Background data validation (runs after IB init) ──────────────
     async def _bg_validate_after_init():
-        """Wait for IB init, then run background validation silently."""
+        """Wait for IB init, then run background validation silently.
+
+        Auto-fix is enabled by default so missing/incorrect bars are healed
+        from IB on every startup.  Disable with env BG_VALIDATE_FIX=0.
+        """
         try:
             await _ib_init_task
         except Exception:
             pass  # IB init may fail; still try validation with cached data
         await asyncio.sleep(30)  # Give IB time to stabilize
         f = fetcher if (fetcher._ib_ready and fetcher.ib and fetcher.ib.isConnected()) else None
-        await data_validator.background_validate(fetcher=f)
+        do_fix = os.environ.get("BG_VALIDATE_FIX", "1") != "0"
+        await data_validator.background_validate(fetcher=f, fix=do_fix)
     _bg_validate_task = asyncio.create_task(_bg_validate_after_init())
 
     logger.info("Server ready to accept requests (DB-only mode).")
@@ -652,6 +671,11 @@ async def index():
 @app.get("/datavalid")
 async def datavalid_page():
     return FileResponse(str(static_path / "datavalid.html"))
+
+
+@app.get("/trademgmt")
+async def trademgmt_page():
+    return FileResponse(str(static_path / "trademgmt.html"))
 
 
 # ─── TradingView UDF REST Endpoints ──────────────────────────────────────────
@@ -1454,11 +1478,31 @@ async def api_validated_ranges(
 
 
 @app.post("/api/data/bg_validate")
-async def api_trigger_bg_validate():
-    """Manually trigger the background validation task."""
+async def api_trigger_bg_validate(fix: bool = False):
+    """Manually trigger the background validation task.
+
+    Set fix=true to also auto-correct mismatches/missing bars from IB.
+    """
     f = fetcher if (fetcher._ib_ready and fetcher.ib and fetcher.ib.isConnected()) else None
-    asyncio.create_task(data_validator.background_validate(fetcher=f))
-    return {"success": True, "message": "Background validation started"}
+    asyncio.create_task(data_validator.background_validate(fetcher=f, fix=fix))
+    return {"success": True, "message": "Background validation started", "fix": fix}
+
+
+@app.get("/api/data/issues")
+async def api_data_issues(
+    symbol: Optional[str] = None,
+    timeframe: Optional[str] = None,
+):
+    """Return validated ranges that still have outstanding issues
+    (``mismatches > 0``).  Useful for a topbar warning indicator."""
+    ranges = db.get_validated_ranges(symbol=symbol, timeframe=timeframe)
+    dirty = [r for r in ranges if r.get("mismatches", 0) > 0]
+    return {
+        "count": len(dirty),
+        "total_issues": sum(r["mismatches"] for r in dirty),
+        "ranges": dirty,
+    }
+
 
 
 @app.get("/api/trades")
@@ -1499,7 +1543,7 @@ async def get_trades_from_file(filename: str):
         return JSONResponse(status_code=404, content={"error": "File not found"})
     try:
         text = filepath.read_text(encoding="utf-8-sig", errors="replace")
-        trades = parse_csv_content(text)
+        trades = parse_csv_content(text, source_file=filename)
         return trades
     except Exception as e:
         logger.error("Trade file parse error: %s", e)
@@ -1512,17 +1556,22 @@ async def upload_trades(file: UploadFile):
     try:
         content = await file.read()
         text = content.decode("utf-8-sig", errors="replace")
-        trades = parse_csv_content(text)
+        save_name = file.filename or "trade_log_upload.csv"
+        trades = parse_csv_content(text, source_file=save_name)
         if not trades:
             return {"filename": None, "trades": []}
         # Save to data/ folder with original filename
         data_dir = Path(__file__).parent / "data"
         data_dir.mkdir(parents=True, exist_ok=True)
-        save_name = file.filename or "trade_log_upload.csv"
         save_path = (data_dir / save_name).resolve()
         if not str(save_path).startswith(str(data_dir.resolve())):
             return JSONResponse(status_code=400, content={"error": "Invalid filename"})
         save_path.write_bytes(content)
+        # Persist into trade_logs table (preserving any user annotations)
+        try:
+            db.upsert_trade_logs(trades)
+        except Exception as exc:
+            logger.warning("upsert_trade_logs after upload failed: %s", exc)
         logger.info("Saved trade CSV to %s (%d trades)", save_name, len(trades))
         return {"filename": save_name, "trades": trades}
     except Exception as e:
@@ -1532,7 +1581,7 @@ async def upload_trades(file: UploadFile):
 
 @app.delete("/api/trades/file/{filename}")
 async def delete_trade_file(filename: str):
-    """Delete a trade CSV file from data/ directory."""
+    """Delete a trade CSV file from data/ directory and its DB rows."""
     data_dir = Path(__file__).parent / "data"
     filepath = (data_dir / filename).resolve()
     if not str(filepath).startswith(str(data_dir.resolve())):
@@ -1540,8 +1589,249 @@ async def delete_trade_file(filename: str):
     if not filepath.exists():
         return JSONResponse(status_code=404, content={"error": "File not found"})
     filepath.unlink()
-    logger.info("Deleted trade file: %s", filename)
+    try:
+        removed = db.delete_trade_logs_by_source(filename)
+        logger.info("Deleted trade file: %s (and %d DB rows)", filename, removed)
+    except Exception as exc:
+        logger.warning("delete_trade_logs_by_source failed: %s", exc)
     return {"success": True}
+
+
+# ─── Trade Log Management (DB-backed history with user annotations) ──────────
+
+class TradeLogPatch(BaseModel):
+    trade_type:   Optional[str] = None
+    entry_reason: Optional[str] = None
+    market_cycle: Optional[str] = None
+    sup_res:      Optional[str] = None
+    notes:        Optional[str] = None
+
+
+@app.get("/api/tradelogs")
+async def list_tradelogs(
+    broker:        Optional[str] = None,
+    symbol:        Optional[str] = None,
+    date_from:     Optional[str] = None,
+    date_to:       Optional[str] = None,
+    trade_type:    Optional[str] = None,
+    entry_reason:  Optional[str] = None,
+    market_cycle:  Optional[str] = None,
+    sup_res:       Optional[str] = None,
+    source_file:   Optional[str] = None,
+    limit:         Optional[int] = None,
+):
+    """List trade_logs filtered by any combination of fields."""
+    try:
+        rows = db.list_trade_logs(
+            broker=broker, symbol=symbol,
+            date_from=date_from, date_to=date_to,
+            trade_type=trade_type, entry_reason=entry_reason,
+            market_cycle=market_cycle, sup_res=sup_res,
+            source_file=source_file, limit=limit,
+        )
+        return rows
+    except Exception as e:
+        logger.error("list_tradelogs error: %s", e)
+        return []
+
+
+@app.patch("/api/tradelogs/{trade_id}")
+async def patch_tradelog(trade_id: int, patch: TradeLogPatch):
+    """Update user-input fields on a trade log row."""
+    fields = {k: v for k, v in patch.model_dump().items() if v is not None}
+    if not fields:
+        return JSONResponse(status_code=400, content={"error": "No fields"})
+    ok = db.update_trade_log(trade_id, fields)
+    if not ok:
+        return JSONResponse(status_code=404, content={"error": "Not found"})
+    return {"success": True}
+
+
+@app.delete("/api/tradelogs/{trade_id}")
+async def delete_tradelog(trade_id: int):
+    ok = db.delete_trade_log(trade_id)
+    if not ok:
+        return JSONResponse(status_code=404, content={"error": "Not found"})
+    return {"success": True}
+
+
+@app.get("/api/tradelogs/distinct/{field}")
+async def tradelog_distinct(field: str):
+    """Return distinct values for a filterable column (build dropdowns)."""
+    return db.trade_log_distinct(field)
+
+
+@app.get("/api/tradelogs/stats")
+async def tradelog_stats(
+    broker:        Optional[str] = None,
+    symbol:        Optional[str] = None,
+    date_from:     Optional[str] = None,
+    date_to:       Optional[str] = None,
+    trade_type:    Optional[str] = None,
+    entry_reason:  Optional[str] = None,
+    market_cycle:  Optional[str] = None,
+    sup_res:       Optional[str] = None,
+):
+    """Return aggregate statistics across the filtered trade set.
+
+    Includes win-rate, profit factor, R:R, P&L curve, daily P&L, trade
+    duration & win-rate buckets — matching the analytics dashboard layout.
+    """
+    rows = db.list_trade_logs(
+        broker=broker, symbol=symbol,
+        date_from=date_from, date_to=date_to,
+        trade_type=trade_type, entry_reason=entry_reason,
+        market_cycle=market_cycle, sup_res=sup_res,
+    )
+    return _compute_tradelog_stats(rows)
+
+
+@app.post("/api/tradelogs/match_strategy")
+async def set_tradelog_match_strategy(strategy: str):
+    """Switch matching strategy at runtime (FILO/FIFO) and re-ingest."""
+    s = (strategy or "").upper()
+    if s not in ("FILO", "FIFO"):
+        return JSONResponse(status_code=400, content={"error": "Invalid strategy"})
+    set_match_strategy(s)
+    trades = load_all_trades()
+    db.upsert_trade_logs(trades)
+    return {"success": True, "strategy": s, "count": len(trades)}
+
+
+@app.get("/api/tradelogs/match_strategy")
+async def get_tradelog_match_strategy():
+    from trade_log_parser import MATCH_STRATEGY as _ms
+    return {"strategy": _ms}
+
+
+def _compute_tradelog_stats(rows: List[dict]) -> dict:
+    """Compute analytics dashboard metrics from a list of trade_logs rows."""
+    closed = [r for r in rows if r.get("pnl") is not None and r.get("exit_time")]
+    total = len(closed)
+    if total == 0:
+        return {
+            "total": 0, "total_pnl": 0,
+            "wins": 0, "losses": 0, "win_rate": 0,
+            "profit_factor": 0, "avg_win": 0, "avg_loss": 0,
+            "rr": 0, "best_trade": None, "worst_trade": None,
+            "long_count": 0, "short_count": 0,
+            "long_pct": 0, "short_pct": 0,
+            "winning_days": 0, "losing_days": 0, "breakeven_days": 0,
+            "total_days": 0, "day_win_pct": 0,
+            "daily_pnl": [], "cumulative_pnl": [],
+            "duration_buckets": [], "winrate_buckets": [],
+            "best_day_pct": 0,
+        }
+    wins   = [r for r in closed if r["pnl"] >= 0]
+    losses = [r for r in closed if r["pnl"] < 0]
+    total_win  = sum(r["pnl"] for r in wins)
+    total_loss = -sum(r["pnl"] for r in losses)   # positive number
+    total_pnl  = sum(r["pnl"] for r in closed)
+    avg_win    = total_win / len(wins)   if wins   else 0
+    avg_loss   = total_loss / len(losses) if losses else 0
+    rr         = (avg_win / avg_loss) if avg_loss > 0 else 0
+    pf         = (total_win / total_loss) if total_loss > 0 else 0
+    win_rate   = len(wins) / total * 100
+
+    best  = max(closed, key=lambda r: r["pnl"])
+    worst = min(closed, key=lambda r: r["pnl"])
+
+    # Daily P&L (group by date)
+    daily: dict = {}
+    for r in closed:
+        d = r.get("date") or ""
+        daily[d] = daily.get(d, 0) + r["pnl"]
+    daily_sorted = sorted(daily.items())
+    daily_pnl = [{"date": d, "pnl": round(v, 2)} for d, v in daily_sorted]
+    cum = 0
+    cumulative_pnl = []
+    for d, v in daily_sorted:
+        cum += v
+        cumulative_pnl.append({"date": d, "pnl": round(cum, 2)})
+
+    best_day_pct = 0
+    if total_pnl > 0:
+        best_day = max((v for _, v in daily_sorted if v > 0), default=0)
+        best_day_pct = round((best_day / total_pnl) * 100, 2) if best_day else 0
+
+    # Day win % — percent of trading days that closed positive
+    winning_days = sum(1 for _, v in daily_sorted if v > 0)
+    losing_days  = sum(1 for _, v in daily_sorted if v < 0)
+    breakeven_days = sum(1 for _, v in daily_sorted if v == 0)
+    total_days   = len(daily_sorted)
+    day_win_pct  = round(winning_days / total_days * 100, 2) if total_days else 0
+
+    # Account balance curve (cumulative P&L over time, for area chart)
+    # Same as cumulative_pnl but kept as a separate alias for clarity.
+
+    # Duration buckets (matches the dashboard image)
+    bucket_defs = [
+        ("Under 15 sec",   0,   15),
+        ("15-45 sec",      15,  45),
+        ("45 sec - 1 min", 45,  60),
+        ("1 min - 2 min",  60,  120),
+        ("2 min - 5 min",  120, 300),
+        ("5 min - 10 min", 300, 600),
+        ("10 min - 30 min",600, 1800),
+        ("30 min - 1 hour",1800, 3600),
+        ("1 hour - 2 hours",3600, 7200),
+        ("2 hours - 4 hours",7200,14400),
+        ("4 hours and up", 14400, 10**9),
+    ]
+    durations = []
+    for r in closed:
+        if r.get("entry_time") and r.get("exit_time"):
+            durations.append((r["exit_time"] - r["entry_time"], r["pnl"]))
+    duration_buckets = []
+    winrate_buckets  = []
+    for label, lo, hi in bucket_defs:
+        in_b = [d for d in durations if lo <= d[0] < hi]
+        cnt  = len(in_b)
+        wins_b = sum(1 for d in in_b if d[1] >= 0)
+        wr   = round((wins_b / cnt) * 100, 2) if cnt else 0
+        duration_buckets.append({"label": label, "count": cnt})
+        winrate_buckets.append({"label": label, "win_rate": wr})
+
+    long_count  = sum(1 for r in closed if r["direction"] == "long")
+    short_count = sum(1 for r in closed if r["direction"] == "short")
+
+    return {
+        "total":         total,
+        "total_pnl":     round(total_pnl, 2),
+        "wins":          len(wins),
+        "losses":        len(losses),
+        "win_rate":      round(win_rate, 2),
+        "profit_factor": round(pf, 2),
+        "avg_win":       round(avg_win, 2),
+        "avg_loss":      round(avg_loss, 2),
+        "rr":            round(rr, 2),
+        "best_trade":    {"pnl": round(best["pnl"], 2),  "symbol": best.get("symbol"),
+                          "direction": best.get("direction"),
+                          "entry_time": best.get("entry_time"),
+                          "exit_time":  best.get("exit_time"),
+                          "entry_price": best.get("entry_price"),
+                          "exit_price":  best.get("exit_price")},
+        "worst_trade":   {"pnl": round(worst["pnl"], 2), "symbol": worst.get("symbol"),
+                          "direction": worst.get("direction"),
+                          "entry_time": worst.get("entry_time"),
+                          "exit_time":  worst.get("exit_time"),
+                          "entry_price": worst.get("entry_price"),
+                          "exit_price":  worst.get("exit_price")},
+        "long_count":     long_count,
+        "short_count":    short_count,
+        "long_pct":       round(long_count / total * 100, 2),
+        "short_pct":      round(short_count / total * 100, 2),
+        "best_day_pct":   best_day_pct,
+        "winning_days":   winning_days,
+        "losing_days":    losing_days,
+        "breakeven_days": breakeven_days,
+        "total_days":     total_days,
+        "day_win_pct":    day_win_pct,
+        "daily_pnl":      daily_pnl,
+        "cumulative_pnl": cumulative_pnl,
+        "duration_buckets": duration_buckets,
+        "winrate_buckets":  winrate_buckets,
+    }
 
 
 # ─── Order Endpoints ──────────────────────────────────────────────────────────

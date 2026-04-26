@@ -296,6 +296,47 @@ def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_vr_sym_tf "
             "ON validated_ranges (symbol, timeframe)"
         )
+        # ── Trade logs — parsed broker trade history with user annotations ─
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS trade_logs (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                trade_key    TEXT    NOT NULL UNIQUE,
+                date         TEXT    NOT NULL DEFAULT '',
+                broker       TEXT    NOT NULL,
+                symbol       TEXT    NOT NULL,
+                contract     TEXT    NOT NULL DEFAULT '',
+                direction    TEXT    NOT NULL,
+                qty          INTEGER NOT NULL DEFAULT 1,
+                entry_time   INTEGER NOT NULL,
+                exit_time    INTEGER,
+                entry_price  REAL,
+                exit_price   REAL,
+                bars         INTEGER NOT NULL DEFAULT 0,
+                pnl          REAL,
+                points       REAL,
+                currency     TEXT    NOT NULL DEFAULT 'USD',
+                source_file  TEXT    NOT NULL DEFAULT '',
+                trade_type   TEXT    NOT NULL DEFAULT '',
+                entry_reason TEXT    NOT NULL DEFAULT '',
+                market_cycle TEXT    NOT NULL DEFAULT '',
+                sup_res      TEXT    NOT NULL DEFAULT '',
+                notes        TEXT    NOT NULL DEFAULT '',
+                created_at   TEXT    NOT NULL,
+                updated_at   TEXT    NOT NULL
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tl_date "
+            "ON trade_logs (date)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tl_broker_sym "
+            "ON trade_logs (broker, symbol)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tl_entry_time "
+            "ON trade_logs (entry_time)"
+        )
     logger.info("Database ready: %s", _DB_PATH)
 
 
@@ -558,13 +599,16 @@ def get_merged_validated_ranges(
     symbol: str,
     timeframe: str,
 ) -> List[dict]:
-    """Return merged (non-overlapping) validated ranges for a symbol/timeframe.
-    Adjacent and overlapping ranges are merged into continuous spans.
-    Returns [{from_ts, to_ts}] sorted ascending."""
+    """Return merged (non-overlapping) **clean** validated ranges for a
+    symbol/timeframe.  Only rows with ``mismatches=0`` are considered clean —
+    ranges with outstanding issues are intentionally excluded so background
+    validation will re-check them.  Adjacent and overlapping ranges are merged
+    into continuous spans.  Returns [{from_ts, to_ts}] sorted ascending."""
     with _conn() as conn:
         rows = conn.execute(
             "SELECT from_ts, to_ts FROM validated_ranges "
-            "WHERE symbol=? AND timeframe=? ORDER BY from_ts",
+            "WHERE symbol=? AND timeframe=? AND mismatches=0 "
+            "ORDER BY from_ts",
             (symbol, timeframe),
         ).fetchall()
     if not rows:
@@ -1209,3 +1253,144 @@ def get_trades_for_backtest(backtest_id: str) -> List[dict]:
             (backtest_id,),
         ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ─── Trade Logs (broker history) ────────────────────────────────────────────
+
+# Fields the user is allowed to edit via the UI.
+TRADE_LOG_USER_FIELDS = ("trade_type", "entry_reason", "market_cycle",
+                         "sup_res", "notes")
+
+
+def upsert_trade_logs(trades: List[dict]) -> int:
+    """Insert parsed trades into trade_logs, preserving existing user
+    annotations.  Matches existing rows by `trade_key`.
+    Returns count of rows touched.
+    """
+    if not trades:
+        return 0
+    from datetime import datetime as _dt
+    now_iso = _dt.utcnow().isoformat()
+    count = 0
+    with _conn() as conn:
+        for t in trades:
+            key = t.get("trade_key")
+            if not key or not t.get("entry_time"):
+                continue
+            existing = conn.execute(
+                "SELECT id FROM trade_logs WHERE trade_key=?", (key,)
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    "UPDATE trade_logs SET "
+                    "  date=?, broker=?, symbol=?, contract=?, direction=?, qty=?,"
+                    "  entry_time=?, exit_time=?, entry_price=?, exit_price=?,"
+                    "  bars=?, pnl=?, points=?, currency=?, source_file=?, updated_at=? "
+                    "WHERE trade_key=?",
+                    (t.get("date", ""), t["broker"], t["symbol"],
+                     t.get("contract", ""), t["direction"], t["qty"],
+                     t["entry_time"], t.get("exit_time"),
+                     t.get("entry_price"), t.get("exit_price"),
+                     t.get("bars", 0), t.get("pnl"), t.get("points"),
+                     t.get("currency", "USD"), t.get("source_file", ""),
+                     now_iso, key),
+                )
+            else:
+                conn.execute(
+                    "INSERT INTO trade_logs "
+                    "(trade_key, date, broker, symbol, contract, direction, qty,"
+                    " entry_time, exit_time, entry_price, exit_price, bars, pnl,"
+                    " points, currency, source_file, created_at, updated_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (key, t.get("date", ""), t["broker"], t["symbol"],
+                     t.get("contract", ""), t["direction"], t["qty"],
+                     t["entry_time"], t.get("exit_time"),
+                     t.get("entry_price"), t.get("exit_price"),
+                     t.get("bars", 0), t.get("pnl"), t.get("points"),
+                     t.get("currency", "USD"), t.get("source_file", ""),
+                     now_iso, now_iso),
+                )
+            count += 1
+    return count
+
+
+def list_trade_logs(
+    broker: Optional[str] = None,
+    symbol: Optional[str] = None,
+    date_from: Optional[str] = None,    # YYYY-MM-DD inclusive
+    date_to: Optional[str] = None,
+    trade_type: Optional[str] = None,
+    entry_reason: Optional[str] = None,
+    market_cycle: Optional[str] = None,
+    sup_res: Optional[str] = None,
+    source_file: Optional[str] = None,
+    limit: Optional[int] = None,
+) -> List[dict]:
+    """Return trade_logs rows filtered by any combination of fields."""
+    sql = "SELECT * FROM trade_logs WHERE 1=1"
+    params: list = []
+    if broker:
+        sql += " AND broker=?";          params.append(broker)
+    if symbol:
+        sql += " AND symbol=?";          params.append(symbol)
+    if date_from:
+        sql += " AND date>=?";           params.append(date_from)
+    if date_to:
+        sql += " AND date<=?";           params.append(date_to)
+    if trade_type:
+        sql += " AND trade_type=?";      params.append(trade_type)
+    if entry_reason:
+        sql += " AND entry_reason=?";    params.append(entry_reason)
+    if market_cycle:
+        sql += " AND market_cycle=?";    params.append(market_cycle)
+    if sup_res:
+        sql += " AND sup_res=?";         params.append(sup_res)
+    if source_file:
+        sql += " AND source_file=?";     params.append(source_file)
+    sql += " ORDER BY entry_time DESC"
+    if limit:
+        sql += " LIMIT ?";               params.append(limit)
+    with _conn() as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(sql, params).fetchall()
+    return [dict(r) for r in rows]
+
+
+def update_trade_log(trade_id: int, fields: dict) -> bool:
+    """Patch user-input fields on a trade_log row."""
+    from datetime import datetime as _dt
+    cols = [c for c in TRADE_LOG_USER_FIELDS if c in fields]
+    if not cols:
+        return False
+    set_sql = ", ".join(f"{c}=?" for c in cols) + ", updated_at=?"
+    params = [fields[c] for c in cols] + [_dt.utcnow().isoformat(), trade_id]
+    with _conn() as conn:
+        cur = conn.execute(f"UPDATE trade_logs SET {set_sql} WHERE id=?", params)
+        return cur.rowcount > 0
+
+
+def delete_trade_log(trade_id: int) -> bool:
+    with _conn() as conn:
+        cur = conn.execute("DELETE FROM trade_logs WHERE id=?", (trade_id,))
+        return cur.rowcount > 0
+
+
+def delete_trade_logs_by_source(source_file: str) -> int:
+    """Delete all trade_logs originating from a given source CSV file."""
+    with _conn() as conn:
+        cur = conn.execute("DELETE FROM trade_logs WHERE source_file=?", (source_file,))
+        return cur.rowcount
+
+
+def trade_log_distinct(field: str) -> List[str]:
+    """Return distinct values for a column (used to build filter dropdowns)."""
+    if field not in {"broker", "symbol", "trade_type", "entry_reason",
+                     "market_cycle", "sup_res", "source_file"}:
+        return []
+    with _conn() as conn:
+        rows = conn.execute(
+            f"SELECT DISTINCT {field} FROM trade_logs "
+            f"WHERE {field} IS NOT NULL AND {field}!='' "
+            f"ORDER BY {field}"
+        ).fetchall()
+    return [r[0] for r in rows]

@@ -704,15 +704,18 @@ async def validate_all(
 async def background_validate(
     fetcher: Optional["IBDataFetcher"] = None,
     chunk_seconds: int = 86400,
+    fix: bool = False,
 ) -> None:
     """Background task that silently validates data integrity.
 
     For each symbol/timeframe pair, scans from the most recent stored data
-    backwards to the oldest, skipping ranges already validated (persisted in
-    the ``validated_ranges`` table).
+    backwards to the oldest, skipping ranges already validated **clean**
+    (``mismatches=0`` rows in ``validated_ranges``).  Ranges with outstanding
+    issues are re-checked on every run so problems do not get silently
+    "frozen" once recorded.
 
-    Validated ranges are recorded after each chunk so the task is resumable
-    and never re-checks the same data.
+    When *fix* is True, mismatches and ib-only bars are written back into the
+    DB using IB as source-of-truth.
     """
     logger.info("=== [BG VALIDATE] Starting background validation task ===")
     t0 = time.monotonic()
@@ -765,22 +768,51 @@ async def background_validate(
                     chunk_start = max(uc_from, chunk_end - effective_chunk)
 
                     try:
-                        result = await validate_bars(
-                            sym, tf, chunk_start, chunk_end,
-                            fetcher=fetcher,
+                        if fix:
+                            result = await fix_bars(
+                                sym, tf, chunk_start, chunk_end,
+                                fetcher=fetcher,
+                            )
+                            # Re-validate after the fix to compute residual issues.
+                            result = await validate_bars(
+                                sym, tf, chunk_start, chunk_end,
+                                fetcher=fetcher,
+                            )
+                        else:
+                            result = await validate_bars(
+                                sym, tf, chunk_start, chunk_end,
+                                fetcher=fetcher,
+                            )
+
+                        # Roll all detectable issues into a single counter so a
+                        # range with calendar gaps or one-sided bars is not
+                        # treated as "clean" on subsequent runs.
+                        issue_count = (
+                            result.get("mismatch_count", 0)
+                            + result.get("db_only_count", 0)
+                            + result.get("ib_only_count", 0)
+                            + result.get("ohlcv_violation_count", 0)
+                            + result.get("calendar_missing_count", 0)
                         )
 
                         # Record this chunk as validated
                         db.insert_validated_range(
                             sym, tf, chunk_start, chunk_end,
-                            mismatches=result.get("mismatch_count", 0),
+                            mismatches=issue_count,
                         )
 
-                        if result.get("mismatch_count", 0) > 0:
-                            logger.info(
-                                "[BG VALIDATE] %s/%s chunk [%s→%s]: %d mismatches found",
-                                sym, tf, chunk_start, chunk_end,
-                                result["mismatch_count"],
+                        if issue_count > 0:
+                            logger.warning(
+                                "[BG VALIDATE] %s/%s chunk [%s→%s]: "
+                                "%d issue(s) found "
+                                "(mismatch=%d db_only=%d ib_only=%d "
+                                "ohlcv=%d calendar_missing=%d)",
+                                sym, tf, chunk_start, chunk_end, issue_count,
+                                result.get("mismatch_count", 0),
+                                result.get("db_only_count", 0),
+                                result.get("ib_only_count", 0),
+                                result.get("ohlcv_violation_count", 0),
+                                result.get("calendar_missing_count", 0),
                             )
 
                     except Exception as e:

@@ -369,6 +369,25 @@ function initChart() {
     // Bar Count sub-pane (disabled by default — uncomment to enable)
     // chart.createStudy('S-Bar Count', false, false).catch(() => {});
 
+    // ── Default EMA20 indicator on main pane ───────────────────────────
+    try {
+      const hasEma20 = existingStudies.some(s =>
+        (s.name || '').toLowerCase().includes('moving average') &&
+        s.metaInfo && JSON.stringify(s.metaInfo).includes('20'));
+      if (!hasEma20) {
+        chart.createStudy(
+          'Moving Average Exponential', false, false,
+          { length: 20 },
+          { 'plot.color': '#FFA726', 'plot.linewidth': 2 }
+        ).catch(() => {
+          // Fallback: name-only invocation
+          try { chart.createStudy('Moving Average Exponential', false, false, [20]); } catch {}
+        });
+      }
+    } catch (e) {
+      console.debug('EMA20 default add skipped:', e);
+    }
+
     // Load S/R analysis
     fetch(`/api/analysis?symbol=${_currentSymbol || 'MES'}`)
       .then(r => r.json())
