@@ -28,6 +28,7 @@ class MESDatafeed {
     const allSymbols = [
       { symbol: 'MES',     full_name: 'CME:MES',       description: 'Micro E-mini S&P 500 Futures',   exchange: 'CME',   type: 'futures' },
       { symbol: 'MNQ',     full_name: 'CME:MNQ',       description: 'Micro E-mini Nasdaq-100 Futures', exchange: 'CME',   type: 'futures' },
+      { symbol: 'NK225M',  full_name: 'OSE:NK225M',    description: 'Mini Nikkei 225 Futures',         exchange: 'OSE',   type: 'futures' },
       { symbol: 'NK225MC', full_name: 'OSE:NK225MC',   description: 'Micro Nikkei 225 Futures',        exchange: 'OSE',   type: 'futures' },
       { symbol: 'MGC',     full_name: 'COMEX:MGC',     description: 'Micro Gold Futures',              exchange: 'COMEX', type: 'futures' },
     ];
