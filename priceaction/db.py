@@ -280,6 +280,8 @@ def init_db() -> None:
         # ── Validated ranges — tracks already-checked time ranges ─────────
         # Background validation persists which ranges have been validated so
         # subsequent runs (or API queries) can skip them.
+        # UNIQUE(symbol, timeframe, from_ts, to_ts) lets us upsert the row
+        # on every re-validation instead of appending duplicate history.
         conn.execute("""
             CREATE TABLE IF NOT EXISTS validated_ranges (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -289,13 +291,53 @@ def init_db() -> None:
                 to_ts      INTEGER NOT NULL,
                 checked_at TEXT    NOT NULL,
                 mismatches INTEGER NOT NULL DEFAULT 0,
-                fixed      INTEGER NOT NULL DEFAULT 0
+                fixed      INTEGER NOT NULL DEFAULT 0,
+                UNIQUE(symbol, timeframe, from_ts, to_ts)
             )
         """)
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_vr_sym_tf "
             "ON validated_ranges (symbol, timeframe)"
         )
+        # ── Migrate: pre-existing tables created before the UNIQUE
+        # constraint had appended duplicate rows on every re-validation.
+        # Detect missing UNIQUE index, collapse duplicates (keep the row
+        # with the worst-case state per window so issues stay surfaced),
+        # then create the index.
+        try:
+            has_unique = False
+            for row in conn.execute(
+                "SELECT name, sql FROM sqlite_master WHERE type='index' "
+                "AND tbl_name='validated_ranges'"
+            ).fetchall():
+                if row[1] and "UNIQUE" in row[1].upper() and "from_ts" in row[1]:
+                    has_unique = True
+                    break
+            if not has_unique:
+                conn.execute("""
+                    DELETE FROM validated_ranges
+                    WHERE id NOT IN (
+                        SELECT id FROM (
+                            SELECT id,
+                                   ROW_NUMBER() OVER (
+                                       PARTITION BY symbol, timeframe, from_ts, to_ts
+                                       ORDER BY (mismatches + fixed) DESC, id DESC
+                                   ) AS rn
+                            FROM validated_ranges
+                        )
+                        WHERE rn = 1
+                    )
+                """)
+                conn.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uniq_vr_sym_tf_range "
+                    "ON validated_ranges (symbol, timeframe, from_ts, to_ts)"
+                )
+                logger.info(
+                    "Migrated validated_ranges: deduplicated rows and added "
+                    "UNIQUE(symbol,timeframe,from_ts,to_ts) index"
+                )
+        except sqlite3.Error as e:
+            logger.warning("validated_ranges UNIQUE migration failed: %s", e)
         # ── Trade logs — parsed broker trade history with user annotations ─
         conn.execute("""
             CREATE TABLE IF NOT EXISTS trade_logs (
@@ -553,14 +595,23 @@ def insert_validated_range(
     symbol: str, timeframe: str, from_ts: int, to_ts: int,
     mismatches: int = 0, fixed: int = 0,
 ) -> int:
-    """Record that a time range has been validated. Returns row id."""
+    """Record that a time range has been validated. Returns row id.
+
+    Upserts on (symbol, timeframe, from_ts, to_ts): re-validating an
+    identical window overwrites the previous result instead of appending
+    a duplicate row.
+    """
     from datetime import datetime, timezone as _tz
     checked_at = datetime.now(_tz.utc).isoformat()
     with _conn() as conn:
         cursor = conn.execute(
             "INSERT INTO validated_ranges "
             "(symbol, timeframe, from_ts, to_ts, checked_at, mismatches, fixed) "
-            "VALUES (?,?,?,?,?,?,?)",
+            "VALUES (?,?,?,?,?,?,?) "
+            "ON CONFLICT(symbol, timeframe, from_ts, to_ts) DO UPDATE SET "
+            "checked_at=excluded.checked_at, "
+            "mismatches=excluded.mismatches, "
+            "fixed=excluded.fixed",
             (symbol, timeframe, from_ts, to_ts, checked_at, mismatches, fixed),
         )
         return cursor.lastrowid
@@ -603,7 +654,20 @@ def get_merged_validated_ranges(
     symbol/timeframe.  Only rows with ``mismatches=0`` are considered clean —
     ranges with outstanding issues are intentionally excluded so background
     validation will re-check them.  Adjacent and overlapping ranges are merged
-    into continuous spans.  Returns [{from_ts, to_ts}] sorted ascending."""
+    into continuous spans.  Returns [{from_ts, to_ts}] sorted ascending.
+
+    Two ranges ``[a, b]`` and ``[c, d]`` are considered adjacent when
+    ``c - b <= interval`` (one timeframe slot apart) — this matches how the
+    validator splits chunks at half-open ``[start, excl_end)`` boundaries
+    where the next chunk starts at ``excl_end`` and the previous chunk's
+    inclusive end is ``excl_end - interval``.
+    """
+    # Per-timeframe interval (seconds) for adjacency detection
+    try:
+        from ib_data_fetcher import _key_to_ib
+        _, interval = _key_to_ib(timeframe)
+    except Exception:
+        interval = 1
     with _conn() as conn:
         rows = conn.execute(
             "SELECT from_ts, to_ts FROM validated_ranges "
@@ -617,7 +681,7 @@ def get_merged_validated_ranges(
     merged: list = []
     cur_from, cur_to = rows[0]
     for r_from, r_to in rows[1:]:
-        if r_from <= cur_to + 1:  # Merge if ranges overlap or are consecutive timestamps
+        if r_from <= cur_to + interval:  # overlap or one-slot-apart
             cur_to = max(cur_to, r_to)
         else:
             merged.append({"from_ts": cur_from, "to_ts": cur_to})
