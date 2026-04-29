@@ -474,7 +474,10 @@
 <div id="topbar">
   <div class="logo">TRADE<span>DEV</span></div>
   <div class="topbar-label">Data Management</div>
+  <div style="margin-left:auto;display:flex;align-items:center;gap:8px;" id="tz-mount"></div>
 </div>
+<script src="/static/timezone.js"></script>
+<script>AppTZ.mountSwitcher(document.getElementById('tz-mount'));</script>
 
 <div id="app-wrapper">
   <nav id="nav-sidebar">
@@ -744,7 +747,7 @@ function dateToTs(s,end){
   var d=s.includes('T')?new Date(s+':00'):new Date(s+(end?'T23:59:59':'T00:00:00'));
   return Math.floor(d.getTime()/1000);
 }
-function tsToLocal(ts){return new Date(ts*1000).toLocaleString();}
+function tsToLocal(ts){return (window.AppTZ?AppTZ.formatTs(ts,{withSeconds:true}):new Date(ts*1000).toLocaleString());}
 function fmtNum(v){if(v==null)return '\u2014';var n=Number(v);return isNaN(n)?String(v):n.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:6});}
 function fmtVol(v){if(v==null)return '\u2014';return Number(v).toLocaleString();}
 var _MC={1:'F',2:'G',3:'H',4:'J',5:'K',6:'M',7:'N',8:'Q',9:'U',10:'V',11:'X',12:'Z'};
@@ -936,7 +939,15 @@ function _updQPg(total,tp){
 
 function queryValidatedRanges(){
   _setQL(true);
-  fetch('/api/data/validated_ranges')
+  var sym=document.getElementById('q-symbol').value;
+  var tf=document.getElementById('q-timeframe').value;
+  var ft=dateToTs(document.getElementById('q-from').value,false);
+  var tt=dateToTs(document.getElementById('q-to').value,true);
+  var p=new URLSearchParams();
+  if(sym) p.set('symbol',sym);
+  if(tf)  p.set('timeframe',tf);
+  var qs=p.toString();
+  fetch('/api/data/validated_ranges'+(qs?('?'+qs):''))
     .then(function(r){return r.json();})
     .then(function(d){
       _setQL(false);
@@ -948,6 +959,14 @@ function queryValidatedRanges(){
         +'<th style="width:100px">Mismatches</th><th style="width:80px">Fixed</th>'
         +'</tr>';
       var ranges=d.ranges||[];
+      // Apply client-side date-range filter (server endpoint does not support it)
+      if(ft||tt){
+        ranges=ranges.filter(function(r){
+          if(ft && r.to_ts < ft) return false;
+          if(tt && r.from_ts > tt) return false;
+          return true;
+        });
+      }
       if(!ranges.length){document.getElementById('q-tbody').innerHTML='<tr><td colspan="7"><div class="empty-msg">No validated ranges</div></td></tr>';return;}
       document.getElementById('q-tbody').innerHTML=ranges.map(function(r){
         var dur=((r.to_ts-r.from_ts)/86400).toFixed(1);
@@ -965,7 +984,16 @@ function queryValidatedRanges(){
 
 function queryRealtimeBars(){
   _setQL(true);
-  fetch('/api/data/query?db_table=bars&source=realtime_completed&page='+_qPage+'&page_size='+_qPS)
+  var sym=document.getElementById('q-symbol').value;
+  var tf=document.getElementById('q-timeframe').value;
+  var ft=dateToTs(document.getElementById('q-from').value,false);
+  var tt=dateToTs(document.getElementById('q-to').value,true);
+  var p=new URLSearchParams({db_table:'bars',source:'realtime_completed',page:_qPage,page_size:_qPS});
+  if(sym) p.set('symbol',sym);
+  if(tf)  p.set('timeframe',tf);
+  if(ft)  p.set('from_ts',ft);
+  if(tt)  p.set('to_ts',tt);
+  fetch('/api/data/query?'+p.toString())
     .then(function(r){return r.json();})
     .then(function(d){
       _setQL(false);_qData=d.bars||[];
@@ -1581,6 +1609,20 @@ document.querySelectorAll('.dv-tab').forEach(function(tab){
     if(tab.dataset.pane==='issues') loadIssues();
   });
 });
+
+// Re-run the active query when the system timezone changes so that all
+// rendered timestamp columns refresh in the new zone.
+if (window.AppTZ) {
+  AppTZ.onChange(function () {
+    var pane = document.querySelector('.dv-pane.active');
+    var id = pane ? pane.id : '';
+    try {
+      if (id === 'pane-query')   queryData();
+      else if (id === 'pane-status') loadStatusCalendar();
+      else if (id === 'pane-issues') loadIssues();
+    } catch (e) { /* ignore */ }
+  });
+}
 
 // ── Shared actions ────────────────────────────────────────────────────────────
 function runBgValidate(){
