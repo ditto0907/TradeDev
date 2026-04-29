@@ -715,6 +715,16 @@ async def get_symbols(symbol: str = Query("MES")):
             "session_rth": "0930-1600:23456",
             "ib_symbol": "MNQ", "ib_exchange": "CME",
         },
+        "NK225M": {
+            "name": "NK225M", "full_name": "OSE:NK225M",
+            "description": "Mini Nikkei 225 Futures",
+            "exchange": "OSE", "listed_exchange": "OSE",
+            "pricescale": 1, "minmov": 5,
+            "timezone": "Asia/Tokyo",
+            "session_eth": "0845-1545,1700-0600:23456",
+            "session_rth": "0845-1545:23456",
+            "ib_symbol": "N225M", "ib_exchange": "OSE.JPN",
+        },
         "NK225MC": {
             "name": "NK225MC", "full_name": "OSE:NK225MC",
             "description": "Micro Nikkei 225 Futures",
@@ -902,45 +912,46 @@ async def get_history(
     ib_ready = fetcher._ib_ready and fetcher.ib and fetcher.ib.isConnected()
 
     if fetch_ranges and ib_ready:
-        for idx, (f_from, f_to) in enumerate(fetch_ranges):
-            logger.info(
-                "[%s/%s] IB fetch start: range [%s→%s]", sym, key, f_from, f_to,
-            )
-            try:
-                fetched = await fetcher.fetch_range(key, f_from, f_to, symbol=sym)
-                if fetched:
-                    saved = fetcher.persist_bars(sym, key, fetched,
-                                                 source="ib_historical")
-                    logger.info(
-                        "[%s/%s] IB fetch OK: %d bars fetched, %d saved to DB",
-                        sym, key, len(fetched), saved,
-                    )
-                    any_fetched = True
-                    _ib_fetch_cooldown.pop((sym, key), None)
-                    _ib_fetch_cooldown.pop(f"mid_{sym}_{key}_{f_from}", None)
-                    _ib_fetch_cooldown.pop(f"left_{sym}_{key}", None)
-                else:
-                    logger.info(
-                        "[%s/%s] IB returned 0 bars for range [%s→%s]",
-                        sym, key, f_from, f_to,
+        async with fetcher.chart_priority():
+            for idx, (f_from, f_to) in enumerate(fetch_ranges):
+                logger.info(
+                    "[%s/%s] IB fetch start: range [%s→%s]", sym, key, f_from, f_to,
+                )
+                try:
+                    fetched = await fetcher.fetch_range(key, f_from, f_to, symbol=sym)
+                    if fetched:
+                        saved = fetcher.persist_bars(sym, key, fetched,
+                                                     source="ib_historical")
+                        logger.info(
+                            "[%s/%s] IB fetch OK: %d bars fetched, %d saved to DB",
+                            sym, key, len(fetched), saved,
+                        )
+                        any_fetched = True
+                        _ib_fetch_cooldown.pop((sym, key), None)
+                        _ib_fetch_cooldown.pop(f"mid_{sym}_{key}_{f_from}", None)
+                        _ib_fetch_cooldown.pop(f"left_{sym}_{key}", None)
+                    else:
+                        logger.info(
+                            "[%s/%s] IB returned 0 bars for range [%s→%s]",
+                            sym, key, f_from, f_to,
+                        )
+                        if idx == right_gap_index:
+                            _ib_fetch_cooldown[(sym, key)] = now_ts + _IB_COOLDOWN_NO_DATA
+                        if idx == left_gap_index:
+                            _ib_fetch_cooldown[f"left_{sym}_{key}"] = now_ts + _IB_COOLDOWN_NO_DATA
+                            logger.info(
+                                "[%s/%s] Left gap: IB returned no data — cooldown %ds",
+                                sym, key, _IB_COOLDOWN_NO_DATA,
+                            )
+                except Exception as e:
+                    logger.warning(
+                        "[%s/%s] IB fetch failed for range [%s→%s]: %s",
+                        sym, key, f_from, f_to, e,
                     )
                     if idx == right_gap_index:
-                        _ib_fetch_cooldown[(sym, key)] = now_ts + _IB_COOLDOWN_NO_DATA
+                        _ib_fetch_cooldown[(sym, key)] = now_ts + _IB_COOLDOWN_ERROR
                     if idx == left_gap_index:
-                        _ib_fetch_cooldown[f"left_{sym}_{key}"] = now_ts + _IB_COOLDOWN_NO_DATA
-                        logger.info(
-                            "[%s/%s] Left gap: IB returned no data — cooldown %ds",
-                            sym, key, _IB_COOLDOWN_NO_DATA,
-                        )
-            except Exception as e:
-                logger.warning(
-                    "[%s/%s] IB fetch failed for range [%s→%s]: %s",
-                    sym, key, f_from, f_to, e,
-                )
-                if idx == right_gap_index:
-                    _ib_fetch_cooldown[(sym, key)] = now_ts + _IB_COOLDOWN_ERROR
-                if idx == left_gap_index:
-                    _ib_fetch_cooldown[f"left_{sym}_{key}"] = now_ts + _IB_COOLDOWN_ERROR
+                        _ib_fetch_cooldown[f"left_{sym}_{key}"] = now_ts + _IB_COOLDOWN_ERROR
     elif fetch_ranges:
         logger.debug(
             "[%s/%s] Data gaps detected but IB not ready — skipping fetch",
@@ -1077,7 +1088,7 @@ async def get_history(
 @app.get("/api/watchlist_prices")
 async def get_watchlist_prices():
     """Return latest close price and daily change for all watchlist symbols."""
-    symbols = ["MES", "MNQ", "NK225MC", "MGC"]
+    symbols = ["MES", "MNQ", "NK225M", "NK225MC", "MGC"]
     result = {}
     for sym in symbols:
         bars = db.get_bars(sym, "5min")
@@ -1478,14 +1489,33 @@ async def api_validated_ranges(
 
 
 @app.post("/api/data/bg_validate")
-async def api_trigger_bg_validate(fix: bool = False):
+async def api_trigger_bg_validate(
+    fix: bool = False,
+    symbols: Optional[str] = None,
+    timeframes: Optional[str] = None,
+):
     """Manually trigger the background validation task.
 
-    Set fix=true to also auto-correct mismatches/missing bars from IB.
+    Set ``fix=true`` to also auto-correct mismatches/missing bars from IB.
+    Optional comma-separated ``symbols`` / ``timeframes`` narrow the scan
+    (e.g. ``symbols=MGC,NK225MC&timeframes=5min``) so users can target a
+    specific instrument without waiting for the MES backlog to drain.
     """
     f = fetcher if (fetcher._ib_ready and fetcher.ib and fetcher.ib.isConnected()) else None
-    asyncio.create_task(data_validator.background_validate(fetcher=f, fix=fix))
-    return {"success": True, "message": "Background validation started", "fix": fix}
+    sym_list = [s.strip() for s in symbols.split(",") if s.strip()] if symbols else None
+    tf_list  = [t.strip() for t in timeframes.split(",") if t.strip()] if timeframes else None
+    asyncio.create_task(
+        data_validator.background_validate(
+            fetcher=f, fix=fix, symbols=sym_list, timeframes=tf_list,
+        )
+    )
+    return {
+        "success": True,
+        "message": "Background validation started",
+        "fix": fix,
+        "symbols": sym_list,
+        "timeframes": tf_list,
+    }
 
 
 @app.get("/api/data/issues")
