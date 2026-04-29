@@ -30,9 +30,10 @@ MAX_BARS_IN_MEMORY = 5000        # cap per bar size
 # Extra symbols to prefetch on startup (if DB has no data)
 # ib_symbol: IB contract symbol, symbol: our display/DB key
 EXTRA_SYMBOLS = [
-    {"symbol": "MNQ",     "ib_symbol": "MNQ", "exchange": "CME",   "currency": "USD"},
+    {"symbol": "MNQ",     "ib_symbol": "MNQ",    "exchange": "CME",     "currency": "USD"},
+    {"symbol": "NK225M",  "ib_symbol": "N225M",  "exchange": "OSE.JPN", "currency": "JPY"},
     {"symbol": "NK225MC", "ib_symbol": "N225MC", "exchange": "OSE.JPN", "currency": "JPY"},
-    {"symbol": "MGC",     "ib_symbol": "MGC", "exchange": "COMEX", "currency": "USD"},
+    {"symbol": "MGC",     "ib_symbol": "MGC",    "exchange": "COMEX",   "currency": "USD"},
 ]
 
 # ─── Unified Instrument Registry ─────────────────────────────────────────────
@@ -63,17 +64,31 @@ INSTRUMENTS = {
         "rth_end":   (16, 0),
         "rollover_rule": {"type": "nth_business_day", "n": 8},
     },
+    # OSE Nikkei 225 Mini (¥100/pt — main liquidity contract)
+    "NK225M": {
+        "ib_symbol": "N225M",
+        "exchange": "OSE.JPN",
+        "currency": "JPY",
+        "timezone": "Asia/Tokyo",
+        "contract_type": "quarterly",          # quarterly is the liquid cycle
+        "contract_months": [3, 6, 9, 12],       # H M U Z (serial months exist but illiquid)
+        "rth_start": (8, 45),                   # JST RTH window
+        "rth_end":   (15, 45),
+        # OSE: Special Quotation = 2nd Friday; front rolls one bday before SQ.
+        "rollover_rule": {"type": "second_friday", "offset_bdays": -1},
+    },
+    # OSE Nikkei 225 Micro (¥10/pt) — track only the liquid quarterly months.
+    # Serial months are listed but volume is negligible; restricting to
+    # H/M/U/Z mirrors the actual main-contract usage.
     "NK225MC": {
         "ib_symbol": "N225MC",
         "exchange": "OSE.JPN",
         "currency": "JPY",
         "timezone": "Asia/Tokyo",
-        "contract_type": "monthly",            # monthly rollover
-        "contract_months": list(range(1, 13)),  # every month
-        "rth_start": (8, 45),                   # JST RTH window
+        "contract_type": "quarterly",          # was monthly; switched to quarterly main
+        "contract_months": [3, 6, 9, 12],
+        "rth_start": (8, 45),
         "rth_end":   (15, 45),
-        # OSE monthly: Special Quotation is the 2nd Friday; the front
-        # month rolls one business day before SQ.
         "rollover_rule": {"type": "second_friday", "offset_bdays": -1},
     },
     "MGC": {
