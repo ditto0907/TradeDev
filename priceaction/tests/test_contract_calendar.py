@@ -83,11 +83,19 @@ class TestActiveContract(unittest.TestCase):
         # Mid-May belongs to the June contract.
         self.assertEqual(cc.active_contract(_ts(2024, 5, 15), "MGC"), "202406")
 
-    def test_nk225mc_monthly_cycle(self):
-        # Before the 2nd-Friday roll (2024-04-11) we're still on April.
-        self.assertEqual(cc.active_contract(_ts(2024, 4, 10), "NK225MC"), "202404")
-        # On/after the roll, front month is May.
-        self.assertEqual(cc.active_contract(_ts(2024, 4, 11), "NK225MC"), "202405")
+    def test_nk225mc_quarterly_cycle(self):
+        # NK225MC is now configured as quarterly main (H/M/U/Z) — serial
+        # months are listed by OSE but illiquid, so we track only the
+        # quarterly contracts.
+        # Mid-Jan should already point at the March contract.
+        self.assertEqual(cc.active_contract(_ts(2024, 1, 15), "NK225MC"), "202403")
+        # March 2024: 2nd Friday = Mar 8, rollover = Thu Mar 7.
+        # Day before the roll, March is still the front.
+        self.assertEqual(cc.active_contract(_ts(2024, 3, 6), "NK225MC"), "202403")
+        # On/after the March roll, front month jumps to June (next quarter).
+        self.assertEqual(cc.active_contract(_ts(2024, 3, 7), "NK225MC"), "202406")
+        # Mid-April is between rolls — still June.
+        self.assertEqual(cc.active_contract(_ts(2024, 4, 11), "NK225MC"), "202406")
 
     def test_no_day10_heuristic(self):
         # Regression: the old code flipped contracts whenever "day <= 10".
