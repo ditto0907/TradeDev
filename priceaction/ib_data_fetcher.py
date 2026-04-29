@@ -6,6 +6,7 @@ import asyncio
 import logging
 import math
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional
 
@@ -153,6 +154,37 @@ def _next_contract_month(yyyymm: str, symbol: str = "MES") -> str:
     return f"{y}{months[idx + 1]:02d}"
 
 
+# IB stops serving sub-daily history for an expired month roughly 30 days after
+# the contract's last-trade-date.  Beyond that, we must fall back to ContFuture
+# (the continuous contract) to get any intraday bars at all.  Daily (1D) bars
+# remain available much longer, so the cutoff only applies to intraday.
+#
+# We approximate LTD as the 15th of the contract month (close to the typical
+# 3rd-Friday LTD for quarterly equity-index futures) and add a buffer; this
+# catches the case where the front-month has already rolled and IB has stopped
+# serving its intraday tape.
+_INTRADAY_LTD_BUFFER_DAYS = 30
+
+
+def _is_intraday_unavailable_for_month(yyyymm: str, bar_size_key: str,
+                                        symbol: str = "MES") -> bool:
+    """Return True when IB no longer serves intraday history for *yyyymm*.
+
+    Used to skip pointless monthly-Future requests (which would return 0 bars
+    and trigger IB Error 162) and go straight to ContFuture.
+    """
+    if bar_size_key == "1D":
+        return False
+    try:
+        y, m = int(yyyymm[:4]), int(yyyymm[4:])
+        # Approx LTD = 15th of the contract month (close to 3rd-Friday LTD).
+        approx_ltd_ts = int(datetime(y, m, 15, 0, 0, 0,
+                                     tzinfo=timezone.utc).timestamp())
+    except Exception:
+        return False
+    return (int(time.time()) - approx_ltd_ts) > _INTRADAY_LTD_BUFFER_DAYS * 86400
+
+
 # ─── IBDataFetcher ────────────────────────────────────────────────────────────
 
 class IBDataFetcher:
@@ -188,6 +220,54 @@ class IBDataFetcher:
         # Legacy compat: self.bars["5min"] points to _symbol_bars["MES"]["5min"]
         # Initialize with empty list; updated when MES bars are loaded.
         self.bars: Dict[str, List[dict]] = {"5min": []}
+
+        # ── Priority gate: chart on-demand fetches preempt BG validate ──
+        # Chart requests increment ``_chart_inflight``; while > 0 the
+        # ``_bg_resume`` event is cleared so BG validate awaits.  A small
+        # semaphore additionally caps BG concurrency to avoid saturating
+        # the IB historical-data queue.
+        self._chart_inflight: int = 0
+        self._bg_resume = asyncio.Event()
+        self._bg_resume.set()
+        self._bg_sem = asyncio.Semaphore(2)
+        self._chart_lock = asyncio.Lock()
+
+    # ── Priority gate API ────────────────────────────────────────────────
+    @asynccontextmanager
+    async def chart_priority(self):
+        """Mark a chart on-demand IB fetch in flight.
+
+        While inside this context, BG validate awaits ``_bg_resume`` and
+        will not start new IB requests.  Already in-flight BG requests
+        finish naturally; we don't preempt mid-request to keep IB happy.
+        """
+        async with self._chart_lock:
+            self._chart_inflight += 1
+            if self._chart_inflight == 1:
+                self._bg_resume.clear()
+        try:
+            yield
+        finally:
+            async with self._chart_lock:
+                self._chart_inflight -= 1
+                if self._chart_inflight <= 0:
+                    self._chart_inflight = 0
+                    self._bg_resume.set()
+
+    @asynccontextmanager
+    async def bg_gate(self, timeout: float = 30.0):
+        """Wait until no chart fetch is in flight, then acquire BG slot.
+
+        BG validate wraps each `validate_bars`/`fix_bars` call with this
+        gate so heavy backfill never blocks a user-driven chart load.
+        """
+        # Wait for chart-priority to release (with cap so we don't stall forever)
+        try:
+            await asyncio.wait_for(self._bg_resume.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            pass  # proceed anyway after timeout to avoid livelock
+        async with self._bg_sem:
+            yield
 
     def _ensure_symbol_state(self, symbol: str) -> None:
         """Initialize per-symbol state structures if not already present."""
@@ -442,10 +522,21 @@ class IBDataFetcher:
         Fetch a specific historical time range from IB on demand.
         Used by the server when the chart scrolls to an uncached region.
 
-        For MES (and symbols with the same contract cycle), uses month-specific
-        Future contracts with rollover fallback.
-        For all symbols, falls back to ContFuture if month-specific fetch fails.
-        Returns bars filtered to [from_ts, to_ts].
+        Strategy:
+          1. **Recent / current** monthly Future contracts (with rollover
+             neighbours) — precise per-month data, tagged ``source="ib_monthly"``.
+          2. **Expired-for-intraday** months are skipped: IB stops serving
+             sub-daily bars ~30 days after a contract's LTD, so we go straight
+             to ContFuture for those — avoids spamming IB Error 162.
+          3. **ContFuture (continuous contract)** as fallback — single
+             stitched series, tagged ``source="ib_continuous"``; each bar is
+             still labelled with the front-month ``contract_month`` derived
+             from its timestamp, so DB-level per-contract indexing keeps
+             working.
+
+        Returns bars filtered to [from_ts, to_ts], each carrying both
+        ``source`` and ``contract_month`` so the caller / DB can tell where
+        a given bar came from.
         """
         bar_size, interval = _key_to_ib(bar_size_key)
 
@@ -468,7 +559,21 @@ class IBDataFetcher:
         seen = set()
         months_to_try = [m for m in months_to_try if not (m in seen or seen.add(m))]
 
-        for month in months_to_try:
+        # Drop months whose intraday history is no longer served by IB.  For
+        # 1D we keep them all; for intraday we only keep months that are
+        # still within the IB intraday-history window.
+        skipped_expired = [m for m in months_to_try
+                           if _is_intraday_unavailable_for_month(m, bar_size_key, symbol)]
+        active_months   = [m for m in months_to_try
+                           if not _is_intraday_unavailable_for_month(m, bar_size_key, symbol)]
+        if skipped_expired:
+            logger.info(
+                "[%s] Skipping expired monthly contract(s) for %s "
+                "(intraday history exhausted): %s — will use ContFuture",
+                symbol, bar_size_key, ", ".join(skipped_expired),
+            )
+
+        for month in active_months:
             try:
                 contract = await self._get_future_for_month(month, symbol)
             except Exception as e:
@@ -504,10 +609,12 @@ class IBDataFetcher:
             bars.sort(key=lambda b: b["time"])
 
             if bars:
-                # Tag each bar with the contract month used for the fetch
+                # Tag each bar with the contract month and a source marker so
+                # the DB can distinguish per-month vs continuous data.
                 for b in bars:
                     b["contract_month"] = month
-                logger.info("[%s] On-demand fetch: got %d %s bars from Future %s",
+                    b["source"] = "ib_monthly"
+                logger.info("[%s] On-demand fetch: got %d %s bars from Future %s (source=ib_monthly)",
                             symbol, len(bars), bar_size_key, contract.localSymbol)
                 return bars
 
@@ -544,10 +651,14 @@ class IBDataFetcher:
                         if b["time"] >= from_ts and b["time"] <= to_ts]
                 bars.sort(key=lambda b: b["time"])
                 if bars:
-                    # Tag each bar with the contract month derived from its timestamp
+                    # Tag each bar with the contract month derived from its
+                    # timestamp (front-month at that moment) and mark the
+                    # source so consumers know it came from the continuous
+                    # contract rather than a specific monthly Future.
                     for b in bars:
                         b["contract_month"] = _contract_month_for_ts(b["time"], symbol)
-                    logger.info("[%s] ContFuture fallback: got %d %s bars",
+                        b["source"] = "ib_continuous"
+                    logger.info("[%s] ContFuture fallback: got %d %s bars (source=ib_continuous)",
                                 symbol, len(bars), bar_size_key)
                     return bars
         except Exception as e:
