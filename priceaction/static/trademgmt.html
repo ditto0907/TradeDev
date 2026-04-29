@@ -391,7 +391,10 @@
 <div id="topbar">
   <div class="logo">TRADE<span>DEV</span></div>
   <div class="topbar-label">📊 Trade Management</div>
+  <div style="margin-left:auto;display:flex;align-items:center;gap:8px;" id="tz-mount"></div>
 </div>
+<script src="/static/timezone.js"></script>
+<script>AppTZ.mountSwitcher(document.getElementById('tz-mount'));</script>
 
 <div id="app-wrapper">
   <nav id="nav-sidebar">
@@ -502,9 +505,8 @@ function _esc(s){
 }
 function _fmtTime(ts){
   if(!ts) return '—';
-  var d=new Date(ts*1000);
-  return d.toLocaleString([],{year:'2-digit',month:'2-digit',day:'2-digit',
-                              hour:'2-digit',minute:'2-digit'});
+  return (window.AppTZ ? AppTZ.formatTs(ts,{style:'short'})
+                       : new Date(ts*1000).toLocaleString());
 }
 
 /* ── Trade Management Logic ─────────────────────────────────────────────── */
@@ -670,9 +672,8 @@ async function tmLoadStats(){
   const fmtPct=v=>(v==null||isNaN(v))?'—':v.toFixed(2)+'%';
   const fmtTime=ts=>{
     if(!ts) return '';
-    const d=new Date(ts*1000);
-    return d.toLocaleString([],{year:'numeric',month:'2-digit',day:'2-digit',
-                                hour:'2-digit',minute:'2-digit',second:'2-digit'});
+    return (window.AppTZ ? AppTZ.formatTs(ts,{withSeconds:true})
+                         : new Date(ts*1000).toLocaleString());
   };
 
   const pnlColor=s.total_pnl>=0?'var(--green)':'var(--red)';
@@ -1027,6 +1028,14 @@ function _sdHBars(arr,key,color,suffix){
 
 // Init on page load
 tmInit();
+
+// Re-render time-bearing UI when system timezone changes
+if (window.AppTZ) {
+  AppTZ.onChange(function () {
+    try { tmRender(); } catch (e) {}
+    try { tmLoadStats(); } catch (e) {}
+  });
+}
 </script>
 </body>
 </html>
