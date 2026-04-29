@@ -13,6 +13,7 @@ import asyncio
 import logging
 import math
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
@@ -32,6 +33,28 @@ from ib_data_fetcher import (
 
 if TYPE_CHECKING:
     from ib_data_fetcher import IBDataFetcher
+
+
+@asynccontextmanager
+async def _null_gate_cm():
+    """No-op async context manager used when no fetcher is available."""
+    yield
+
+
+class _NullGate:
+    """Sentinel that mimics ``fetcher.bg_gate()`` when fetcher is None."""
+
+    def __call__(self):
+        return _null_gate_cm()
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+_NULL_GATE = _NullGate()
 
 logger = logging.getLogger(__name__)
 
@@ -272,6 +295,16 @@ def _compare_bars(
     Returns (mismatches, db_only, ib_only).
     Each mismatch: {time, db: {…}, ib: {…}, diffs: {field: (db_val, ib_val)}}
     Compares OHLCV fields — Open/High/Low/Close use _PRICE_TOL, Volume uses _VOLUME_TOL.
+
+    NOTE on continuous-contract (ContFuture) bars:
+    Bars whose ``contract_month`` is empty come from IB's continuous
+    contract.  IB re-applies a back-adjustment to the *entire* ContFuture
+    history every time the front month rolls, so OHLC and volume of any
+    given timestamp drift between fetches.  This drift is not a data
+    error — it is by design — so we skip the OHLCV diff on continuous
+    bars.  Missing-bar detection (``db_only`` / ``ib_only``) still
+    applies, which is what we actually need from validation on these
+    rows.
     """
     db_map = {b["time"]: b for b in db_bars}
     ib_map = {b["time"]: b for b in ib_bars}
@@ -291,6 +324,9 @@ def _compare_bars(
 
         d = db_map[ts]
         i = ib_map[ts]
+        # Skip OHLCV strict compare on continuous-contract bars (see docstring).
+        if not d.get("contract_month") or not i.get("contract_month"):
+            continue
         diffs: Dict[str, tuple] = {}
         for fld in ("open", "high", "low", "close"):
             if abs(d[fld] - i[fld]) > _PRICE_TOL:
@@ -310,6 +346,30 @@ def _fmt_range(from_ts: int, to_ts: int) -> str:
     from_dt = datetime.fromtimestamp(from_ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
     to_dt   = datetime.fromtimestamp(to_ts,   tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
     return f"{from_dt} → {to_dt} UTC"
+
+
+def _align_to_grid(from_ts: int, to_ts: int, timeframe: str) -> Tuple[int, int]:
+    """Floor (from_ts, to_ts) to the timeframe interval grid.
+
+    Returns closed-closed ``[aligned_from, aligned_to]`` where every bar in
+    the range has a ``ts`` that is a multiple of the interval.
+
+    Boundary policy (matches the validation chunk-splitting rules):
+      - 1D  → UTC 00:00:00   (one day = ``[00:00, 24:00)`` half-open)
+      - 1H  → top of the hour
+      - 5min→ multiples of 5 minutes within the hour
+
+    Off-grid inputs (e.g. drift caused by realtime aggregation) are floored
+    so chunk boundaries are deterministic and don't leak bars between
+    adjacent windows.  ``aligned_to`` is always the inclusive timestamp of
+    the LAST bar in the half-open window.
+    """
+    _, interval = _key_to_ib(timeframe)
+    aligned_from = (from_ts // interval) * interval
+    aligned_to   = (to_ts   // interval) * interval
+    if aligned_to < aligned_from:
+        aligned_to = aligned_from
+    return aligned_from, aligned_to
 
 
 async def validate_bars(
@@ -339,6 +399,10 @@ async def validate_bars(
     Uses the local IB fetch cache to avoid redundant IB requests.
     If *fetcher* is provided, uses its IB connection (avoids event-loop deadlocks).
     """
+    # Align inputs to the timeframe grid so chunk boundaries are deterministic
+    # and don't leak bars between adjacent windows.
+    from_ts, to_ts = _align_to_grid(from_ts, to_ts, timeframe)
+
     # When skip_validated is set, check if the entire range is already validated
     if skip_validated and db.is_range_validated(symbol, timeframe, from_ts, to_ts):
         logger.info("[DATA VALIDATE] %s/%s range already validated, skipping", symbol, timeframe)
@@ -470,6 +534,10 @@ async def fix_bars(
     already has data for the requested range (populated during validate_bars).
     Returns summary.
     """
+    # Align inputs to the timeframe grid so the same window the validator
+    # checks is also the window the fixer overwrites.
+    from_ts, to_ts = _align_to_grid(from_ts, to_ts, timeframe)
+
     rng = _fmt_range(from_ts, to_ts)
     cm_info = f"  contract={contract_month}" if contract_month else ""
     sel_info = f"  selected={len(timestamps)}" if timestamps is not None else ""
@@ -631,19 +699,28 @@ async def validate_all(
             }
 
             for cm in contract_months:
-                chunk_start = effective_earliest
-                while chunk_start <= latest:
-                    chunk_end = min(chunk_start + effective_chunk, latest)
+                # Align to interval grid and iterate **newest → oldest** in
+                # half-open [chunk_start, chunk_excl_end) windows so the most
+                # recent (and most likely to be looked at) data is validated
+                # first.  See `background_validate` for the chunk-splitting
+                # policy.
+                aligned_earliest = (effective_earliest // interval) * interval
+                aligned_latest_excl = ((latest // interval) * interval) + interval
+
+                chunk_excl_end = aligned_latest_excl
+                while chunk_excl_end > aligned_earliest:
+                    chunk_start = max(aligned_earliest, chunk_excl_end - effective_chunk)
+                    chunk_incl_end = chunk_excl_end - interval
 
                     try:
                         if fix:
-                            r = await fix_bars(sym, tf, chunk_start, chunk_end,
+                            r = await fix_bars(sym, tf, chunk_start, chunk_incl_end,
                                               ib=conn_ib, fetcher=fetcher,
                                               contract_month=cm)
                             sym_result["total_fixed"] += r["fixed_count"]
                             sym_result["total_ib_only_inserted"] += r["ib_only_inserted"]
                         else:
-                            r = await validate_bars(sym, tf, chunk_start, chunk_end,
+                            r = await validate_bars(sym, tf, chunk_start, chunk_incl_end,
                                                    ib=conn_ib, fetcher=fetcher,
                                                    contract_month=cm)
 
@@ -659,18 +736,19 @@ async def validate_all(
                                               for k, v in m["diffs"].items()},
                                 })
 
-                        logger.info("[validate_all] %s/%s%s chunk %s→%s: %d mismatches",
+                        logger.info("[validate_all] %s/%s%s chunk [%s→%s): %d mismatches",
                                     sym, tf,
                                     f" [{cm}]" if cm else "",
-                                    chunk_start, chunk_end, r["mismatch_count"])
+                                    chunk_start, chunk_excl_end, r["mismatch_count"])
 
                     except Exception as e:
-                        logger.warning("[validate_all] %s/%s%s chunk %s-%s failed: %s",
+                        logger.warning("[validate_all] %s/%s%s chunk [%s→%s) failed: %s",
                                        sym, tf,
                                        f" [{cm}]" if cm else "",
-                                       chunk_start, chunk_end, e)
+                                       chunk_start, chunk_excl_end, e)
 
-                    chunk_start = chunk_end + interval
+                    # Half-open: previous window's start becomes this end.
+                    chunk_excl_end = chunk_start
 
                     # IB pacing: ~2 second pause between requests
                     await asyncio.sleep(2)
@@ -705,6 +783,8 @@ async def background_validate(
     fetcher: Optional["IBDataFetcher"] = None,
     chunk_seconds: int = 86400,
     fix: bool = False,
+    symbols: Optional[List[str]] = None,
+    timeframes: Optional[List[str]] = None,
 ) -> None:
     """Background task that silently validates data integrity.
 
@@ -716,8 +796,22 @@ async def background_validate(
 
     When *fix* is True, mismatches and ib-only bars are written back into the
     DB using IB as source-of-truth.
+
+    Optional ``symbols`` / ``timeframes`` filters narrow which (sym, tf)
+    pairs are visited — useful when the caller wants to validate just one
+    symbol without waiting for a long MES backlog to drain.
     """
-    logger.info("=== [BG VALIDATE] Starting background validation task ===")
+    sym_filter = set(symbols) if symbols else None
+    tf_filter  = set(timeframes) if timeframes else None
+    if sym_filter or tf_filter:
+        logger.info(
+            "=== [BG VALIDATE] Starting (symbols=%s timeframes=%s fix=%s) ===",
+            sorted(sym_filter) if sym_filter else "ALL",
+            sorted(tf_filter) if tf_filter else "ALL",
+            fix,
+        )
+    else:
+        logger.info("=== [BG VALIDATE] Starting background validation task ===")
     t0 = time.monotonic()
 
     # Skip data older than 365 days
@@ -725,15 +819,41 @@ async def background_validate(
 
     try:
         with db._conn() as conn:
-            pairs = conn.execute(
+            raw_pairs = conn.execute(
                 "SELECT DISTINCT symbol, timeframe FROM bars"
             ).fetchall()
 
-        for sym, tf in pairs:
+        # Apply optional filters
+        filtered = []
+        for row in raw_pairs:
+            sym, tf = row[0], row[1]
+            if sym_filter and sym not in sym_filter: continue
+            if tf_filter and tf not in tf_filter:    continue
+            filtered.append((sym, tf))
+
+        # Round-robin reorder: walk timeframes (1D first as it's tiny, then
+        # 60min, then 5min) and within each tf cycle through symbols.  This
+        # gives every symbol some validation progress instead of starving the
+        # later ones behind a huge MES/5min backlog.
+        tf_order = {"1D": 0, "60min": 1, "1hour": 1, "1H": 1, "5min": 2, "15min": 3}
+        filtered.sort(key=lambda p: (tf_order.get(p[1], 99), p[0]))
+        pairs = filtered
+        logger.info("[BG VALIDATE] %d pair(s) queued: %s",
+                    len(pairs), ", ".join(f"{s}/{tf}" for s, tf in pairs))
+
+        # Group pairs by symbol → run symbols in parallel, timeframes serial
+        # within a symbol.  IB allows multiple concurrent historical requests
+        # for *different* contracts; bursting parallel requests for the same
+        # contract triggers pacing violations, so we keep per-symbol serial.
+        by_symbol: Dict[str, List[Tuple[str, str]]] = {}
+        for s, tf in pairs:
+            by_symbol.setdefault(s, []).append((s, tf))
+
+        async def _run_pair(sym: str, tf: str) -> None:
             earliest = db.get_earliest_ts(sym, tf)
             latest = db.get_latest_ts(sym, tf)
             if earliest is None or latest is None:
-                continue
+                return
 
             _, interval = _key_to_ib(tf)
 
@@ -746,43 +866,65 @@ async def background_validate(
             effective_earliest = max(earliest, max_age_ts)
             if effective_earliest > latest:
                 logger.info("[BG VALIDATE] %s/%s: all data older than 1 year, skipping", sym, tf)
-                continue
+                return
 
-            # Get unchecked ranges (skip already validated)
             unchecked = db.get_unchecked_ranges(sym, tf, effective_earliest, latest)
             if not unchecked:
                 logger.info("[BG VALIDATE] %s/%s: fully validated, skipping", sym, tf)
-                continue
+                return
 
-            logger.info("[BG VALIDATE] %s/%s: %d unchecked range(s) to validate",
+            # Walk newest → oldest: reverse the ascending list so the most
+            # recent unchecked range is validated first.
+            unchecked = list(reversed(unchecked))
+            logger.info("[BG VALIDATE] %s/%s: %d unchecked range(s) to validate (newest first)",
                         sym, tf, len(unchecked))
 
             for uc_range in unchecked:
-                # Process each unchecked range in chunks (newest first)
-                uc_from = uc_range["from_ts"]
-                uc_to = uc_range["to_ts"]
+                # Process each unchecked range in chunks (newest first).
+                #
+                # Chunk-splitting rules (half-open [start, excl_end) windows
+                # aligned to natural time boundaries):
+                #   - 1D : daily windows on UTC midnight     [00:00, 24:00)
+                #   - 1H : hourly windows on top-of-hour     [HH:00, HH+1:00)
+                #   - 5min: 5-minute windows on /5 minutes   [HH:MM, HH:MM+5)
+                # The bar at ``excl_end`` belongs to the NEXT chunk, never
+                # the current one — this prevents the same bar from being
+                # compared in two adjacent windows.
+                uc_from = (uc_range["from_ts"] // interval) * interval
+                uc_to_incl = (uc_range["to_ts"] // interval) * interval
 
-                # Work backwards from newest to oldest
-                chunk_end = uc_to
-                while chunk_end >= uc_from:
-                    chunk_start = max(uc_from, chunk_end - effective_chunk)
+                # Work backwards from newest to oldest using half-open math.
+                chunk_excl_end = uc_to_incl + interval
+                while chunk_excl_end > uc_from:
+                    chunk_start = max(uc_from, chunk_excl_end - effective_chunk)
+                    chunk_start = (chunk_start // interval) * interval
+                    # Closed-closed end passed to validate/fix (last bar inside
+                    # the half-open window).
+                    chunk_incl_end = chunk_excl_end - interval
 
                     try:
-                        if fix:
-                            result = await fix_bars(
-                                sym, tf, chunk_start, chunk_end,
-                                fetcher=fetcher,
-                            )
-                            # Re-validate after the fix to compute residual issues.
-                            result = await validate_bars(
-                                sym, tf, chunk_start, chunk_end,
-                                fetcher=fetcher,
-                            )
-                        else:
-                            result = await validate_bars(
-                                sym, tf, chunk_start, chunk_end,
-                                fetcher=fetcher,
-                            )
+                        # Wrap each chunk through the fetcher's BG gate so
+                        # chart on-demand requests preempt validation work.
+                        gate = (
+                            fetcher.bg_gate() if fetcher is not None
+                            else _NULL_GATE
+                        )
+                        async with gate:
+                            if fix:
+                                result = await fix_bars(
+                                    sym, tf, chunk_start, chunk_incl_end,
+                                    fetcher=fetcher,
+                                )
+                                # Re-validate after the fix to compute residual issues.
+                                result = await validate_bars(
+                                    sym, tf, chunk_start, chunk_incl_end,
+                                    fetcher=fetcher,
+                                )
+                            else:
+                                result = await validate_bars(
+                                    sym, tf, chunk_start, chunk_incl_end,
+                                    fetcher=fetcher,
+                                )
 
                         # Roll all detectable issues into a single counter so a
                         # range with calendar gaps or one-sided bars is not
@@ -795,19 +937,19 @@ async def background_validate(
                             + result.get("calendar_missing_count", 0)
                         )
 
-                        # Record this chunk as validated
+                        # Record this chunk as validated (closed-closed)
                         db.insert_validated_range(
-                            sym, tf, chunk_start, chunk_end,
+                            sym, tf, chunk_start, chunk_incl_end,
                             mismatches=issue_count,
                         )
 
                         if issue_count > 0:
                             logger.warning(
-                                "[BG VALIDATE] %s/%s chunk [%s→%s]: "
+                                "[BG VALIDATE] %s/%s chunk [%s→%s): "
                                 "%d issue(s) found "
                                 "(mismatch=%d db_only=%d ib_only=%d "
                                 "ohlcv=%d calendar_missing=%d)",
-                                sym, tf, chunk_start, chunk_end, issue_count,
+                                sym, tf, chunk_start, chunk_excl_end, issue_count,
                                 result.get("mismatch_count", 0),
                                 result.get("db_only_count", 0),
                                 result.get("ib_only_count", 0),
@@ -817,13 +959,32 @@ async def background_validate(
 
                     except Exception as e:
                         logger.warning(
-                            "[BG VALIDATE] %s/%s chunk [%s→%s] failed: %s",
-                            sym, tf, chunk_start, chunk_end, e,
+                            "[BG VALIDATE] %s/%s chunk [%s→%s) failed: %s",
+                            sym, tf, chunk_start, chunk_excl_end, e,
                         )
 
-                    chunk_end = chunk_start - interval
-                    # IB pacing
+                    # Half-open: previous chunk's exclusive end is this chunk's start.
+                    chunk_excl_end = chunk_start
+                    # IB pacing (per-symbol serial; safe to keep)
                     await asyncio.sleep(2)
+
+        async def _run_symbol(sym: str, sym_pairs: List[Tuple[str, str]]) -> None:
+            logger.info("[BG VALIDATE] >>> symbol %s started (%d tf)",
+                        sym, len(sym_pairs))
+            t_sym = time.monotonic()
+            for s, tf in sym_pairs:
+                try:
+                    await _run_pair(s, tf)
+                except Exception as e:
+                    logger.warning("[BG VALIDATE] %s/%s aborted: %s", s, tf, e)
+            logger.info("[BG VALIDATE] <<< symbol %s done (%.1fs)",
+                        sym, time.monotonic() - t_sym)
+
+        # Run all per-symbol tasks concurrently
+        await asyncio.gather(
+            *(_run_symbol(sym, sps) for sym, sps in by_symbol.items()),
+            return_exceptions=True,
+        )
 
     except Exception as e:
         logger.error("[BG VALIDATE] Background validation error: %s", e)
