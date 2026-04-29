@@ -980,6 +980,7 @@
       <div class="status-dot" id="ws-dot"></div>
       <span id="ws-text">Connecting…</span>
     </div>
+    <div id="tz-mount"></div>
   </div>
 </div>
 
@@ -1024,6 +1025,13 @@
         <span class="watch-exch" id="wl-mnq-exch">CME</span>
         <span class="watch-price" id="wl-mnq-price">—</span>
         <span class="watch-change" id="wl-mnq-chg">—</span>
+      </div>
+      <div class="watch-item" data-symbol="NK225M">
+        <span class="watch-symbol">NK225M</span>
+        <span class="watch-name">Mini Nikkei 225</span>
+        <span class="watch-exch" id="wl-nk225m-exch">OSE</span>
+        <span class="watch-price" id="wl-nk225m-price">—</span>
+        <span class="watch-change" id="wl-nk225m-chg">—</span>
       </div>
       <div class="watch-item" data-symbol="NK225MC">
         <span class="watch-symbol">NK225MC</span>
@@ -1435,6 +1443,8 @@
 
 <!-- TradingView Charting Library -->
 <script src="/charting_library/charting_library.standalone.js"></script>
+<script src="/static/timezone.js"></script>
+<script>AppTZ.mountSwitcher(document.getElementById('tz-mount'));</script>
 <script src="/static/datafeed.js"></script>
 <script src="/static/app.js"></script>
 
