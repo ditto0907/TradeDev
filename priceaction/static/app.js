@@ -217,7 +217,7 @@ function initChart() {
     interval:     '5',
     library_path: '/charting_library/',
     locale:       'en',
-    timezone:     'America/New_York',
+    timezone:     (window.AppTZ ? AppTZ.get() : 'America/New_York'),
     theme:        'dark',
     toolbar_bg:   '#1e222d',
     loading_screen: { backgroundColor: '#131722', foregroundColor: '#2962ff' },
@@ -328,6 +328,41 @@ function initChart() {
     setWsStatus('live', 'Live');
     const chart = _widget.activeChart();
 
+    // ── Two-way bind chart timezone with AppTZ (top-bar selector) ──────
+    try {
+      if (window.AppTZ && chart.getTimezoneApi) {
+        const tzApi = chart.getTimezoneApi();
+        // 1) Push current AppTZ into the chart in case load_last_chart restored
+        //    a different value than the configured one.
+        try {
+          const cur = tzApi.getTimezone();
+          const wanted = AppTZ.get();
+          if (cur && cur.id !== wanted) tzApi.setTimezone(wanted);
+        } catch (e) { /* ignore */ }
+        // 2) Chart → AppTZ: when the user changes tz from the chart UI.
+        let _suppressChartEvent = false;
+        tzApi.onTimezoneChanged().subscribe(null, (tz) => {
+          if (_suppressChartEvent) return;
+          AppTZ.set(String(tz), { source: 'chart' });
+        });
+        // 3) AppTZ → chart: when the user picks tz from the top-bar.
+        AppTZ.onChange((tz, ev) => {
+          if (ev && ev.source === 'chart') return;
+          try {
+            _suppressChartEvent = true;
+            tzApi.setTimezone(tz);
+          } catch (e) { console.warn('chart setTimezone failed', e); }
+          finally { _suppressChartEvent = false; }
+        });
+        // 4) Refresh tz-bearing side panels (cycle analyses periods, etc.)
+        AppTZ.onChange(() => {
+          try { loadCycleAnalyses(); } catch (e) {}
+        });
+      }
+    } catch (e) {
+      console.warn('Timezone bind error:', e);
+    }
+
     // ── Right-click context menu for quick order placement ─────────────
     _widget.onContextMenu(function(unixTime, price) {
       return _buildContextMenuItems(price);
@@ -370,11 +405,14 @@ function initChart() {
     // chart.createStudy('S-Bar Count', false, false).catch(() => {});
 
     // ── Default EMA20 indicator on main pane ───────────────────────────
+    // NOTE: getAllStudies() returns {id, name} only — there is NO metaInfo
+    // field, so the previous metaInfo-based detection always returned false
+    // and stacked a new EMA20 on every chart-ready (saved-layout reload,
+    // symbol switch, etc.).  Match by study name instead.
     try {
-      const hasEma20 = existingStudies.some(s =>
-        (s.name || '').toLowerCase().includes('moving average') &&
-        s.metaInfo && JSON.stringify(s.metaInfo).includes('20'));
-      if (!hasEma20) {
+      const hasEma = existingStudies.some(s =>
+        (s.name || '').toLowerCase() === 'moving average exponential');
+      if (!hasEma) {
         chart.createStudy(
           'Moving Average Exponential', false, false,
           { length: 20 },
@@ -1502,7 +1540,7 @@ async function fetchWatchlistPrices() {
 }
 
 async function fetchWatchlistContractInfo() {
-  const symbols = ['MES', 'MNQ', 'NK225MC', 'MGC'];
+  const symbols = ['MES', 'MNQ', 'NK225M', 'NK225MC', 'MGC'];
   for (const sym of symbols) {
     try {
       const res = await fetch(`/api/symbols?symbol=${sym}`);
@@ -2522,40 +2560,26 @@ async function deleteAnalysis(id) {
 // Format analysis time period (bar_from - bar_to) to readable string
 function _formatAnalysisPeriod(bar_from, bar_to) {
   if (!bar_from || !bar_to) return '';
-  
-  const etOptions = { 
-    timeZone: 'America/New_York',
-    year: 'numeric', 
-    month: '2-digit', 
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false
-  };
-  
+
+  const tz = (window.AppTZ ? AppTZ.get() : 'America/New_York');
+  const dateOpts = { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' };
+  const timeOpts = { timeZone: tz, hour: '2-digit', minute: '2-digit', hour12: false };
+
   const fromDate = new Date(bar_from * 1000);
   const toDate = new Date(bar_to * 1000);
-  
-  const fromStr = fromDate.toLocaleString('en-US', etOptions);
-  const toStr = toDate.toLocaleString('en-US', etOptions);
-  
-  // Extract date and time parts
-  const [fromDatePart, fromTimePart] = fromStr.split(', ');
-  const [toDatePart, toTimePart] = toStr.split(', ');
-  
-  // Format date as YYYY-MM-DD
-  const [fromMonth, fromDay, fromYear] = fromDatePart.split('/');
-  const [toMonth, toDay, toYear] = toDatePart.split('/');
-  const fromFormatted = `${fromYear}-${fromMonth}-${fromDay}`;
-  const toFormatted = `${toYear}-${toMonth}-${toDay}`;
-  
+
+  const fromDateStr = new Intl.DateTimeFormat('sv-SE', dateOpts).format(fromDate);
+  const toDateStr   = new Intl.DateTimeFormat('sv-SE', dateOpts).format(toDate);
+  const fromTimeStr = new Intl.DateTimeFormat('sv-SE', timeOpts).format(fromDate);
+  const toTimeStr   = new Intl.DateTimeFormat('sv-SE', timeOpts).format(toDate);
+
   // Same day: "2026-04-08 09:30-11:00"
-  if (fromFormatted === toFormatted) {
-    return `${fromFormatted} ${fromTimePart}-${toTimePart}`;
+  if (fromDateStr === toDateStr) {
+    return `${fromDateStr} ${fromTimeStr}-${toTimeStr}`;
   }
-  
+
   // Different days: "2026-04-08 09:30 - 2026-04-09 11:00"
-  return `${fromFormatted} ${fromTimePart} - ${toFormatted} ${toTimePart}`;
+  return `${fromDateStr} ${fromTimeStr} - ${toDateStr} ${toTimeStr}`;
 }
 
 function _formatSummaryHTML(text) {
