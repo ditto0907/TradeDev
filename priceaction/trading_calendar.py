@@ -228,7 +228,9 @@ class TradingCalendar:
         t = dt.time()
         windows = self.sessions.get(dt.weekday(), [])
         for win_start, win_end in windows:
-            if win_start <= t <= win_end:
+            # Half-open [start, end): 17:00 ET sharp is start of the daily
+            # maintenance break, not a trading instant.
+            if win_start <= t < win_end:
                 return True
         return False
 
