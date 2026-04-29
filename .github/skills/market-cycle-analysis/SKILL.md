@@ -17,6 +17,9 @@ argument-hint: "Symbol and timeframe to analyze, e.g. 'MES 5min RTH today' or 'M
 | FT | Follow-Through | 跟进：BO后的后续确认K线 |
 | BLCH | Bull Channel | 牛市通道：一系列更高高点(HH)和更高低点(HL)构成的上升通道 |
 | BRCH | Bear Channel | 熊市通道：一系列更底高点(LH)和更低低点(LL)构成的下降通道 |
+| TC | Tight Channel | 紧密通道：K线几乎无重叠、回调极浅，最强势的通道形态 |
+| BrC | Broad Channel | 宽松通道：K线大量overlap、回调深，弱通道，常预示反转 |
+| Spike | Spike | 推进段：BO之后的强力大实体连续推进，趋势第一阶段 |
 | SC | Sell Climax | 卖出高潮：极度恐慌性下跌，通常预示反转；也缩写为Bear Climax |
 | BuC | Buy Climax | 买入高潮：极度追涨，通常预示反转 |
 | MTR | Major Trend Reversal | 主趋势反转：趋势方向改变，需要第二次测试确认 |
@@ -297,6 +300,118 @@ Using the PA vocabulary:
 - **BC** (Bull Channel): Series of HH/HL
 - **SC** (Sell Climax) / **BC** (Buy Climax): Extreme exhaustion move
 - **MTR** (Major Trend Reversal): Trend change, needs 2nd attempt confirmation
+
+#### 4.1 BO vs Climax — 关键区分
+
+**核心原则**：BO 与 Climax 在 K 线形态上极相似（大实体、强 urgency、单向连续推进），区分关键在**位置/上下文**与**FT 行为**。BO 是"出生"，Climax 是"死亡"。
+
+**判断步骤：**
+
+| 维度 | **BO**（突破） | **SC / BuC**（卖出/买入高潮） |
+|------|----------------|------------------------------|
+| 起点位置 | 从 TR 内部 / TTR / 形态突破 | 已在单边趋势末端，离起点很远 |
+| 价格已走距离 | 短，未拉伸 | 长，连续若干腿，超过 2×ATR |
+| 与 S/R 关系 | 突破 S/R，**离开**它 | 已远离最近 S/R，伸向极端区 |
+| 前置背景 | 横盘酝酿、ii/oo、收缩 | 已有明显趋势腿，第 3 腿 / 第 3 次推进 |
+| 大棒计数 | ≤ 3 根连续大棒 | ≥ 3 根加速大棒，实体逐根放大（escalation） |
+| EMA20 距离 | 靠近 EMA20 | 极度拉伸，远离 EMA20 |
+
+**FT（Follow-Through）观察 — 1-3 根后续 K 线：**
+- 同向继续大实体推进 → **BO 成功**（进入 Spike → Channel）
+- 立刻出现反向大实体 K（吞没/引擎反向）→ **Climax 确认**，启动反转
+- 紧缩 / Doji / 小 K 线（停滞）→ 可能 Climax 或 Failed BO，等 2nd entry
+- 立即跌回 BO 起点之内 → **Failed BO**（TR 延续）
+
+**决策树：**
+```
+强势单向推进 K 线出现
+  ├─ 来自横盘 / TR 内部？
+  │    ├─ 是 → BO 假设
+  │    │     └─ FT 同向？ → BO 成功；FT 反向？ → Failed BO
+  │    └─ 否 → Climax 假设
+  │          └─ 已连续 ≥3 根加速大棒？
+  │                ├─ 是 → SC/BuC 概率高，等反向信号棒
+  │                └─ 否 → 趋势中段 Spike（不是 Climax，继续顺势）
+```
+
+**交易禁忌：**
+- **永远不要在 SC 底部直接做多**，等 2nd entry（DB 或反向 H2/L2）
+- **永远不要在 BuC 顶部直接做空**，等 2nd entry（DT 或反向 L2/H2）
+- 不确定是 BO 还是 Climax 时，**等 FT** —— Al Brooks 黄金原则
+
+#### 4.2 Channel（通道）识别
+
+**通道 = 趋势第二阶段**，紧跟 Spike/BO 之后，斜率较缓但持续推进。**通道不会凭空出现，前面必须有 Spike**（或 Climax 反转后的 reversal spike）。无 Spike 前置 → 不是通道，只是 TR 震荡。
+
+**通道三种类型：**
+
+| 类型 | 形态特征 | 力量 |
+|------|---------|------|
+| **Tight Channel** (TC) | K 线几乎无重叠、HH/HL 严密、几乎无回调 | 最强，最难反转 |
+| **Normal Channel** | 有少量 overlap，回调 1-2 根 K 线 | 中等，可顺势 |
+| **Broad Channel** (BrC) | 大量 overlap、深回调、bar size 不一 | 弱，接近 TR；常预示反转 |
+
+**5 个判断标准（必须同时满足）：**
+
+1. **HH/HL（牛通道）或 LH/LL（熊通道）序列**：至少 2 组；序列被破坏 → 通道结束
+2. **可绘出两条平行斜线**：上轨连 swing highs，下轨连 swing lows，夹角 < 15°；若收敛 → wedge
+3. **斜率缓于前置 Spike**：通道斜率必然缓于 Spike；若一致或更陡 → 仍在 Spike，不是通道
+4. **回调深度**：
+   - Tight Channel：回调 < 上一推进腿的 50%
+   - Broad Channel：回调可达 80%+，frequent overlap
+5. **EMA20 关系**：
+   - Bull Channel：价格保持在 EMA20 之上，回调测试 EMA 后反弹
+   - Bear Channel：价格保持在 EMA20 之下
+   - 若价格反复穿越 EMA20 → 不是通道，是 TR
+
+**通道结束信号（转 TR 或反转）：**
+- 收盘**强力穿越通道线**（trendline break）
+- 出现 **Climax** 式加速（最后冲刺常预示衰竭）
+- 通道线第二次测试失败（failed BO 反方向）= MTR 1st leg
+- 价格回到通道中轴后无法继续推进
+
+**通道决策树：**
+```
+价格连续单向推进
+  ├─ 前面有 Spike？
+  │    ├─ 有 → 通道假设成立
+  │    │     ├─ 紧密无 overlap → Tight Channel（强势顺势）
+  │    │     ├─ 中度 overlap → Normal Channel（顺势 H2/L2 入场）
+  │    │     └─ 大量 overlap + 深回调 → Broad Channel（接近 TR，警惕反转）
+  │    └─ 无 → 不是通道，是 TR 震荡
+```
+
+**通道交易规则：**
+- **顺势**：每次回调到通道下轨 / EMA20 时入场（H1/H2 或 L1/L2）
+- **逆势禁忌**：通道中**不要逆势交易**，除非已是 MTR 第二次尝试
+- **目标**：通道延续 → 跟到 MM 目标；通道结束 → 平仓等 TR
+
+#### 4.3 综合判断流程
+
+```
+强势单向推进 K 线出现
+  │
+  ├─ 1. 位置：来自 TR/形态？还是已远离起点？
+  ├─ 2. 大棒计数：≤3 根 vs ≥3 根加速？
+  ├─ 3. EMA 距离：靠近 EMA 还是已极度拉伸？
+  ├─ 4. S/R 关系：刚突破 S/R 还是远离 S/R？
+  ├─ 5. FT 观察：1-3 根后续 K 线行为
+  │
+  └─ 综合判定：
+        BO  → 接 Spike → 进入 Channel → 抵达 MM/S/R → 转 TR 或 Climax
+        Climax → 反向信号棒 → MTR 1st leg → 等 2nd attempt 确认
+```
+
+#### 4.4 常见误判规避
+
+| 误判 | 正确做法 |
+|------|---------|
+| 把 Spike 当 Climax 提前反向 | 等 FT；Spike 只 3 根内不算 Climax |
+| 把通道末端 Climax 当作"再涨一段"追入 | 远离 EMA + 加速大棒 = 警惕，至少缩仓 |
+| 把 Broad Channel 当作 TR 反复刷震荡 | 仍有 HH/HL 序列时，方向偏好顺势 H2/L2 |
+| 把 Failed BO 当作有效 BO 追入 | 必看 FT；BO 起点回吞 = 失败 |
+
+> **Al Brooks 黄金原则**：当不确定时，**永远等 2nd signal**。第一次永远可能错，第二次成功概率是第一次的两倍。
 
 ### Step 5: Write Summary
 
