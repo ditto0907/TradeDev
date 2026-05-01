@@ -59,6 +59,24 @@ def persist_completed_bar(
             symbol, timeframe, bar.get("time"), "; ".join(violations),
         )
         return 0
+    # Tag the bar with the front-month contract for *bar.time*. Realtime
+    # data always streams from a specific monthly contract (front month at
+    # the time of the trade), even when the subscription was created via
+    # ContFuture. Without this tag the bar is stored with contract_month=''
+    # which causes data_validator._compare_bars to skip OHLCV diff (it
+    # treats empty contract_month as ContFuture back-adjustment drift),
+    # making realtime-bar errors invisible to validate-vs-IB.
+    if not bar.get("contract_month"):
+        try:
+            from ib_data_fetcher import _contract_month_for_ts
+            ts = bar.get("time")
+            if ts is not None:
+                bar["contract_month"] = _contract_month_for_ts(int(ts), symbol)
+        except Exception as e:
+            logger.debug(
+                "contract_month tagging failed for %s/%s: %s",
+                symbol, timeframe, e,
+            )
     try:
         return fetcher.persist_bars(
             symbol, timeframe, [bar], source="realtime_completed",
