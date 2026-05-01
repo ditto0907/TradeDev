@@ -812,26 +812,51 @@ class IBDataFetcher:
         if size is None or math.isnan(size):
             size = 0.0
 
-        state = self._tick_state.get(symbol, {})
+        self._ensure_symbol_state(symbol)
+        state = self._tick_state[symbol]
         prev_price = state.get("prev_price", float("nan"))
         prev_size = state.get("prev_size", float("nan"))
 
-        vol_delta = 0.0
-        if price != prev_price or size != prev_size:
-            vol_delta = float(size)
-            state["prev_price"] = price
-            state["prev_size"] = size
+        # Only treat as a real trade when price OR size changed.
+        # Idle ticks (bid/ask updates, heartbeats) carry the stale `ticker.last`
+        # from a previous trade — must NOT feed them into the bar builder, or
+        # a boundary-crossing idle tick will create a new bar whose OPEN is
+        # an old, unrelated price.
+        is_real_trade = (price != prev_price) or (size != prev_size)
+        if not is_real_trade:
+            # Still allow throttled broadcast of the current in-progress bar
+            # so the chart stays "live" during quiet periods.
+            now = time.monotonic()
+            last_broadcast = state.get("last_broadcast", 0.0)
+            if now - last_broadcast >= self._TICK_BROADCAST_INTERVAL:
+                state["last_broadcast"] = now
+                cur = self._rt_current.get(f"{symbol}:5min")
+                if cur:
+                    self._dispatch_multi(symbol, "5min", cur)
+            return
 
-        wall_ts = int(time.time())
-        self._process_tick(symbol, "5min", 300, wall_ts, price, price, price, price, vol_delta)
+        state["prev_price"] = price
+        state["prev_size"] = size
+        vol_delta = float(size)
+
+        # Bucket by the trade's own timestamp, NOT by wall clock.
+        # Network latency from IB can be 50–500ms; a trade at 09:34:59.8 may
+        # arrive locally at 09:35:00.1 and would otherwise be misbucketed
+        # into the next bar (corrupting both bars' OPEN/close).
+        trade_time = getattr(ticker, "lastTime", None) or getattr(ticker, "time", None)
+        if isinstance(trade_time, datetime):
+            ts = int(trade_time.timestamp())
+        else:
+            ts = int(time.time())
+
+        self._process_tick(symbol, "5min", 300, ts, price, price, price, price, vol_delta)
 
         # Throttled broadcast
         now = time.monotonic()
         last_broadcast = state.get("last_broadcast", 0.0)
         if now - last_broadcast >= self._TICK_BROADCAST_INTERVAL:
             state["last_broadcast"] = now
-            rt_key = f"{symbol}:5min"
-            cur = self._rt_current.get(rt_key)
+            cur = self._rt_current.get(f"{symbol}:5min")
             if cur:
                 self._dispatch_multi(symbol, "5min", cur)
 
