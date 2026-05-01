@@ -2308,6 +2308,10 @@ function initBottomTabs() {
       setTimeout(() => { if (_widget) _widget.resize(); }, 50);
     });
   }
+
+  // Default to minimized on initial load.
+  main.classList.add('bottom-minimized');
+  if (minBtn) { minBtn.textContent = '▲'; minBtn.title = 'Restore'; }
 }
 
 // ── Bottom Panel Resize ───────────────────────────────────────────────────────
