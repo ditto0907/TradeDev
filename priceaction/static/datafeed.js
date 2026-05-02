@@ -25,18 +25,22 @@ class MESDatafeed {
   // ── searchSymbols ──────────────────────────────────────────────────────────
 
   searchSymbols(userInput, exchange, symbolType, onResult) {
-    const allSymbols = [
-      { symbol: 'MES',     full_name: 'CME:MES',       description: 'Micro E-mini S&P 500 Futures',   exchange: 'CME',   type: 'futures' },
-      { symbol: 'MNQ',     full_name: 'CME:MNQ',       description: 'Micro E-mini Nasdaq-100 Futures', exchange: 'CME',   type: 'futures' },
-      { symbol: 'NK225M',  full_name: 'OSE:NK225M',    description: 'Mini Nikkei 225 Futures',         exchange: 'OSE',   type: 'futures' },
-      { symbol: 'NK225MC', full_name: 'OSE:NK225MC',   description: 'Micro Nikkei 225 Futures',        exchange: 'OSE',   type: 'futures' },
-      { symbol: 'MGC',     full_name: 'COMEX:MGC',     description: 'Micro Gold Futures',              exchange: 'COMEX', type: 'futures' },
-    ];
-    const q = (userInput || '').toUpperCase();
-    const filtered = q
-      ? allSymbols.filter(s => s.symbol.includes(q) || s.description.toUpperCase().includes(q))
-      : allSymbols;
-    onResult(filtered);
+    fetch('/api/symbol_list')
+      .then(r => r.json())
+      .then(data => {
+        const q = (userInput || '').toUpperCase();
+        const results = (data.symbols || [])
+          .filter(item => !q || item.token.toUpperCase().includes(q) || item.label.toUpperCase().includes(q))
+          .map(item => ({
+            symbol:      item.token,
+            full_name:   item.token,
+            description: item.label,
+            exchange:    'CME',
+            type:        'futures',
+          }));
+        onResult(results);
+      })
+      .catch(() => onResult([]));
   }
 
   // ── resolveSymbol ──────────────────────────────────────────────────────────
@@ -48,27 +52,41 @@ class MESDatafeed {
   resolveSymbol(symbolName, onResolve, onError, extension) {
     console.log('[DataFeed] resolveSymbol called:', symbolName, 'extension:', extension);
 
-    fetch(`/api/symbols?symbol=${encodeURIComponent(symbolName)}`)
+    // Token form: "MES@CONT_FRONT", "MES@202506", or bare "MES"
+    // Use base symbol for metadata lookup but keep full token as chart name.
+    const atIdx = symbolName.indexOf('@');
+    const baseSym = atIdx !== -1 ? symbolName.slice(0, atIdx) : symbolName;
+    const isToken = atIdx !== -1;
+
+    fetch(`/api/symbols?symbol=${encodeURIComponent(baseSym)}`)
       .then(r => r.json())
       .then(info => {
+        // Override name with the full token so getBars/realtime use it
+        if (isToken) {
+          info.name = symbolName;
+          info.full_name = symbolName;
+          // Build a human-readable description for the token
+          const suffix = symbolName.slice(atIdx + 1);
+          const suffixLabel = {
+            CONT_FRONT: 'Continuous (Front)',
+            CONT_RATIO: 'Continuous (Ratio Adj)',
+            CONT_DIFF:  'Continuous (Diff Adj)',
+          }[suffix] || suffix;
+          info.description = `${baseSym} – ${suffixLabel}`;
+          // Continuous and monthly contracts have no realtime subscription
+          info.has_intraday = true;
+        }
         // When TradingView's subsession selector triggers a session change,
         // extension.session indicates the new subsession id ("regular" or "extended").
-        // Per TradingView docs, BOTH session and subsession_id must be updated
-        // to match the selected subsession.
         if (extension && extension.session) {
           info.subsession_id = extension.session;
           const match = (info.subsessions || []).find(s => s.id === extension.session);
-          if (match) {
-            info.session = match.session;
-          }
+          if (match) info.session = match.session;
         } else {
-          // Default: match session to the default subsession_id
           const match = (info.subsessions || []).find(s => s.id === info.subsession_id);
-          if (match) {
-            info.session = match.session;
-          }
+          if (match) info.session = match.session;
         }
-        console.log('[DataFeed] resolveSymbol result:', info.name, 'session:', info.session, 'subsession_id:', info.subsession_id);
+        console.log('[DataFeed] resolveSymbol result:', info.name, 'session:', info.session);
         setTimeout(() => onResolve(info), 0);
       })
       .catch(err => {
@@ -76,6 +94,7 @@ class MESDatafeed {
         onError('SYMBOL_NOT_FOUND');
       });
   }
+
 
   // ── getBars ────────────────────────────────────────────────────────────────
   //

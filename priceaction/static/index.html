@@ -62,6 +62,35 @@
     }
     .logo span { color: var(--blue); }
 
+    /* ── Contract Selector (mounted into active watch-item) ─────────────── */
+    #contract-selector-wrap {
+      display: flex;
+      align-items: center;
+      grid-column: 1 / -1;
+      grid-row: 4;
+      margin-top: 6px;
+    }
+    #contract-selector {
+      background: var(--input-bg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--text);
+      font-size: 11px;
+      padding: 3px 22px 3px 6px;
+      height: 22px;
+      outline: none;
+      cursor: pointer;
+      appearance: none;
+      -webkit-appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23787b86'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 6px center;
+      width: 100%;
+    }
+    #contract-selector:focus { border-color: var(--blue); }
+    #contract-selector option { background: var(--panel); color: var(--text); }
+    #contract-selector optgroup { color: var(--text-dim); font-size: 11px; }
+
     .topbar-right {
       margin-left: auto;
       display: flex;
@@ -975,6 +1004,12 @@
 <!-- ── TOP BAR ─────────────────────────────────────────────────────────────── -->
 <div id="topbar">
   <div class="logo">TRADE<span>DEV</span></div>
+  <!-- Contract selector lives inside the active watch-item; mounted by JS -->
+  <div id="contract-selector-wrap">
+    <select id="contract-selector" title="Select contract">
+      <option value="MES@CONT_FRONT">MES – Continuous (Front)</option>
+    </select>
+  </div>
   <div class="topbar-right">
     <div id="ws-status">
       <div class="status-dot" id="ws-dot"></div>

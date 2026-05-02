@@ -62,6 +62,127 @@ let _orderLineShapes = {};
 // Current active symbol (base name without _RTH suffix)
 let _currentSymbol = 'MES';
 
+// Cache of symbol_list API response, keyed by base symbol
+let _symbolListCache = {};
+
+// ── Contract Selector ─────────────────────────────────────────────────────────
+
+/**
+ * Populate the contract selector dropdown for *baseSym*.
+ * Returns the front-month token (newest monthly contract) if one exists,
+ * or null when no monthly data is in the DB yet.
+ * Callers are responsible for calling _widget.setSymbol() with the returned token.
+ */
+async function loadContractOptions(baseSym) {
+  const sel = document.getElementById('contract-selector');
+  if (!sel) return null;
+
+  try {
+    // Fetch once per base symbol, then cache
+    if (!_symbolListCache[baseSym]) {
+      const res = await fetch('/api/symbol_list');
+      const data = await res.json();
+      // Group all tokens by base symbol
+      const grouped = {};
+      for (const item of (data.symbols || [])) {
+        const base = item.token.split('@')[0];
+        if (!grouped[base]) grouped[base] = [];
+        grouped[base].push(item);
+      }
+      // Cache all groups at once
+      Object.assign(_symbolListCache, grouped);
+    }
+
+    const items = _symbolListCache[baseSym] || [];
+    sel.innerHTML = '';
+
+    const continuous = items.filter(i => i.kind === 'continuous');
+    const monthly    = items.filter(i => i.kind === 'month');
+
+    if (continuous.length) {
+      const grp = document.createElement('optgroup');
+      grp.label = 'Continuous';
+      for (const item of continuous) {
+        const opt = document.createElement('option');
+        opt.value = item.token;
+        const methodLabel = {
+          front: 'Front (no adj)',
+          cont_ratio: 'Ratio Adj',
+          cont_difference: 'Diff Adj',
+        }[item.method] || item.method;
+        opt.textContent = `${baseSym} – ${methodLabel}`;
+        grp.appendChild(opt);
+      }
+      sel.appendChild(grp);
+    }
+
+    // Monthly contracts — newest (front month) first
+    const sortedMonthly = [...monthly].reverse();
+    if (sortedMonthly.length) {
+      const grp = document.createElement('optgroup');
+      grp.label = 'Monthly Contracts';
+      for (const item of sortedMonthly) {
+        const opt = document.createElement('option');
+        opt.value = item.token;
+        opt.textContent = item.label;
+        grp.appendChild(opt);
+      }
+      sel.appendChild(grp);
+    }
+
+    // Return front-month token so the caller can setSymbol with it
+    return sortedMonthly.length ? sortedMonthly[0].token : null;
+
+  } catch (e) {
+    console.warn('[ContractSelector] loadContractOptions error:', e);
+    return null;
+  }
+}
+
+function syncContractSelector() {
+  const sel = document.getElementById('contract-selector');
+  if (!sel || !_widget) return;
+  let sym;
+  try { sym = _widget.activeChart().symbol(); } catch { return; }
+  // If the chart is using a bare symbol (e.g. 'MES'), treat as CONT_FRONT
+  const token = sym.includes('@') ? sym : `${sym}@CONT_FRONT`;
+  if ([...sel.options].some(o => o.value === token)) {
+    sel.value = token;
+  }
+}
+
+// Move the contract-selector wrapper into the currently-active watch-item.
+function mountContractSelectorInActiveItem() {
+  const wrap = document.getElementById('contract-selector-wrap');
+  if (!wrap) return;
+  const active = document.querySelector('.watch-item.active');
+  if (!active) return;
+  if (wrap.parentElement !== active) active.appendChild(wrap);
+}
+
+function initContractSelector() {
+  const sel = document.getElementById('contract-selector');
+  if (!sel) return;
+  // Don't let clicking the dropdown trigger the watch-item click
+  const wrap = document.getElementById('contract-selector-wrap');
+  if (wrap) {
+    wrap.addEventListener('click', (e) => e.stopPropagation());
+    wrap.addEventListener('mousedown', (e) => e.stopPropagation());
+  }
+  // Mount under the currently-active watch-item
+  mountContractSelectorInActiveItem();
+  sel.addEventListener('change', () => {
+    const token = sel.value;
+    if (!token || !_widget) return;
+    const baseSym = token.split('@')[0];
+    _currentSymbol = baseSym;
+    const res = (() => { try { return _widget.activeChart().resolution(); } catch { return '5'; } })();
+    _widget.setSymbol(token, res, () => {
+      console.log('[ContractSelector] switched to', token);
+    });
+  });
+}
+
 // Position state
 let _currentPosition = { symbol: 'MES', position: 0, avg_cost: 0, side: 'FLAT' };
 
@@ -76,6 +197,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initSRLegendDrag();
   initPositionPolling();
   initWatchlistClick();
+  initContractSelector();
   fetchWatchlistPrices();
   fetchWatchlistContractInfo();
   // Refresh watchlist prices every 60s
@@ -447,9 +569,23 @@ function initChart() {
     // when load_last_chart restores a previous session)
     try { _currentSymbol = chart.symbol(); } catch {}
 
+    // Load initial contract options and switch to front month
+    loadContractOptions(_currentSymbol.split('@')[0]).then(frontToken => {
+      if (frontToken && _widget) {
+        const res = (() => { try { return chart.resolution(); } catch { return '5'; } })();
+        _widget.setSymbol(frontToken, res, () => {
+          console.log('[Chart] init: switched to front month', frontToken);
+        });
+      } else {
+        syncContractSelector();
+      }
+    });
+
     // Reload analyses (and redraw active ones) whenever the chart symbol changes
     chart.onSymbolChanged().subscribe(null, () => {
       try { _currentSymbol = chart.symbol(); } catch {}
+      const baseSym = _currentSymbol.split('@')[0];
+      loadContractOptions(baseSym).then(() => syncContractSelector());
       loadCycleAnalyses();
     });
 
@@ -1459,18 +1595,26 @@ function updateTopbarOHLC(bar) {
 
 function initWatchlistClick() {
   document.querySelectorAll('.watch-item').forEach(item => {
-    item.addEventListener('click', () => {
+    item.addEventListener('click', async () => {
       const sym = item.dataset.symbol;
       if (!sym || !_widget) return;
       // Update active state
       document.querySelectorAll('.watch-item').forEach(i => i.classList.remove('active'));
       item.classList.add('active');
-      // Switch chart symbol (no longer use _RTH suffix)
       _currentSymbol = sym;
+      // Move contract dropdown into the newly-active watch-item
+      mountContractSelectorInActiveItem();
+      // Populate selector and get front-month token
+      const frontToken = await loadContractOptions(sym);
+      const token = frontToken || sym;
+      if (frontToken) {
+        const sel = document.getElementById('contract-selector');
+        if (sel) sel.value = frontToken;
+      }
       try {
         const res = _widget.activeChart().resolution();
-        _widget.setSymbol(sym, res, () => {
-          console.log('[Watchlist] switched to', sym);
+        _widget.setSymbol(token, res, () => {
+          console.log('[Watchlist] switched to', token);
           // Reload S/R analysis for new symbol
           fetch(`/api/analysis?symbol=${sym}`)
             .then(r => r.json())
@@ -1482,7 +1626,6 @@ function initWatchlistClick() {
             })
             .catch(e => console.warn('Analysis fetch error:', e));
           // Reload market cycle analyses for new symbol
-          // (onSymbolChanged also fires but calling here ensures _currentSymbol is already updated)
           loadCycleAnalyses();
         });
       } catch (e) {

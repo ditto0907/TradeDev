@@ -218,7 +218,8 @@ async def _fill_internal_gaps(sym: str, tf: str, fetcher_obj, max_age_days: int 
                 gap_bars = [b for b in ib_bars
                             if from_ts < b["time"] < to_ts]
                 if gap_bars:
-                    saved = fetcher_obj.persist_bars(sym, tf, gap_bars, source="ib_historical")
+                    _saved = fetcher_obj.persist_bars(sym, tf, gap_bars, source="ib_historical")
+                    saved = _saved.get("inserted", 0) if isinstance(_saved, dict) else int(_saved or 0)
                     total_filled += saved
                     logger.info("[%s/%s] Filled %d bars for gap %s→%s (%ds)",
                                 sym, tf, saved, from_ts, to_ts, gap_sec)
@@ -318,42 +319,46 @@ async def _prefetch_extra_symbols(fetcher, ib_ok):
                     if bars5:
                         saved = fetcher.persist_bars(sym_name, "5min", bars5,
                                                      source="ib_historical")
-                        logger.info("[%s] Saved %d new 5min bars to DB", sym_name, saved)
-                        if saved:
+                        n_saved = saved.get("inserted", 0) if isinstance(saved, dict) else int(saved or 0)
+                        logger.info("[%s] Saved %d new 5min bars to DB", sym_name, n_saved)
+                        if n_saved:
                             try:
                                 await data_manager.notify_history_ready(
                                     sym_name, "5min",
                                     from_ts=bars5[0]["time"],
                                     to_ts=bars5[-1]["time"],
-                                    added_bars=saved,
+                                    added_bars=n_saved,
                                 )
                             except Exception:
                                 pass
                     else:
                         logger.info("[%s] IB returned 0 new 5min bars", sym_name)
 
-            # ── 1D bars (always refresh to keep daily chart up to date) ─
+            # ── 1D bars (refresh only when last bar is stale) ─────────
             since_1d = db.get_latest_ts(sym_name, "1D")
             existing_1d = db.get_bars(sym_name, "1D")
+            _skip_1d = False
             if existing_1d and since_1d:
                 import time as _time
                 gap_days = (_time.time() - since_1d) / 86400
                 if gap_days < 1:
                     logger.info("[%s] 1D bars up to date — skip fetch", sym_name)
-                    continue
-            raw_1d = await asyncio.wait_for(
-                fetcher.ib.reqHistoricalDataAsync(
-                    qc, endDateTime="",
-                    durationStr=config.HISTORY_DURATION_1D,
-                    barSizeSetting="1 day", whatToShow="TRADES",
-                    useRTH=True, formatDate=2,
-                ), timeout=60.0,
-            )
-            bars_1d = [_bar_to_dict(b) for b in raw_1d]
-            if bars_1d:
-                saved_1d = fetcher.persist_bars(sym_name, "1D", bars_1d,
-                                                source="ib_historical")
-                logger.info("[%s] Saved %d 1D bars to DB", sym_name, saved_1d)
+                    _skip_1d = True
+            if not _skip_1d:
+                raw_1d = await asyncio.wait_for(
+                    fetcher.ib.reqHistoricalDataAsync(
+                        qc, endDateTime="",
+                        durationStr=config.HISTORY_DURATION_1D,
+                        barSizeSetting="1 day", whatToShow="TRADES",
+                        useRTH=True, formatDate=2,
+                    ), timeout=60.0,
+                )
+                bars_1d = [_bar_to_dict(b) for b in raw_1d]
+                if bars_1d:
+                    _saved_1d = fetcher.persist_bars(sym_name, "1D", bars_1d,
+                                                    source="ib_historical")
+                    saved_1d = _saved_1d.get("inserted", 0) if isinstance(_saved_1d, dict) else int(_saved_1d or 0)
+                    logger.info("[%s] Saved %d 1D bars to DB", sym_name, saved_1d)
 
             # ── Fill internal gaps in 5min data ──────────────────────
             await _fill_internal_gaps(sym_name, "5min", fetcher)
@@ -381,8 +386,9 @@ async def _ib_background_init():
 
         # Persist the freshly fetched bars
         if fetcher.bars["5min"]:
-            saved = fetcher.persist_bars(MES_SYM, "5min", fetcher.bars["5min"],
+            _saved = fetcher.persist_bars(MES_SYM, "5min", fetcher.bars["5min"],
                                          source="ib_historical")
+            saved = _saved.get("inserted", 0) if isinstance(_saved, dict) else int(_saved or 0)
             logger.info("Saved %d 5min bars to DB", saved)
 
         # Fill internal gaps in MES 5min data (e.g. server downtime)
@@ -471,8 +477,9 @@ async def _ib_reconnect_loop():
             since_5min = db.get_latest_ts(MES_SYM, "5min")
             await fetcher.load_history(since_5min=since_5min)
             if fetcher.bars["5min"]:
-                saved = fetcher.persist_bars(MES_SYM, "5min", fetcher.bars["5min"],
+                _saved = fetcher.persist_bars(MES_SYM, "5min", fetcher.bars["5min"],
                                              source="ib_historical")
+                saved = _saved.get("inserted", 0) if isinstance(_saved, dict) else int(_saved or 0)
                 logger.info("[IB Reconnect] Saved %d new 5min bars to DB", saved)
 
             # Realtime subscription (guard against duplicate callbacks)
@@ -588,6 +595,13 @@ async def lifespan(app: FastAPI):
         f = fetcher if (fetcher._ib_ready and fetcher.ib and fetcher.ib.isConnected()) else None
         do_fix = os.environ.get("BG_VALIDATE_FIX", "1") != "0"
         await data_validator.background_validate(fetcher=f, fix=do_fix)
+        # ── Recover any realtime_completed bars written by previous runs ────
+        if f is not None:
+            try:
+                lookback = int(os.environ.get("REALTIME_RECOVER_LOOKBACK", "86400"))
+                await data_validator.recover_realtime_bars(f, lookback_seconds=lookback)
+            except Exception as e:
+                logger.warning("Realtime-bar recovery sweep failed: %s", e)
     _bg_validate_task = asyncio.create_task(_bg_validate_after_init())
 
     logger.info("Server ready to accept requests (DB-only mode).")
@@ -692,6 +706,48 @@ async def get_config():
     }
 
 
+@app.get("/api/symbol_list")
+async def get_symbol_list():
+    """Return all routable chart tokens (per design §5.1).
+
+    For each base symbol we expose:
+      * ``SYMBOL@CONT_FRONT``  — continuous, no adjustment (default)
+      * ``SYMBOL@CONT_RATIO``  — continuous, ratio-adjusted
+      * ``SYMBOL@CONT_DIFF``   — continuous, difference-adjusted
+      * ``SYMBOL@YYYYMM``      — every contract month with bars on disk
+
+    The frontend renders these in a symbol selector; ``/api/history``
+    accepts the resulting ``symbol`` value as a token.
+    """
+    out: list = []
+    base_symbols = sorted({
+        "MES",
+        *(s["symbol"] for s in getattr(config, "EXTRA_SYMBOLS", [])),
+    })
+    for sym in base_symbols:
+        out.append({"token": f"{sym}@CONT_FRONT",
+                    "label": f"{sym} (Continuous, no adjustment)",
+                    "kind": "continuous", "method": "front"})
+        out.append({"token": f"{sym}@CONT_RATIO",
+                    "label": f"{sym} (Continuous, ratio-adjusted)",
+                    "kind": "continuous", "method": "cont_ratio"})
+        out.append({"token": f"{sym}@CONT_DIFF",
+                    "label": f"{sym} (Continuous, difference-adjusted)",
+                    "kind": "continuous", "method": "cont_difference"})
+        try:
+            cms = db.get_distinct_contract_months(sym, "5min")
+        except Exception:
+            cms = []
+        for cm in cms:
+            out.append({
+                "token":          f"{sym}@{cm}",
+                "label":          f"{sym} {cm[:4]}-{cm[4:]}",
+                "kind":           "month",
+                "contract_month": cm,
+            })
+    return {"symbols": out}
+
+
 @app.get("/api/symbols")
 async def get_symbols(symbol: str = Query("MES")):
     _SYMBOL_META = {
@@ -793,7 +849,37 @@ async def get_history(
     from trading_calendar import get_calendar
 
     key  = resolution_to_key(resolution)
-    sym  = symbol.upper()
+    raw_symbol = symbol
+
+    # ── v3 token routing (per design §5.2) ───────────────────────────────────
+    # Accept tokens of the form ``SYM@CONT_FRONT|CONT_RATIO|CONT_DIFF`` or
+    # ``SYM@YYYYMM``.  Bare ``SYM`` falls through to the legacy code path
+    # (no contract_month filter, all-contracts response).
+    routed_cm: Optional[str] = None
+    routed_method: Optional[str] = None
+    if "@" in raw_symbol:
+        try:
+            import continuous_view as _cv
+            parsed = _cv.parse_token(raw_symbol)
+            sym = parsed["symbol"].upper()
+            if parsed["kind"] == "month":
+                routed_cm = parsed["contract_month"]
+            else:
+                routed_method = parsed["method"]
+        except Exception as e:
+            logger.warning("Bad symbol token %r: %s", raw_symbol, e)
+            sym = raw_symbol.split("@", 1)[0].upper()
+    else:
+        sym = raw_symbol.upper()
+
+    # When a continuous view is requested we still run the same gap-fill
+    # pipeline (Steps 1–4) — it operates on per-contract bars in the ``bars``
+    # table, which is exactly what ``assemble_continuous`` consumes — and
+    # then stitch the result at the end (just before the final response).
+    # ``fetcher.fetch_range`` internally chooses the right monthly Future
+    # for the requested time range and persists with ``contract_month``,
+    # so the continuous view auto-loads when the chart scrolls past the
+    # earliest cached bar (e.g. before 2026-04-28 for MES).
 
     # Get trading calendar for session-aware gap classification
     try:
@@ -802,7 +888,8 @@ async def get_history(
         cal = None
 
     # ── Step 1: Query existing bars from DB ──────────────────────────────────
-    bars = db.get_bars(sym, key, from_ts=from_ts, to_ts=to_ts)
+    bars = db.get_bars(sym, key, from_ts=from_ts, to_ts=to_ts,
+                       contract_month=routed_cm)
     earliest_db = db.get_earliest_ts(sym, key)
     latest_db   = db.get_latest_ts(sym, key)
 
@@ -920,8 +1007,9 @@ async def get_history(
                 try:
                     fetched = await fetcher.fetch_range(key, f_from, f_to, symbol=sym)
                     if fetched:
-                        saved = fetcher.persist_bars(sym, key, fetched,
+                        _saved = fetcher.persist_bars(sym, key, fetched,
                                                      source="ib_historical")
+                        saved = _saved.get("inserted", 0) if isinstance(_saved, dict) else int(_saved or 0)
                         logger.info(
                             "[%s/%s] IB fetch OK: %d bars fetched, %d saved to DB",
                             sym, key, len(fetched), saved,
@@ -1000,8 +1088,9 @@ async def get_history(
                                 gap_bars = [b for b in ib_bars
                                             if g_from < b["time"] < g_to]
                                 if gap_bars:
-                                    saved = fetcher.persist_bars(sym, key, gap_bars,
+                                    _saved = fetcher.persist_bars(sym, key, gap_bars,
                                                                  source="ib_historical")
+                                    saved = _saved.get("inserted", 0) if isinstance(_saved, dict) else int(_saved or 0)
                                     filled_any = True
                                     logger.info(
                                         "[%s/%s] Filled chunk %s→%s: %d bars",
@@ -1017,6 +1106,17 @@ async def get_history(
                     logger.info("[%s/%s] After internal fill: %d bars", sym, key, len(bars))
                 else:
                     _ib_fetch_cooldown[_internal_gap_cooldown_key] = now_ts + 300
+
+    # ── Continuous-view stitch (after gap-fill) ─────────────────────────────
+    # If the request was for a continuous token (e.g. ``MES@CONT_FRONT``),
+    # turn the per-contract ``bars`` into a stitched continuous series.  The
+    # gap-fill steps above have already pulled any missing per-contract data
+    # into the DB, so the assembler now sees the freshly-loaded range.
+    if routed_method:
+        import continuous_view as _cv
+        bars = _cv.assemble_continuous(
+            sym, key, from_ts, to_ts, method=routed_method,  # type: ignore[arg-type]
+        )
 
     # ── Step 5: Strip unfillable data gaps (calendar-aware) ─────────────────
     # Only strip genuine data gaps — let weekends/holidays/maintenance pass through.

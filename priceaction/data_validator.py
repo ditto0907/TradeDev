@@ -14,6 +14,7 @@ import logging
 import math
 import time
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
@@ -62,6 +63,24 @@ logger = logging.getLogger(__name__)
 _PRICE_TOL = 0.5
 # Volume tolerance: flag when volumes differ by more than this amount
 _VOLUME_TOL = 1.0
+
+# Per-task counter: incremented every time we actually issue an IB historical
+# request (cache miss). Callers reset it before a validate/fix call and read
+# it after to decide whether the IB-pacing sleep is needed. Cache-only paths
+# leave it at 0 → no sleep.
+_ib_request_counter: ContextVar[int] = ContextVar("_ib_request_counter", default=0)
+
+
+def _ib_req_reset() -> None:
+    _ib_request_counter.set(0)
+
+
+def _ib_req_incr() -> None:
+    _ib_request_counter.set(_ib_request_counter.get() + 1)
+
+
+def _ib_req_count() -> int:
+    return _ib_request_counter.get()
 
 
 # ─── IB Connection Helper ────────────────────────────────────────────────────
@@ -263,12 +282,24 @@ async def get_ib_bars_with_cache(
         logger.info("[%s/%s] IB cache miss: fetching [%s→%s] from IB",
                     symbol, bar_size_key, sub_from, sub_to)
         try:
+            _ib_req_incr()
             if fetcher:
                 fetched = await fetcher.fetch_range(bar_size_key, sub_from, sub_to, symbol=symbol)
             else:
                 fetched = await _fetch_ib_bars(ib, symbol, bar_size_key, sub_from, sub_to)
 
             if fetched:
+                # v3: tag each bar with contract_token so per-contract
+                # rows coexist in the cache.  Monthly fetches → MONTH:YYYYMM;
+                # ContFuture-derived bars → CONT (back-adjusted reference).
+                for b in fetched:
+                    if b.get("contract_token"):
+                        continue
+                    if b.get("source") == "ib_continuous":
+                        b["contract_token"] = "CONT"
+                    else:
+                        cm = b.get("contract_month") or ""
+                        b["contract_token"] = f"MONTH:{cm}" if cm else "CONT"
                 saved = db.insert_ib_cache_bars(symbol, bar_size_key, fetched)
                 logger.info("[%s/%s] Cached %d IB bars for [%s→%s]",
                             symbol, bar_size_key, saved, sub_from, sub_to)
@@ -339,6 +370,60 @@ def _compare_bars(
             })
 
     return mismatches, db_only, ib_only
+
+
+def _check_price_continuity(
+    db_bars: List[dict],
+    symbol: str,
+    interval: int,
+    tol: float,
+) -> List[dict]:
+    """Detect adjacent-bar price discontinuities.
+
+    For each pair of consecutive bars (same contract_month, time delta == interval,
+    no session-boundary gap) where ``|open_n - close_(n-1)| > tol``, return a
+    violation record.  Catches mis-recorded realtime bars whose open price was
+    captured mid-window and therefore does not chain to the previous close.
+    """
+    if not db_bars or len(db_bars) < 2:
+        return []
+    try:
+        from trading_calendar import get_calendar
+        cal = get_calendar(symbol)
+    except Exception:
+        cal = None
+
+    # Group by contract month so cross-contract boundaries (which legitimately
+    # have price discontinuity) are not flagged.
+    groups: Dict[str, List[dict]] = {}
+    for b in db_bars:
+        groups.setdefault(b.get("contract_month", "") or "", []).append(b)
+
+    violations: List[dict] = []
+    for cm, bars in groups.items():
+        bars = sorted(bars, key=lambda x: x["time"])
+        for i in range(1, len(bars)):
+            prev, cur = bars[i - 1], bars[i]
+            if cur["time"] - prev["time"] != interval:
+                continue  # gap or duplicate — handled elsewhere
+            # Skip session boundaries (overnight maintenance, weekends, holidays)
+            if cal is not None:
+                gap_type = cal.classify_gap(prev["time"], cur["time"])
+                if gap_type not in ("normal", "data_gap"):
+                    continue
+            diff = cur["open"] - prev["close"]
+            if abs(diff) > tol:
+                violations.append({
+                    "time": cur["time"],
+                    "prev_time": prev["time"],
+                    "prev_close": prev["close"],
+                    "open": cur["open"],
+                    "diff": diff,
+                    "contract_month": cm,
+                    "prev_source": prev.get("source", ""),
+                    "source": cur.get("source", ""),
+                })
+    return violations
 
 
 def _fmt_range(from_ts: int, to_ts: int) -> str:
@@ -424,6 +509,8 @@ async def validate_bars(
             "ohlcv_violation_count": 0,
             "calendar_missing_count": 0,
             "calendar_missing": [],
+            "continuity_violations": [],
+            "continuity_violation_count": 0,
             "already_validated": True,
         }
 
@@ -480,14 +567,31 @@ async def validate_bars(
     except Exception:
         pass
 
+    # ── Price continuity check ──────────────────────────────────────────
+    # Detects realtime-source bars whose open was captured mid-window and
+    # therefore does not chain to the previous bar's close.
+    # Skip for 1D timeframe: daily bars always have an overnight gap between
+    # close and next open — flagging every trading day pair as a violation
+    # would permanently mark 1D chunks as dirty and cause endless re-fetches.
+    continuity_violations: List[dict] = []
+    if timeframe != "1D":
+        try:
+            _, _interval = _key_to_ib(timeframe)
+            tol = getattr(config, "PRICE_CONTINUITY_TOL", 1.0)
+            continuity_violations = _check_price_continuity(
+                db_bars, symbol, _interval, tol,
+            )
+        except Exception as e:
+            logger.debug("price-continuity check failed for %s/%s: %s", symbol, timeframe, e)
+
     elapsed = time.monotonic() - t0
     logger.info(
         "=== [DATA VALIDATE] DONE   %s/%s  %s%s  "
         "db=%d ib=%d mismatches=%d db_only=%d ib_only=%d "
-        "ohlcv_violations=%d calendar_missing=%d  (%.1fs) ===",
+        "ohlcv_violations=%d calendar_missing=%d continuity=%d  (%.1fs) ===",
         symbol, timeframe, rng, cm_info,
         len(db_bars), len(ib_bars), len(mismatches), len(db_only), len(ib_only),
-        len(ohlcv_violations), len(calendar_missing),
+        len(ohlcv_violations), len(calendar_missing), len(continuity_violations),
         elapsed,
     )
 
@@ -508,6 +612,8 @@ async def validate_bars(
         "ohlcv_violation_count": len(ohlcv_violations),
         "calendar_missing_count": len(calendar_missing),
         "calendar_missing": calendar_missing,
+        "continuity_violations": continuity_violations,
+        "continuity_violation_count": len(continuity_violations),
     }
 
 
@@ -574,6 +680,35 @@ async def fix_bars(
         b["source"] = "ib_validated"
         fixed_bars.append(b)
 
+    # ── Promote matched bars whose DB source is still provisional ───────────
+    # Bars that exist in both DB and IB with values within tolerance are
+    # already correct, but if their DB source is ``realtime_completed`` (or
+    # ``unknown``) we re-save with source ``ib_validated`` so subsequent page
+    # refreshes can show "everything except the most recent live bar is
+    # IB-verified" without doing any extra work.
+    promoted = 0
+    mismatch_ts = {m["time"] for m in mismatches}
+    ib_only_ts  = {b["time"] for b in ib_only}
+    db_map = {b["time"]: b for b in db_bars}
+    ib_map = {b["time"]: b for b in ib_bars}
+    _PROVISIONAL_SOURCES = {"realtime_completed", "unknown", ""}
+    for ts, db_bar in db_map.items():
+        if ts in mismatch_ts or ts in ib_only_ts:
+            continue
+        if ts not in ib_map:
+            continue
+        if db_bar.get("source") not in _PROVISIONAL_SOURCES:
+            continue
+        # Skip continuous-contract bars (they're skipped in compare too).
+        if not db_bar.get("contract_month") or not ib_map[ts].get("contract_month"):
+            continue
+        if ts_filter is not None and ts not in ts_filter:
+            continue
+        b = dict(ib_map[ts])
+        b["source"] = "ib_validated"
+        fixed_bars.append(b)
+        promoted += 1
+
     saved = 0
     if fixed_bars:
         saved = db.insert_bars(symbol, timeframe, fixed_bars, source="ib_validated")
@@ -581,9 +716,10 @@ async def fix_bars(
     elapsed = time.monotonic() - t0
     logger.info(
         "=== [DATA FIX] DONE   %s/%s  %s%s  "
-        "db=%d ib=%d mismatches=%d ib_only=%d fixed=%d  (%.1fs) ===",
+        "db=%d ib=%d mismatches=%d ib_only=%d promoted=%d fixed=%d  (%.1fs) ===",
         symbol, timeframe, rng, cm_info,
-        len(db_bars), len(ib_bars), len(mismatches), len(ib_only), saved,
+        len(db_bars), len(ib_bars), len(mismatches), len(ib_only),
+        promoted, saved,
         elapsed,
     )
 
@@ -599,6 +735,7 @@ async def fix_bars(
         "mismatches": mismatches,
         "ib_only_inserted": len(ib_only),
         "ib_only": ib_only,
+        "promoted_count": promoted,
         "fixed_count": saved,
     }
 
@@ -712,6 +849,7 @@ async def validate_all(
                     chunk_start = max(aligned_earliest, chunk_excl_end - effective_chunk)
                     chunk_incl_end = chunk_excl_end - interval
 
+                    _ib_req_reset()
                     try:
                         if fix:
                             r = await fix_bars(sym, tf, chunk_start, chunk_incl_end,
@@ -750,8 +888,9 @@ async def validate_all(
                     # Half-open: previous window's start becomes this end.
                     chunk_excl_end = chunk_start
 
-                    # IB pacing: ~2 second pause between requests
-                    await asyncio.sleep(2)
+                    # IB pacing: only sleep if this chunk actually hit IB.
+                    if _ib_req_count() > 0:
+                        await asyncio.sleep(2)
 
             total_mismatches += sym_result["total_mismatches"]
             total_fixed += sym_result["total_fixed"]
@@ -909,6 +1048,7 @@ async def background_validate(
                             fetcher.bg_gate() if fetcher is not None
                             else _NULL_GATE
                         )
+                        _ib_req_reset()
                         async with gate:
                             if fix:
                                 result = await fix_bars(
@@ -935,6 +1075,7 @@ async def background_validate(
                             + result.get("ib_only_count", 0)
                             + result.get("ohlcv_violation_count", 0)
                             + result.get("calendar_missing_count", 0)
+                            + result.get("continuity_violation_count", 0)
                         )
 
                         # Record this chunk as validated (closed-closed)
@@ -948,13 +1089,14 @@ async def background_validate(
                                 "[BG VALIDATE] %s/%s chunk [%s→%s): "
                                 "%d issue(s) found "
                                 "(mismatch=%d db_only=%d ib_only=%d "
-                                "ohlcv=%d calendar_missing=%d)",
+                                "ohlcv=%d calendar_missing=%d continuity=%d)",
                                 sym, tf, chunk_start, chunk_excl_end, issue_count,
                                 result.get("mismatch_count", 0),
                                 result.get("db_only_count", 0),
                                 result.get("ib_only_count", 0),
                                 result.get("ohlcv_violation_count", 0),
                                 result.get("calendar_missing_count", 0),
+                                result.get("continuity_violation_count", 0),
                             )
 
                     except Exception as e:
@@ -965,8 +1107,9 @@ async def background_validate(
 
                     # Half-open: previous chunk's exclusive end is this chunk's start.
                     chunk_excl_end = chunk_start
-                    # IB pacing (per-symbol serial; safe to keep)
-                    await asyncio.sleep(2)
+                    # IB pacing: only sleep if this chunk actually hit IB.
+                    if _ib_req_count() > 0:
+                        await asyncio.sleep(2)
 
         async def _run_symbol(sym: str, sym_pairs: List[Tuple[str, str]]) -> None:
             logger.info("[BG VALIDATE] >>> symbol %s started (%d tf)",
@@ -991,6 +1134,164 @@ async def background_validate(
 
     elapsed = time.monotonic() - t0
     logger.info("=== [BG VALIDATE] Complete (%.1fs) ===", elapsed)
+
+
+# ─── Realtime-bar delayed revalidation ────────────────────────────────────────
+
+async def revalidate_realtime_bar(
+    fetcher: "IBDataFetcher",
+    symbol: str,
+    timeframe: str,
+    bar_ts: int,
+    delay: Optional[int] = None,
+) -> None:
+    """Wait *delay* seconds then re-validate a single just-completed realtime
+    bar against IB historical data; auto-fix any mismatch.
+
+    Realtime bars are written with ``source="realtime_completed"`` and may
+    contain an open-price captured mid-window (instead of the true session
+    open) — this is invisible to single-bar OHLCV checks but becomes a
+    price-continuity violation once the next bar arrives.  This task
+    self-heals such bars without waiting for the next full bg_validate pass.
+
+    To force a fresh IB read, the IB-fetch-cache row for *bar_ts* (if any)
+    is purged before fix_bars runs.
+    """
+    if delay is None:
+        delay = getattr(config, "REALTIME_REVALIDATE_DELAY", 180)
+    try:
+        await asyncio.sleep(max(0, int(delay)))
+    except asyncio.CancelledError:
+        return
+    try:
+        # Force a fresh IB read for this single timestamp.
+        try:
+            db.delete_ib_cache_bars(symbol, timeframe, bar_ts, bar_ts)
+        except Exception as e:
+            logger.debug("revalidate: cache invalidate failed %s/%s ts=%s: %s",
+                         symbol, timeframe, bar_ts, e)
+
+        result = await fix_bars(
+            symbol, timeframe, bar_ts, bar_ts, fetcher=fetcher,
+        )
+        if result.get("fixed_count", 0) > 0:
+            logger.info(
+                "[REVALIDATE] %s/%s ts=%s: corrected %d bar(s) from IB",
+                symbol, timeframe, bar_ts, result["fixed_count"],
+            )
+        else:
+            logger.debug(
+                "[REVALIDATE] %s/%s ts=%s: clean (db=%d ib=%d)",
+                symbol, timeframe, bar_ts,
+                result.get("db_count", 0), result.get("ib_count", 0),
+            )
+    except Exception as e:
+        logger.warning(
+            "[REVALIDATE] %s/%s ts=%s failed: %s",
+            symbol, timeframe, bar_ts, e,
+        )
+
+
+async def recover_realtime_bars(
+    fetcher: "IBDataFetcher",
+    lookback_seconds: int = 86400,
+    stagger: float = 2.0,
+) -> int:
+    """Scan the DB for recently-written ``source='realtime_completed'`` bars
+    and re-validate them against IB.
+
+    Bars whose values match IB are *promoted* to ``ib_validated`` (so a page
+    refresh shows only the most recent live bar as realtime, everything else
+    as IB-verified).  Bars that don't match are overwritten with IB data.
+
+    Adjacent timestamps for the same (symbol, timeframe, contract_month) are
+    coalesced into one IB fetch to avoid pacing penalties.
+
+    Called once at server startup so bars persisted by an earlier run are
+    self-healed before the user refreshes the chart.
+
+    *lookback_seconds* — how far back to scan (default 24 h).
+    *stagger* — seconds between IB requests (avoids pacing).
+    Returns the number of (symbol, timeframe, range) groups scheduled.
+    """
+    cutoff = int(time.time()) - max(0, int(lookback_seconds))
+    rows: List[Tuple[str, str, int, str]] = []
+    try:
+        with db._conn() as conn:
+            rows = conn.execute(
+                "SELECT symbol, timeframe, ts, COALESCE(contract_month,'') "
+                "FROM bars "
+                "WHERE source='realtime_completed' AND ts >= ? "
+                "ORDER BY symbol, timeframe, contract_month, ts",
+                (cutoff,),
+            ).fetchall()
+    except Exception as e:
+        logger.warning("[RECOVER] Could not query realtime bars: %s", e)
+        return 0
+
+    if not rows:
+        logger.info("[RECOVER] No realtime_completed bars in last %ds", lookback_seconds)
+        return 0
+
+    # ── Coalesce adjacent timestamps into ranges per (sym, tf, cm) ──────────
+    # Two timestamps are "adjacent" if the gap between them is <= 1h
+    # (covers most session continuity; non-adjacent bars get separate fetches).
+    _MERGE_GAP = 3600
+    groups: List[Tuple[str, str, str, int, int]] = []  # (sym, tf, cm, from_ts, to_ts)
+    cur_sym = cur_tf = cur_cm = None
+    cur_from = cur_to = 0
+    for sym, tf, ts, cm in rows:
+        if (sym, tf, cm) != (cur_sym, cur_tf, cur_cm) or ts - cur_to > _MERGE_GAP:
+            if cur_sym is not None:
+                groups.append((cur_sym, cur_tf, cur_cm, cur_from, cur_to))
+            cur_sym, cur_tf, cur_cm = sym, tf, cm
+            cur_from = cur_to = ts
+        else:
+            cur_to = ts
+    if cur_sym is not None:
+        groups.append((cur_sym, cur_tf, cur_cm, cur_from, cur_to))
+
+    logger.info(
+        "[RECOVER] Re-validating %d realtime bar(s) in %d group(s) "
+        "(lookback=%ds, stagger=%.1fs)",
+        len(rows), len(groups), lookback_seconds, stagger,
+    )
+
+    async def _runner():
+        total_promoted = 0
+        total_fixed = 0
+        for sym, tf, cm, ts_from, ts_to in groups:
+            try:
+                # Force a fresh IB read for this range — the existing cache
+                # rows (if any) may have been written before realtime caught
+                # up, so we want the current authoritative IB snapshot.
+                try:
+                    db.delete_ib_cache_bars(sym, tf, ts_from, ts_to)
+                except Exception:
+                    pass
+                _ib_req_reset()
+                result = await fix_bars(
+                    sym, tf, ts_from, ts_to,
+                    fetcher=fetcher,
+                    contract_month=cm or None,
+                )
+                total_promoted += result.get("promoted_count", 0)
+                total_fixed += result.get("fixed_count", 0)
+            except Exception as e:
+                logger.debug(
+                    "[RECOVER] %s/%s cm=%s [%s→%s] failed: %s",
+                    sym, tf, cm, ts_from, ts_to, e,
+                )
+            # IB pacing: only sleep if this group actually hit IB.
+            if _ib_req_count() > 0:
+                await asyncio.sleep(stagger)
+        logger.info(
+            "[RECOVER] Sweep complete: %d group(s), promoted=%d fixed=%d",
+            len(groups), total_promoted, total_fixed,
+        )
+
+    asyncio.create_task(_runner())
+    return len(groups)
 
 
 # ─── Public helper API (single validation entry point) ────────────────────────

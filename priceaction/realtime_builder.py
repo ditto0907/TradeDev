@@ -78,7 +78,7 @@ def persist_completed_bar(
                 symbol, timeframe, e,
             )
     try:
-        return fetcher.persist_bars(
+        saved = fetcher.persist_bars(
             symbol, timeframe, [bar], source="realtime_completed",
         )
     except Exception as e:
@@ -87,6 +87,31 @@ def persist_completed_bar(
             symbol, timeframe, e,
         )
         return 0
+
+    # Schedule a delayed re-validation against IB historical so a bar whose
+    # open price was captured mid-window (a known realtime-stream race) can
+    # be corrected without waiting for the next full bg_validate pass.
+    if saved:
+        try:
+            import asyncio
+            import data_validator as _dv
+            ts = bar.get("time")
+            if ts is not None:
+                asyncio.get_event_loop().create_task(
+                    _dv.revalidate_realtime_bar(
+                        fetcher, symbol, timeframe, int(ts),
+                    )
+                )
+        except RuntimeError:
+            # No running event loop (e.g. unit tests) — silently skip.
+            pass
+        except Exception as e:
+            logger.debug(
+                "Could not schedule revalidation for %s/%s ts=%s: %s",
+                symbol, timeframe, bar.get("time"), e,
+            )
+
+    return saved
 
 
 def persist_inprogress_bar(
@@ -100,7 +125,25 @@ def persist_inprogress_bar(
     main ``bars`` store — so it can be reloaded after a server restart.
     Failures are swallowed at DEBUG level because high-frequency tick
     handlers must never raise.
+
+    v3: the realtime_bars PK now includes contract_month; ensure the
+    bar carries one (derived from its timestamp via the contract_calendar
+    if not already tagged by the tick handler).
     """
+    cm = bar.get("contract_month")
+    if not cm:
+        try:
+            from ib_data_fetcher import _contract_month_for_ts
+            ts = bar.get("time")
+            if ts is not None:
+                bar = dict(bar)
+                bar["contract_month"] = _contract_month_for_ts(int(ts), symbol)
+        except Exception as e:
+            logger.debug(
+                "persist_inprogress_bar: cannot derive contract_month for %s/%s: %s",
+                symbol, timeframe, e,
+            )
+            return
     try:
         db.upsert_realtime_bar(symbol, timeframe, bar)
     except Exception as e:

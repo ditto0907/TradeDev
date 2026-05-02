@@ -17,7 +17,7 @@ Usage:
 import sqlite3
 import logging
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 from queue import Queue, Empty
 from contextlib import contextmanager
 import threading
@@ -29,6 +29,45 @@ _DB_PATH = Path(__file__).parent / "data" / "tradedev.db"
 # Sentinel value for "no upper bound" in timestamp queries.
 # Represents a far-future Unix timestamp (~2286).
 MAX_TIMESTAMP = 9_999_999_999
+
+# ── v3 source rank table ─────────────────────────────────────────────────────
+# Higher rank = more authoritative.  ``insert_bars`` refuses to overwrite an
+# existing row whose source has a higher rank than the incoming bar's source.
+# ``ib_continuous`` is rank 0 because ContFuture data is back-adjusted by IB
+# every rollover and must NOT be persisted to ``bars`` — see doc/data_redesign_v3.md.
+SOURCE_RANK = {
+    "ib_validated":     100,
+    "ib_monthly":        80,
+    "ib_historical":     60,
+    "realtime_completed": 20,
+    "ib_continuous":      0,
+    "unknown":            0,
+}
+
+
+def source_rank(source: str) -> int:
+    """Return the rank for *source*; unknown sources rank as 0."""
+    return SOURCE_RANK.get(source, 0)
+
+
+def _set_db_path_for_testing(path) -> None:
+    """Override the database path and reset the connection pool.
+    Test-only helper; production code must not call this.
+    """
+    global _DB_PATH, _pool, _pool_initialized
+    # Drain the pool
+    try:
+        while True:
+            c = _pool.get_nowait()
+            try:
+                c.close()
+            except Exception:
+                pass
+    except Empty:
+        pass
+    _DB_PATH = Path(path)
+    _pool = Queue(maxsize=10)
+    _pool_initialized = False
 
 # ── Connection Pool ───────────────────────────────────────────────────────────
 # Reuse connections to avoid "too many open files" with high-frequency operations.
@@ -101,11 +140,36 @@ def _conn():
 
 
 def init_db() -> None:
-    """Create tables and indexes if they don't exist."""
+    """Create tables and indexes if they don't exist.
+
+    v3 schema notes
+    ---------------
+    The four bar-related tables (``bars``, ``realtime_bars``,
+    ``ib_fetch_cache``, ``validated_ranges``) are recreated on every startup
+    if they predate v3 (i.e. lack the v3 columns).  This is safe because the
+    redesign assumes a fresh start — see ``doc/data_redesign_v3.md``.
+    """
     with _conn() as conn:
+        # ── v3 migration: drop pre-v3 bar/cache tables that lack v3 columns ──
+        for tbl, marker_col in (
+            ("bars",           "source_rank"),
+            ("realtime_bars",  "contract_month"),
+            ("ib_fetch_cache", "contract_token"),
+            ("validated_ranges", "contract_month"),
+        ):
+            try:
+                cols = {row[1] for row in conn.execute(f"PRAGMA table_info({tbl})").fetchall()}
+            except sqlite3.Error:
+                cols = set()
+            if cols and marker_col not in cols:
+                conn.execute(f"DROP TABLE IF EXISTS {tbl}")
+                logger.info("v3 init: dropped pre-v3 %s table", tbl)
+
+        # ── bars: per-contract immutable facts ───────────────────────────
         conn.execute("""
             CREATE TABLE IF NOT EXISTS bars (
                 symbol         TEXT    NOT NULL,
+                contract_month TEXT    NOT NULL,
                 timeframe      TEXT    NOT NULL,
                 ts             INTEGER NOT NULL,
                 open           REAL    NOT NULL,
@@ -113,28 +177,42 @@ def init_db() -> None:
                 low            REAL    NOT NULL,
                 close          REAL    NOT NULL,
                 volume         REAL    NOT NULL,
-                source         TEXT    NOT NULL DEFAULT 'unknown',
-                contract_month TEXT    NOT NULL DEFAULT '',
-                PRIMARY KEY (symbol, timeframe, ts)
+                source         TEXT    NOT NULL,
+                source_rank    INTEGER NOT NULL,
+                fetched_at     INTEGER NOT NULL,
+                PRIMARY KEY (symbol, contract_month, timeframe, ts)
             )
         """)
         conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_bars_sym_tf_ts "
-            "ON bars (symbol, timeframe, ts)"
+            "CREATE INDEX IF NOT EXISTS idx_bars_lookup "
+            "ON bars (symbol, timeframe, ts, contract_month)"
         )
-        # ── Migrate: add columns to existing databases ────────────────────
-        cursor = conn.execute("PRAGMA table_info(bars)")
-        bar_columns = {row[1] for row in cursor.fetchall()}
-        if "source" not in bar_columns:
-            conn.execute(
-                "ALTER TABLE bars ADD COLUMN source TEXT NOT NULL DEFAULT 'unknown'"
+        # ── bar_revisions: audit trail for any change to a ``bars`` row ──
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS bar_revisions (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol         TEXT    NOT NULL,
+                contract_month TEXT    NOT NULL,
+                timeframe      TEXT    NOT NULL,
+                ts             INTEGER NOT NULL,
+                prev_source    TEXT    NOT NULL,
+                prev_rank      INTEGER NOT NULL,
+                prev_open      REAL,
+                prev_high      REAL,
+                prev_low       REAL,
+                prev_close     REAL,
+                prev_volume    REAL,
+                new_source     TEXT    NOT NULL,
+                new_rank       INTEGER NOT NULL,
+                diff_summary   TEXT    NOT NULL DEFAULT '',
+                revised_at     INTEGER NOT NULL,
+                reason         TEXT    NOT NULL DEFAULT ''
             )
-            logger.info("Migrated bars table: added 'source' column")
-        if "contract_month" not in bar_columns:
-            conn.execute(
-                "ALTER TABLE bars ADD COLUMN contract_month TEXT NOT NULL DEFAULT ''"
-            )
-            logger.info("Migrated bars table: added 'contract_month' column")
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_bar_rev_lookup "
+            "ON bar_revisions (symbol, contract_month, timeframe, ts)"
+        )
         conn.execute("""
             CREATE TABLE IF NOT EXISTS chart_layouts (
                 id        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -231,28 +309,32 @@ def init_db() -> None:
             conn.execute(
                 "ALTER TABLE strategy_trades ADD COLUMN contracts INTEGER NOT NULL DEFAULT 1"
             )
-        # ── Realtime bars table (one row per symbol/timeframe) ────────────────
+        # ── Realtime bars table — one in-progress bar per (symbol, contract_month, timeframe) ─
+        # v3: holds only the current unfinished bar; completed bars are NEVER
+        # promoted to ``bars`` directly — instead we trigger an IB pull and
+        # let ``insert_bars`` write the authoritative row.
         conn.execute("""
             CREATE TABLE IF NOT EXISTS realtime_bars (
-                symbol     TEXT    NOT NULL,
-                timeframe  TEXT    NOT NULL,
-                ts         INTEGER NOT NULL,
-                open       REAL    NOT NULL,
-                high       REAL    NOT NULL,
-                low        REAL    NOT NULL,
-                close      REAL    NOT NULL,
-                volume     REAL    NOT NULL,
-                updated_at INTEGER NOT NULL,
-                PRIMARY KEY (symbol, timeframe)
+                symbol         TEXT    NOT NULL,
+                contract_month TEXT    NOT NULL,
+                timeframe      TEXT    NOT NULL,
+                ts             INTEGER NOT NULL,
+                open           REAL    NOT NULL,
+                high           REAL    NOT NULL,
+                low            REAL    NOT NULL,
+                close          REAL    NOT NULL,
+                volume         REAL    NOT NULL,
+                updated_at     INTEGER NOT NULL,
+                PRIMARY KEY (symbol, contract_month, timeframe)
             )
         """)
-        # ── IB fetch cache table — raw bars fetched from IB, never modified ───
-        # Used to avoid redundant IB requests across validate/fix cycles.
-        # Primary purpose: performance & rate-limit protection, especially for
-        # large-range validation scenarios.
+        # ── IB fetch cache: mirror of IB historical responses ─────────────
+        # v3: ``contract_token`` distinguishes 'MONTH:YYYYMM' from 'CONT'
+        # (continuous-contract data, kept in cache only — never in ``bars``).
         conn.execute("""
             CREATE TABLE IF NOT EXISTS ib_fetch_cache (
                 symbol         TEXT    NOT NULL,
+                contract_token TEXT    NOT NULL,
                 timeframe      TEXT    NOT NULL,
                 ts             INTEGER NOT NULL,
                 open           REAL    NOT NULL,
@@ -261,83 +343,34 @@ def init_db() -> None:
                 close          REAL    NOT NULL,
                 volume         REAL    NOT NULL,
                 fetched_at     INTEGER NOT NULL,
-                contract_month TEXT    NOT NULL DEFAULT '',
-                PRIMARY KEY (symbol, timeframe, ts)
+                PRIMARY KEY (symbol, contract_token, timeframe, ts)
             )
         """)
         conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_ib_cache_sym_tf_ts "
-            "ON ib_fetch_cache (symbol, timeframe, ts)"
+            "CREATE INDEX IF NOT EXISTS idx_ib_cache_lookup "
+            "ON ib_fetch_cache (symbol, timeframe, ts, contract_token)"
         )
-        # ── Migrate: add contract_month to ib_fetch_cache ─────────────────
-        cursor = conn.execute("PRAGMA table_info(ib_fetch_cache)")
-        cache_columns = {row[1] for row in cursor.fetchall()}
-        if "contract_month" not in cache_columns:
-            conn.execute(
-                "ALTER TABLE ib_fetch_cache ADD COLUMN contract_month TEXT NOT NULL DEFAULT ''"
-            )
-            logger.info("Migrated ib_fetch_cache table: added 'contract_month' column")
-        # ── Validated ranges — tracks already-checked time ranges ─────────
-        # Background validation persists which ranges have been validated so
-        # subsequent runs (or API queries) can skip them.
-        # UNIQUE(symbol, timeframe, from_ts, to_ts) lets us upsert the row
-        # on every re-validation instead of appending duplicate history.
+        # ── Validated ranges — tracks already-checked time ranges per contract ─
+        # v3: ``contract_month`` is part of the natural key, so the same
+        # timeframe window can be validated independently per contract.
         conn.execute("""
             CREATE TABLE IF NOT EXISTS validated_ranges (
-                id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                symbol     TEXT    NOT NULL,
-                timeframe  TEXT    NOT NULL,
-                from_ts    INTEGER NOT NULL,
-                to_ts      INTEGER NOT NULL,
-                checked_at TEXT    NOT NULL,
-                mismatches INTEGER NOT NULL DEFAULT 0,
-                fixed      INTEGER NOT NULL DEFAULT 0,
-                UNIQUE(symbol, timeframe, from_ts, to_ts)
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol         TEXT    NOT NULL,
+                contract_month TEXT    NOT NULL,
+                timeframe      TEXT    NOT NULL,
+                from_ts        INTEGER NOT NULL,
+                to_ts          INTEGER NOT NULL,
+                checked_at     TEXT    NOT NULL,
+                mismatches     INTEGER NOT NULL DEFAULT 0,
+                fixed          INTEGER NOT NULL DEFAULT 0,
+                UNIQUE(symbol, contract_month, timeframe, from_ts, to_ts)
             )
         """)
         conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_vr_sym_tf "
-            "ON validated_ranges (symbol, timeframe)"
+            "CREATE INDEX IF NOT EXISTS idx_vr_lookup "
+            "ON validated_ranges (symbol, timeframe, contract_month)"
         )
-        # ── Migrate: pre-existing tables created before the UNIQUE
-        # constraint had appended duplicate rows on every re-validation.
-        # Detect missing UNIQUE index, collapse duplicates (keep the row
-        # with the worst-case state per window so issues stay surfaced),
-        # then create the index.
-        try:
-            has_unique = False
-            for row in conn.execute(
-                "SELECT name, sql FROM sqlite_master WHERE type='index' "
-                "AND tbl_name='validated_ranges'"
-            ).fetchall():
-                if row[1] and "UNIQUE" in row[1].upper() and "from_ts" in row[1]:
-                    has_unique = True
-                    break
-            if not has_unique:
-                conn.execute("""
-                    DELETE FROM validated_ranges
-                    WHERE id NOT IN (
-                        SELECT id FROM (
-                            SELECT id,
-                                   ROW_NUMBER() OVER (
-                                       PARTITION BY symbol, timeframe, from_ts, to_ts
-                                       ORDER BY (mismatches + fixed) DESC, id DESC
-                                   ) AS rn
-                            FROM validated_ranges
-                        )
-                        WHERE rn = 1
-                    )
-                """)
-                conn.execute(
-                    "CREATE UNIQUE INDEX IF NOT EXISTS uniq_vr_sym_tf_range "
-                    "ON validated_ranges (symbol, timeframe, from_ts, to_ts)"
-                )
-                logger.info(
-                    "Migrated validated_ranges: deduplicated rows and added "
-                    "UNIQUE(symbol,timeframe,from_ts,to_ts) index"
-                )
-        except sqlite3.Error as e:
-            logger.warning("validated_ranges UNIQUE migration failed: %s", e)
         # ── Trade logs — parsed broker trade history with user annotations ─
         conn.execute("""
             CREATE TABLE IF NOT EXISTS trade_logs (
@@ -382,85 +415,292 @@ def init_db() -> None:
     logger.info("Database ready: %s", _DB_PATH)
 
 
-def insert_bars(symbol: str, timeframe: str, bars: List[dict],
-                source: str = "unknown") -> int:
-    """Insert or replace bars after validating OHLCV integrity.
+def insert_bars(
+    symbol: str,
+    timeframe: str,
+    bars: List[dict],
+    source: Optional[str] = None,
+    reason: str = "",
+) -> dict:
+    """v3 insert: write per-contract bars to the ``bars`` table with
+    rank-guard and audit-trail enforcement.
 
-    Bars that fail validation (e.g. high < low, non-positive price) are
-    logged and skipped — never persisted.  Returns number of rows upserted.
+    Each input bar dict MUST contain:
+      * ``time`` (int)
+      * ``open`` / ``high`` / ``low`` / ``close`` (float)
+      * ``volume`` (float)
+      * ``contract_month`` (non-empty 'YYYYMM' string)
+      * ``source`` (string in :data:`SOURCE_RANK`) — or pass ``source=`` arg
+
+    Rules:
+      * ``contract_month`` is required and must be non-empty.
+      * ``source='ib_continuous'`` is rejected — ContFuture data goes to
+        ``ib_fetch_cache`` only.  ContFuture is back-adjusted by IB on every
+        rollover, so it is not a stable fact.
+      * If a row already exists for the same key and the existing
+        ``source_rank`` is higher than the incoming bar's rank, the write is
+        rejected (logged at WARNING).
+      * If a row exists with values different from the incoming bar (any
+        OHLCV diff or different source), a row is appended to
+        ``bar_revisions`` before the overwrite.
+
+    Returns a dict with counters::
+
+        {"inserted":int, "replaced":int, "rejected_rank":int,
+         "rejected_validation":int, "revisions":int}
     """
+    out = {"inserted": 0, "replaced": 0,
+           "rejected_rank": 0, "rejected_validation": 0,
+           "revisions": 0}
     if not bars:
-        return 0
-    valid_rows = []
+        return out
+    import time as _time
+    now_ts = int(_time.time())
+
+    # ── Pre-validate every bar ───────────────────────────────────────────
+    cleaned: List[Tuple] = []
     for b in bars:
-        o, h, l, c = b["open"], b["high"], b["low"], b["close"]
-        v = b["volume"]
-        # ── OHLCV integrity checks ──────────────────────────────────────
+        bar_source = b.get("source", source)
+        if not bar_source:
+            logger.warning(
+                "insert_bars %s/%s ts=%s: missing source — rejected",
+                symbol, timeframe, b.get("time"),
+            )
+            out["rejected_validation"] += 1
+            continue
+        if bar_source == "ib_continuous":
+            logger.warning(
+                "insert_bars %s/%s ts=%s: source='ib_continuous' is not "
+                "allowed in bars table — rejected",
+                symbol, timeframe, b.get("time"),
+            )
+            out["rejected_validation"] += 1
+            continue
+        cm = b.get("contract_month", "")
+        if not cm:
+            logger.warning(
+                "insert_bars %s/%s ts=%s: empty contract_month — rejected",
+                symbol, timeframe, b.get("time"),
+            )
+            out["rejected_validation"] += 1
+            continue
+        try:
+            o = float(b["open"]); h = float(b["high"])
+            l = float(b["low"]);  c = float(b["close"])
+            v = float(b["volume"])
+        except (KeyError, TypeError, ValueError):
+            logger.warning(
+                "insert_bars %s/%s ts=%s: missing/non-numeric OHLCV — rejected",
+                symbol, timeframe, b.get("time"),
+            )
+            out["rejected_validation"] += 1
+            continue
         if h < l:
-            logger.warning("Skipping bar %s/%s ts=%s: high (%.4f) < low (%.4f)",
-                           symbol, timeframe, b["time"], h, l)
+            logger.warning(
+                "insert_bars %s/%s ts=%s: high (%.4f) < low (%.4f) — rejected",
+                symbol, timeframe, b["time"], h, l,
+            )
+            out["rejected_validation"] += 1
             continue
         if any(p <= 0 for p in (o, h, l, c)):
-            logger.warning("Skipping bar %s/%s ts=%s: non-positive price O=%.4f H=%.4f L=%.4f C=%.4f",
-                           symbol, timeframe, b["time"], o, h, l, c)
+            logger.warning(
+                "insert_bars %s/%s ts=%s: non-positive OHLC — rejected",
+                symbol, timeframe, b["time"],
+            )
+            out["rejected_validation"] += 1
             continue
         if v < 0:
-            logger.warning("Skipping bar %s/%s ts=%s: negative volume %.1f",
-                           symbol, timeframe, b["time"], v)
+            logger.warning(
+                "insert_bars %s/%s ts=%s: negative volume — rejected",
+                symbol, timeframe, b["time"],
+            )
+            out["rejected_validation"] += 1
             continue
-        valid_rows.append(
-            (symbol, timeframe,
-             b["time"], o, h, l, c, v,
-             b.get("source", source),
-             b.get("contract_month", ""))
-        )
-    if not valid_rows:
-        return 0
+        new_rank = source_rank(bar_source)
+        cleaned.append((symbol, cm, timeframe, int(b["time"]),
+                        o, h, l, c, v, bar_source, new_rank, now_ts))
+
+    if not cleaned:
+        return out
+
+    # ── Rank-guard + revision audit, applied row by row ──────────────────
+    # Rank-guard summary counters: (sym, cm, tf, old_src, new_src) -> {ohlcv_diff: int, same: int}
+    _rank_guard_summary: Dict[Tuple, Dict[str, int]] = {}
+
+    revisions: List[Tuple] = []
+    accepted: List[Tuple] = []
     with _conn() as conn:
-        conn.executemany(
-            "INSERT OR REPLACE INTO bars "
-            "(symbol, timeframe, ts, open, high, low, close, volume, source, contract_month) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?)",
-            valid_rows,
-        )
-    skipped = len(bars) - len(valid_rows)
-    if skipped:
-        logger.info("insert_bars %s/%s: %d inserted, %d skipped (validation)",
-                     symbol, timeframe, len(valid_rows), skipped)
-    return len(valid_rows)
+        # Pre-fetch existing rows in one query
+        keys = [(r[0], r[1], r[2], r[3]) for r in cleaned]
+        existing: Dict[Tuple, Tuple] = {}
+        # SQLite has a ~999 parameter limit; chunk.
+        CHUNK = 200
+        for i in range(0, len(keys), CHUNK):
+            sub = keys[i:i + CHUNK]
+            placeholders = ",".join(["(?,?,?,?)"] * len(sub))
+            flat = [v for k in sub for v in k]
+            rows = conn.execute(
+                "SELECT symbol, contract_month, timeframe, ts, "
+                "open, high, low, close, volume, source, source_rank "
+                "FROM bars WHERE (symbol, contract_month, timeframe, ts) IN "
+                f"(VALUES {placeholders})",
+                flat,
+            ).fetchall()
+            for r in rows:
+                existing[(r[0], r[1], r[2], r[3])] = r
+
+        for row in cleaned:
+            sym, cm, tf, ts, o, h, l, c, v, src, new_rank, fetched = row
+            old = existing.get((sym, cm, tf, ts))
+            if old is None:
+                accepted.append(row)
+                continue
+            old_o, old_h, old_l, old_c, old_v = old[4], old[5], old[6], old[7], old[8]
+            old_src, old_rank = old[9], old[10]
+            ohlcv_diff = (
+                abs(old_o - o) > 1e-9 or abs(old_h - h) > 1e-9 or
+                abs(old_l - l) > 1e-9 or abs(old_c - c) > 1e-9 or
+                abs(old_v - v) > 1e-9
+            )
+            src_diff = (old_src != src)
+            if not ohlcv_diff and not src_diff:
+                # Identical — silent no-op (still counts as replace=0).
+                continue
+            if new_rank < old_rank:
+                _key = (sym, cm, tf, old_src, src)
+                if _key not in _rank_guard_summary:
+                    _rank_guard_summary[_key] = {"ohlcv_diff": 0, "same": 0}
+                if ohlcv_diff:
+                    _rank_guard_summary[_key]["ohlcv_diff"] += 1
+                else:
+                    _rank_guard_summary[_key]["same"] += 1
+                out["rejected_rank"] += 1
+                continue
+            # Audit row
+            diff_parts = []
+            if abs(old_o - o) > 1e-9: diff_parts.append(f"o:{old_o}->{o}")
+            if abs(old_h - h) > 1e-9: diff_parts.append(f"h:{old_h}->{h}")
+            if abs(old_l - l) > 1e-9: diff_parts.append(f"l:{old_l}->{l}")
+            if abs(old_c - c) > 1e-9: diff_parts.append(f"c:{old_c}->{c}")
+            if abs(old_v - v) > 1e-9: diff_parts.append(f"v:{old_v}->{v}")
+            if src_diff: diff_parts.append(f"src:{old_src}->{src}")
+            revisions.append((
+                sym, cm, tf, ts,
+                old_src, old_rank, old_o, old_h, old_l, old_c, old_v,
+                src, new_rank, ",".join(diff_parts), now_ts, reason or "",
+            ))
+            accepted.append(row)
+
+        # Emit aggregated rank-guard summary (one line per group instead of per bar)
+        for (g_sym, g_cm, g_tf, g_old_src, g_new_src), counts in _rank_guard_summary.items():
+            n_diff = counts["ohlcv_diff"]
+            n_same = counts["same"]
+            parts = []
+            if n_diff:
+                parts.append(f"{n_diff} bars with DIFFERENT OHLCV")
+            if n_same:
+                parts.append(f"{n_same} bars same OHLCV")
+            log_fn = logger.warning if n_diff else logger.debug
+            log_fn(
+                "insert_bars %s/%s/%s: rank guard blocked %d bars (%s) [old=%s → new=%s]",
+                g_sym, g_cm, g_tf, n_diff + n_same, ", ".join(parts), g_old_src, g_new_src,
+            )
+
+        if revisions:
+            conn.executemany(
+                "INSERT INTO bar_revisions "
+                "(symbol, contract_month, timeframe, ts, "
+                " prev_source, prev_rank, prev_open, prev_high, prev_low, prev_close, prev_volume, "
+                " new_source, new_rank, diff_summary, revised_at, reason) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                revisions,
+            )
+            out["revisions"] = len(revisions)
+
+        if accepted:
+            conn.executemany(
+                "INSERT OR REPLACE INTO bars "
+                "(symbol, contract_month, timeframe, ts, "
+                " open, high, low, close, volume, source, source_rank, fetched_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                accepted,
+            )
+            # accepted = inserted (no existing) + replaced (existing differed and rank ok)
+            out["replaced"] = len(revisions)
+            out["inserted"] = len(accepted) - len(revisions)
+
+    return out
 
 
-def upsert_realtime_bar(symbol: str, timeframe: str, bar: dict) -> None:
-    """Upsert the current in-progress realtime bar (one row per symbol/timeframe).
+def upsert_realtime_bar(symbol: str, timeframe: str, bar: dict,
+                         contract_month: Optional[str] = None) -> None:
+    """Upsert the current in-progress realtime bar.
 
-    Stored in a separate table from IB historical bars so they never mix.
-    Used for crash-recovery: the server reloads this on startup so the chart
-    shows the latest forming bar without waiting for the first realtime tick.
+    v3: keyed by (symbol, contract_month, timeframe).  ``contract_month``
+    must be supplied either via the *bar* dict or the keyword argument.
     """
     import time as _time
+    cm = bar.get("contract_month") or contract_month
+    if not cm:
+        raise ValueError("realtime_bar requires non-empty contract_month")
     with _conn() as conn:
         conn.execute(
             "INSERT OR REPLACE INTO realtime_bars "
-            "(symbol, timeframe, ts, open, high, low, close, volume, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?)",
-            (symbol, timeframe,
-             bar["time"], bar["open"], bar["high"], bar["low"], bar["close"],
-             bar["volume"], int(_time.time())),
+            "(symbol, contract_month, timeframe, ts, "
+            " open, high, low, close, volume, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (symbol, cm, timeframe,
+             int(bar["time"]), float(bar["open"]), float(bar["high"]),
+             float(bar["low"]), float(bar["close"]), float(bar["volume"]),
+             int(_time.time())),
         )
 
 
+def delete_realtime_bar(symbol: str, contract_month: str, timeframe: str) -> int:
+    """Remove the realtime row for a (symbol, contract_month, timeframe).
+    Used after a completed realtime bar has been successfully promoted via
+    an authoritative IB pull."""
+    with _conn() as conn:
+        cur = conn.execute(
+            "DELETE FROM realtime_bars "
+            "WHERE symbol=? AND contract_month=? AND timeframe=?",
+            (symbol, contract_month, timeframe),
+        )
+        return cur.rowcount
+
+
 def get_all_realtime_bars() -> List[dict]:
-    """Return all saved realtime bars (one per symbol/timeframe)."""
+    """Return all in-progress realtime bars (one per
+    symbol/contract_month/timeframe)."""
     with _conn() as conn:
         rows = conn.execute(
-            "SELECT symbol, timeframe, ts, open, high, low, close, volume "
-            "FROM realtime_bars"
+            "SELECT symbol, contract_month, timeframe, ts, "
+            "open, high, low, close, volume FROM realtime_bars"
         ).fetchall()
     return [
-        {"symbol": r[0], "timeframe": r[1], "time": r[2],
-         "open": r[3], "high": r[4], "low": r[5], "close": r[6], "volume": r[7]}
+        {"symbol": r[0], "contract_month": r[1], "timeframe": r[2],
+         "time": r[3], "open": r[4], "high": r[5],
+         "low": r[6], "close": r[7], "volume": r[8]}
         for r in rows
     ]
+
+
+def get_realtime_bar(symbol: str, contract_month: str,
+                     timeframe: str) -> Optional[dict]:
+    """Return the current realtime bar for (symbol, contract_month, timeframe)
+    or None if none exists."""
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT ts, open, high, low, close, volume FROM realtime_bars "
+            "WHERE symbol=? AND contract_month=? AND timeframe=?",
+            (symbol, contract_month, timeframe),
+        ).fetchone()
+    if not row:
+        return None
+    return {"time": row[0], "open": row[1], "high": row[2],
+            "low": row[3], "close": row[4], "volume": row[5],
+            "symbol": symbol, "contract_month": contract_month,
+            "timeframe": timeframe}
 
 
 def get_bars(
@@ -473,11 +713,15 @@ def get_bars(
 ) -> List[dict]:
     """Return bars in [from_ts, to_ts] sorted ascending by timestamp.
 
-    If *contract_month* is provided (e.g. '202503'), only bars tagged with
-    that contract are returned — prevents mixing data from different contracts.
+    v3 note: bars are stored per-contract.  When *contract_month* is omitted,
+    rows from all contracts are returned (mainly for diagnostics) — chart
+    rendering should always supply a specific contract_month or use the
+    continuous_view module.
     """
     sql = (
-        "SELECT ts, open, high, low, close, volume, source, contract_month FROM bars "
+        "SELECT ts, open, high, low, close, volume, source, source_rank, "
+        "       contract_month, fetched_at "
+        "FROM bars "
         "WHERE symbol=? AND timeframe=? AND ts>=? AND ts<=?"
     )
     params: list = [symbol, timeframe, from_ts, to_ts]
@@ -493,8 +737,8 @@ def get_bars(
     return [
         {"time": r[0], "open": r[1], "high": r[2],
          "low": r[3], "close": r[4], "volume": r[5],
-         "source": r[6] if len(r) > 6 else "unknown",
-         "contract_month": r[7] if len(r) > 7 else ""}
+         "source": r[6], "source_rank": r[7],
+         "contract_month": r[8], "fetched_at": r[9]}
         for r in rows
     ]
 
@@ -588,31 +832,75 @@ def get_distinct_contract_months(symbol: str, timeframe: str) -> List[str]:
     return [r[0] for r in rows]
 
 
+def get_bar_revisions(
+    symbol: Optional[str] = None,
+    contract_month: Optional[str] = None,
+    timeframe: Optional[str] = None,
+    ts: Optional[int] = None,
+    limit: int = 100,
+) -> List[dict]:
+    """Return audit-trail rows from ``bar_revisions`` (newest first)."""
+    where = []
+    params: list = []
+    if symbol:
+        where.append("symbol=?"); params.append(symbol)
+    if contract_month:
+        where.append("contract_month=?"); params.append(contract_month)
+    if timeframe:
+        where.append("timeframe=?"); params.append(timeframe)
+    if ts is not None:
+        where.append("ts=?"); params.append(ts)
+    where_sql = (" WHERE " + " AND ".join(where)) if where else ""
+    params.append(limit)
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT id, symbol, contract_month, timeframe, ts, "
+            " prev_source, prev_rank, prev_open, prev_high, prev_low, "
+            " prev_close, prev_volume, "
+            " new_source, new_rank, diff_summary, revised_at, reason "
+            f"FROM bar_revisions{where_sql} ORDER BY id DESC LIMIT ?",
+            params,
+        ).fetchall()
+    return [
+        {"id": r[0], "symbol": r[1], "contract_month": r[2], "timeframe": r[3],
+         "ts": r[4],
+         "prev_source": r[5], "prev_rank": r[6],
+         "prev_open": r[7], "prev_high": r[8], "prev_low": r[9],
+         "prev_close": r[10], "prev_volume": r[11],
+         "new_source": r[12], "new_rank": r[13],
+         "diff_summary": r[14], "revised_at": r[15], "reason": r[16]}
+        for r in rows
+    ]
+
+
 # ─── Validated Ranges ─────────────────────────────────────────────────────────
 # Tracks time ranges that have been validated by the background task.
 
 def insert_validated_range(
     symbol: str, timeframe: str, from_ts: int, to_ts: int,
     mismatches: int = 0, fixed: int = 0,
+    contract_month: str = "",
 ) -> int:
-    """Record that a time range has been validated. Returns row id.
+    """Record that a time range has been validated for a specific contract.
 
-    Upserts on (symbol, timeframe, from_ts, to_ts): re-validating an
-    identical window overwrites the previous result instead of appending
-    a duplicate row.
+    v3: ``contract_month`` participates in the natural key.
+    Upserts on (symbol, contract_month, timeframe, from_ts, to_ts).
     """
     from datetime import datetime, timezone as _tz
     checked_at = datetime.now(_tz.utc).isoformat()
     with _conn() as conn:
         cursor = conn.execute(
             "INSERT INTO validated_ranges "
-            "(symbol, timeframe, from_ts, to_ts, checked_at, mismatches, fixed) "
-            "VALUES (?,?,?,?,?,?,?) "
-            "ON CONFLICT(symbol, timeframe, from_ts, to_ts) DO UPDATE SET "
+            "(symbol, contract_month, timeframe, from_ts, to_ts, "
+            " checked_at, mismatches, fixed) "
+            "VALUES (?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(symbol, contract_month, timeframe, from_ts, to_ts) "
+            "DO UPDATE SET "
             "checked_at=excluded.checked_at, "
             "mismatches=excluded.mismatches, "
             "fixed=excluded.fixed",
-            (symbol, timeframe, from_ts, to_ts, checked_at, mismatches, fixed),
+            (symbol, contract_month, timeframe, from_ts, to_ts,
+             checked_at, mismatches, fixed),
         )
         return cursor.lastrowid
 
@@ -620,28 +908,29 @@ def insert_validated_range(
 def get_validated_ranges(
     symbol: Optional[str] = None,
     timeframe: Optional[str] = None,
+    contract_month: Optional[str] = None,
 ) -> List[dict]:
-    """Return all validated ranges, optionally filtered by symbol/timeframe.
-    Sorted by from_ts descending (newest first)."""
+    """Return validated ranges, optionally filtered.  Sorted by from_ts desc."""
     where_clauses = []
     params: list = []
     if symbol:
-        where_clauses.append("symbol=?")
-        params.append(symbol)
+        where_clauses.append("symbol=?"); params.append(symbol)
     if timeframe:
-        where_clauses.append("timeframe=?")
-        params.append(timeframe)
+        where_clauses.append("timeframe=?"); params.append(timeframe)
+    if contract_month is not None:
+        where_clauses.append("contract_month=?"); params.append(contract_month)
     where_sql = (" WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
     with _conn() as conn:
         rows = conn.execute(
-            f"SELECT id, symbol, timeframe, from_ts, to_ts, checked_at, mismatches, fixed "
+            f"SELECT id, symbol, contract_month, timeframe, from_ts, to_ts, "
+            f"       checked_at, mismatches, fixed "
             f"FROM validated_ranges{where_sql} ORDER BY from_ts DESC",
             params,
         ).fetchall()
     return [
-        {"id": r[0], "symbol": r[1], "timeframe": r[2],
-         "from_ts": r[3], "to_ts": r[4], "checked_at": r[5],
-         "mismatches": r[6], "fixed": r[7]}
+        {"id": r[0], "symbol": r[1], "contract_month": r[2], "timeframe": r[3],
+         "from_ts": r[4], "to_ts": r[5], "checked_at": r[6],
+         "mismatches": r[7], "fixed": r[8]}
         for r in rows
     ]
 
@@ -649,20 +938,12 @@ def get_validated_ranges(
 def get_merged_validated_ranges(
     symbol: str,
     timeframe: str,
+    contract_month: str,
 ) -> List[dict]:
     """Return merged (non-overlapping) **clean** validated ranges for a
-    symbol/timeframe.  Only rows with ``mismatches=0`` are considered clean —
-    ranges with outstanding issues are intentionally excluded so background
-    validation will re-check them.  Adjacent and overlapping ranges are merged
-    into continuous spans.  Returns [{from_ts, to_ts}] sorted ascending.
-
-    Two ranges ``[a, b]`` and ``[c, d]`` are considered adjacent when
-    ``c - b <= interval`` (one timeframe slot apart) — this matches how the
-    validator splits chunks at half-open ``[start, excl_end)`` boundaries
-    where the next chunk starts at ``excl_end`` and the previous chunk's
-    inclusive end is ``excl_end - interval``.
+    (symbol, contract_month, timeframe).  Only rows with ``mismatches=0``
+    count as clean.  Adjacent and overlapping ranges are merged.
     """
-    # Per-timeframe interval (seconds) for adjacency detection
     try:
         from ib_data_fetcher import _key_to_ib
         _, interval = _key_to_ib(timeframe)
@@ -671,17 +952,16 @@ def get_merged_validated_ranges(
     with _conn() as conn:
         rows = conn.execute(
             "SELECT from_ts, to_ts FROM validated_ranges "
-            "WHERE symbol=? AND timeframe=? AND mismatches=0 "
-            "ORDER BY from_ts",
-            (symbol, timeframe),
+            "WHERE symbol=? AND contract_month=? AND timeframe=? "
+            "AND mismatches=0 ORDER BY from_ts",
+            (symbol, contract_month, timeframe),
         ).fetchall()
     if not rows:
         return []
-    # Merge overlapping/adjacent ranges
     merged: list = []
     cur_from, cur_to = rows[0]
     for r_from, r_to in rows[1:]:
-        if r_from <= cur_to + interval:  # overlap or one-slot-apart
+        if r_from <= cur_to + interval:
             cur_to = max(cur_to, r_to)
         else:
             merged.append({"from_ts": cur_from, "to_ts": cur_to})
@@ -695,12 +975,13 @@ def is_range_validated(
     timeframe: str,
     from_ts: int,
     to_ts: int,
+    contract_month: str = "",
 ) -> bool:
-    """Check if the entire [from_ts, to_ts] range is covered by validated ranges."""
-    merged = get_merged_validated_ranges(symbol, timeframe)
+    """Check if [from_ts, to_ts] is fully covered by clean validated ranges
+    for the given (symbol, contract_month, timeframe)."""
+    merged = get_merged_validated_ranges(symbol, timeframe, contract_month)
     if not merged:
         return False
-    # Check if [from_ts, to_ts] is fully contained in any merged range
     for rng in merged:
         if rng["from_ts"] <= from_ts and rng["to_ts"] >= to_ts:
             return True
@@ -712,13 +993,13 @@ def get_unchecked_ranges(
     timeframe: str,
     from_ts: int,
     to_ts: int,
+    contract_month: str = "",
 ) -> List[dict]:
-    """Return sub-ranges of [from_ts, to_ts] that have NOT been validated yet.
-    Returns [{from_ts, to_ts}] sorted ascending."""
-    merged = get_merged_validated_ranges(symbol, timeframe)
+    """Return sub-ranges of [from_ts, to_ts] that have NOT been validated yet
+    for (symbol, contract_month, timeframe)."""
+    merged = get_merged_validated_ranges(symbol, timeframe, contract_month)
     if not merged:
         return [{"from_ts": from_ts, "to_ts": to_ts}]
-
     unchecked: list = []
     cursor = from_ts
     for rng in merged:
@@ -735,11 +1016,16 @@ def get_unchecked_ranges(
 # Raw bars fetched from IB, kept as a local cache to avoid redundant IB requests.
 # Only used for caching purposes — never written to by any other logic.
 
-def insert_ib_cache_bars(symbol: str, timeframe: str, bars: List[dict]) -> int:
+def insert_ib_cache_bars(symbol: str, timeframe: str, bars: List[dict],
+                          contract_token: Optional[str] = None) -> int:
     """Insert or replace bars into the IB fetch cache with validation.
 
-    Applies the same OHLCV integrity checks as insert_bars — invalid bars
-    from IB are logged and skipped.  Returns row count.
+    v3: each row is keyed by ``contract_token`` — either ``'MONTH:YYYYMM'``
+    for a specific month-future or ``'CONT'`` for a continuous-contract
+    response.  ContFuture data lives ONLY here, never in the ``bars`` table.
+
+    The token can be supplied per bar (``bar['contract_token']``) or as the
+    *contract_token* keyword argument applied to all bars.
     """
     if not bars:
         return 0
@@ -747,23 +1033,41 @@ def insert_ib_cache_bars(symbol: str, timeframe: str, bars: List[dict]) -> int:
     now_ts = int(_time.time())
     valid_rows = []
     for b in bars:
-        o, h, l, c = b["open"], b["high"], b["low"], b["close"]
-        v = b["volume"]
-        if h < l or any(p <= 0 for p in (o, h, l, c)) or v <= 0:
-            logger.warning("IB cache: skipping invalid bar %s/%s ts=%s O=%.4f H=%.4f L=%.4f C=%.4f V=%.1f",
-                           symbol, timeframe, b["time"], o, h, l, c, v)
+        token = b.get("contract_token") or contract_token
+        if not token:
+            logger.warning(
+                "ib_cache: bar %s/%s ts=%s missing contract_token — skipped",
+                symbol, timeframe, b.get("time"),
+            )
+            continue
+        try:
+            o = float(b["open"]); h = float(b["high"])
+            l = float(b["low"]);  c = float(b["close"])
+            v = float(b["volume"])
+        except (KeyError, TypeError, ValueError):
+            logger.warning(
+                "ib_cache: bar %s/%s ts=%s missing/non-numeric OHLCV — skipped",
+                symbol, timeframe, b.get("time"),
+            )
+            continue
+        if h < l or any(p <= 0 for p in (o, h, l, c)) or v < 0:
+            logger.warning(
+                "ib_cache: skipping invalid bar %s/%s ts=%s "
+                "O=%.4f H=%.4f L=%.4f C=%.4f V=%.1f",
+                symbol, timeframe, b["time"], o, h, l, c, v,
+            )
             continue
         valid_rows.append(
-            (symbol, timeframe,
-             b["time"], o, h, l, c, v, now_ts,
-             b.get("contract_month", ""))
+            (symbol, token, timeframe, int(b["time"]),
+             o, h, l, c, v, now_ts)
         )
     if not valid_rows:
         return 0
     with _conn() as conn:
         conn.executemany(
             "INSERT OR REPLACE INTO ib_fetch_cache "
-            "(symbol, timeframe, ts, open, high, low, close, volume, fetched_at, contract_month) "
+            "(symbol, contract_token, timeframe, ts, "
+            " open, high, low, close, volume, fetched_at) "
             "VALUES (?,?,?,?,?,?,?,?,?,?)",
             valid_rows,
         )
@@ -775,27 +1079,45 @@ def get_ib_cache_bars(
     timeframe: str,
     from_ts: int = 0,
     to_ts: int = MAX_TIMESTAMP,
-    contract_month: Optional[str] = None,
+    contract_token: Optional[str] = None,
 ) -> List[dict]:
     """Return cached IB bars in [from_ts, to_ts] sorted ascending.
 
-    If *contract_month* is provided, only bars for that contract are returned.
+    *contract_token* is required for v3 reads (None → all tokens, returns
+    rows annotated with their token).
     """
     sql = (
-        "SELECT ts, open, high, low, close, volume, contract_month FROM ib_fetch_cache "
+        "SELECT ts, open, high, low, close, volume, contract_token, fetched_at "
+        "FROM ib_fetch_cache "
         "WHERE symbol=? AND timeframe=? AND ts>=? AND ts<=?"
     )
     params: list = [symbol, timeframe, from_ts, to_ts]
-    if contract_month is not None:
-        sql += " AND contract_month=?"
-        params.append(contract_month)
+    if contract_token is not None:
+        sql += " AND contract_token=?"
+        params.append(contract_token)
     sql += " ORDER BY ts"
     with _conn() as conn:
         rows = conn.execute(sql, params).fetchall()
+
+    # Derive contract_month from the token so callers (e.g. data_validator
+    # writing fixed bars back via insert_bars) get a tag insert_bars accepts.
+    # MONTH:YYYYMM → YYYYMM ; CONT → derive front-month from ts.
+    def _cm_from_token(tok: str, ts: int) -> str:
+        if tok and tok.startswith("MONTH:") and len(tok) >= 12:
+            return tok[6:]
+        if tok == "CONT":
+            try:
+                from contract_calendar import active_contract
+                return active_contract(int(ts), symbol)
+            except Exception:
+                return ""
+        return ""
+
     return [
         {"time": r[0], "open": r[1], "high": r[2],
          "low": r[3], "close": r[4], "volume": r[5],
-         "contract_month": r[6] if len(r) > 6 else ""}
+         "contract_token": r[6], "fetched_at": r[7],
+         "contract_month": _cm_from_token(r[6], r[0])}
         for r in rows
     ]
 
@@ -805,16 +1127,40 @@ def get_ib_cache_coverage(
     timeframe: str,
     from_ts: int,
     to_ts: int,
+    contract_token: Optional[str] = None,
 ) -> List[int]:
-    """Return sorted list of cached timestamps for (symbol, timeframe) in range."""
+    """Return sorted list of cached timestamps for (symbol, timeframe[, token])
+    in range."""
+    sql = ("SELECT ts FROM ib_fetch_cache "
+           "WHERE symbol=? AND timeframe=? AND ts>=? AND ts<=?")
+    params: list = [symbol, timeframe, from_ts, to_ts]
+    if contract_token is not None:
+        sql += " AND contract_token=?"
+        params.append(contract_token)
+    sql += " ORDER BY ts"
     with _conn() as conn:
-        rows = conn.execute(
-            "SELECT ts FROM ib_fetch_cache "
-            "WHERE symbol=? AND timeframe=? AND ts>=? AND ts<=? "
-            "ORDER BY ts",
-            (symbol, timeframe, from_ts, to_ts),
-        ).fetchall()
+        rows = conn.execute(sql, params).fetchall()
     return [r[0] for r in rows]
+
+
+def delete_ib_cache_bars(
+    symbol: str,
+    timeframe: str,
+    from_ts: int,
+    to_ts: int,
+    contract_token: Optional[str] = None,
+) -> int:
+    """Delete IB-cache rows in [from_ts, to_ts] (inclusive), optionally
+    scoped to a single contract_token.  Returns rows deleted."""
+    sql = ("DELETE FROM ib_fetch_cache "
+           "WHERE symbol=? AND timeframe=? AND ts>=? AND ts<=?")
+    params: list = [symbol, timeframe, from_ts, to_ts]
+    if contract_token is not None:
+        sql += " AND contract_token=?"
+        params.append(contract_token)
+    with _conn() as conn:
+        cur = conn.execute(sql, params)
+        return cur.rowcount
 
 
 def find_gaps(

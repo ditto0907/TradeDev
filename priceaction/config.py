@@ -125,6 +125,17 @@ SR_MAX_LEVELS_PER_SIDE = 4   # keep only major levels per side
 SR_MAX_DISTANCE_PCT = 1.2    # ignore levels too far from current price
 ANALYSIS_BAR_SIZE = "5min"  # run analysis on 5-min bars
 
+# ─── Data Integrity ───────────────────────────────────────────────────────────
+# Max acceptable jump (in price units) between consecutive bars' close→open
+# when there is no session boundary (no weekend/holiday/maintenance gap).
+# A larger jump indicates a likely mis-recorded realtime bar (e.g. open price
+# captured mid-window) and is flagged as a price-continuity violation.
+PRICE_CONTINUITY_TOL = 1.0
+# Delay (seconds) before re-validating a just-completed realtime bar against
+# IB historical.  IB historical data for a fresh 5-min bar usually appears
+# within 1-2 minutes; we wait 3 minutes to be safe.
+REALTIME_REVALIDATE_DELAY = 180
+
 # ─── IBS 2-Bar Strategy ───────────────────────────────────────────────────────
 IBS_THRESHOLD        = 0.70    # IBS ≥ threshold → long; IBS ≤ (1-threshold) → short
 IBS_SR_PROXIMITY_PCT = 0.30    # % distance to consider "near" an S/R level

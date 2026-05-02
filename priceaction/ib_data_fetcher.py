@@ -318,6 +318,11 @@ class IBDataFetcher:
         """
         if not bars:
             return 0
+        # Ensure every bar has a contract_month before writing to DB.
+        # Bars fetched via ContFuture or without explicit tagging may lack it.
+        for b in bars:
+            if not b.get("contract_month"):
+                b["contract_month"] = _contract_month_for_ts(int(b["time"]), symbol)
         # Imported locally to keep this module free of import-time side
         # effects if db.py is not yet ready.
         import db as _db

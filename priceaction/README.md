@@ -663,6 +663,30 @@ open http://localhost:8000
 
 ## 更新日志
 
+### 2026-05-02 — v3 数据架构重构（Phase 1-4）
+
+**核心变更**：实施 `doc/data_redesign_v3.md` 设计，业界对齐 (CQG/Barchart/IQFeed) 的 per-contract bars + derived continuous view 架构。
+
+**已落地**：
+- ✅ **db.py v3 schema**：`bars` 主键扩展为 `(symbol, contract_month, timeframe, ts)`；新增 `source_rank` 列、`bar_revisions` 审计表；`realtime_bars` PK 含 contract_month；`ib_fetch_cache` 由 `contract_month` 改为 `contract_token` ('MONTH:YYYYMM' | 'CONT')，使月合约和 ContFuture 数据可同 ts 共存。
+- ✅ **Source rank 护栏**：`insert_bars` 强制 `contract_month` 非空、拒绝 `ib_continuous` 落入 fact 表、低 rank 不能覆盖高 rank、所有差异自动写 `bar_revisions`。
+- ✅ **continuous_view.py（新模块）**：`assemble_continuous(symbol, tf, from, to, method)` 在读时由 per-contract bars 拼接 front / cont_ratio / cont_difference 三种连续序列；永不落库。
+- ✅ **新 API `/api/symbol_list`**：返回所有可路由的 chart token（`MES@CONT_FRONT` / `MES@CONT_RATIO` / `MES@CONT_DIFF` / `MES@YYYYMM`）。
+- ✅ **`/api/history` token 路由**：`symbol` 参数支持 `SYM@SUFFIX` 格式；连续合约请求路由到 `continuous_view.assemble_continuous`，月合约请求按 `contract_month` 过滤；裸 symbol 保留原有 IB 按需补缺逻辑。
+- ✅ **单元测试**：`tests/test_db_v3.py` 37 例 + `tests/test_continuous_view.py` 12 例 — 覆盖 schema、validation、rank-guard、bar_revisions 审计、per-contract 隔离、token 解析、front/ratio/difference 装配。全部通过。
+
+**运行测试**：
+```bash
+source ~/Documents/Develop/tradeenv/bin/activate
+cd priceaction/tests
+python -m unittest test_db_v3 test_continuous_view -v
+```
+
+**注意事项**：
+- 历史数据需清空（`rm priceaction/data/tradedev.db*`）后冷启动；旧 schema 自动 drop & rebuild。
+- `recover_realtime_bars`、`revalidate_realtime_bar` 仍保留作为 v3 迁移期间的兜底；后续 Phase 2 完整流程（IB-pull-after-close）将逐步替换。
+- 前端 dropdown / TradingView resolveSymbol 适配后端 token 路由的工作待跟进；当前裸 `MES` 路径仍保持原有行为，向后兼容。
+
 ### 2026-04-14 — 系统优化 & 数据校验增强
 
 **新功能**：
