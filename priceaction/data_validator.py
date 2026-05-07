@@ -245,12 +245,22 @@ async def get_ib_bars_with_cache(
 
     cached_ts_set = set(db.get_ib_cache_coverage(symbol, bar_size_key, aligned_from, aligned_to))
 
-    # Build list of expected bar timestamps in the range (coarse — every interval)
-    expected: List[int] = []
-    t = aligned_from
-    while t <= aligned_to:
-        expected.append(t)
-        t += interval
+    # Build list of expected bar timestamps in the range using the trading
+    # calendar so weekends / holidays are excluded.  Without this, 1D fetches
+    # perpetually re-fetch because Sat/Sun are never in the cache yet always
+    # appear in the naïve every-interval expected list.
+    try:
+        from trading_calendar import get_calendar as _get_cal
+        _cal = _get_cal(symbol)
+        expected: List[int] = _cal.expected_bars(aligned_from, aligned_to, interval)
+    except Exception:
+        # Fallback for unknown symbols: every interval tick (may cause extra
+        # re-fetches for weekend/holiday slots, but is safe).
+        expected = []
+        t = aligned_from
+        while t <= aligned_to:
+            expected.append(t)
+            t += interval
 
     # Find contiguous missing sub-ranges
     missing_ranges: List[Tuple[int, int]] = []

@@ -110,7 +110,7 @@ async function loadContractOptions(baseSym) {
           cont_ratio: 'Ratio Adj',
           cont_difference: 'Diff Adj',
         }[item.method] || item.method;
-        opt.textContent = `${baseSym} – ${methodLabel}`;
+        opt.textContent = methodLabel;
         grp.appendChild(opt);
       }
       sel.appendChild(grp);
@@ -124,7 +124,10 @@ async function loadContractOptions(baseSym) {
       for (const item of sortedMonthly) {
         const opt = document.createElement('option');
         opt.value = item.token;
-        opt.textContent = item.label;
+        // Show "YYYY-MM" extracted from token suffix (e.g. "MES@202506" → "2026-06")
+        const cm = item.token.split('@')[1] || item.token;
+        const cmLabel = cm.length === 6 ? `${cm.slice(0, 4)}-${cm.slice(4)}` : cm;
+        opt.textContent = cmLabel;
         grp.appendChild(opt);
       }
       sel.appendChild(grp);

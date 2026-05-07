@@ -449,7 +449,7 @@ async def _ib_reconnect_loop():
     """
     global _order_mgr
     while True:
-        await asyncio.sleep(60)  # check every minute
+        await asyncio.sleep(60)  # check every 60 seconds
         try:
             already_ok = (
                 fetcher._ib_ready
@@ -507,6 +507,13 @@ async def _ib_reconnect_loop():
             asyncio.create_task(_prefetch_extra_symbols(fetcher, True))
 
             logger.info("[IB Reconnect] Reconnect complete — IB ready.")
+            
+            # Broadcast connection restored to all WebSocket clients
+            await broadcast({
+                "type": "ib_connection_status",
+                "status": "connected",
+                "message": "IB TWS connected - chart updates resumed",
+            })
 
         except Exception as e:
             logger.warning("[IB Reconnect] Attempt failed: %s", e)
@@ -576,6 +583,15 @@ async def lifespan(app: FastAPI):
 
     # ── Step 4: IB connect + fetch + realtime in background (non-blocking) ───
     _ib_init_task = asyncio.create_task(_ib_background_init())
+    
+    # Register disconnect callback to notify frontend when TWS drops
+    def _on_ib_disconnect_notify():
+        asyncio.create_task(broadcast({
+            "type": "ib_connection_status",
+            "status": "disconnected",
+            "message": "IB TWS disconnected - reconnecting...",
+        }))
+    fetcher.add_disconnect_callback(_on_ib_disconnect_notify)
 
     # ── Step 5: Background reconnect loop (retries every 60 s if IB drops) ──
     _ib_reconnect_task = asyncio.create_task(_ib_reconnect_loop())

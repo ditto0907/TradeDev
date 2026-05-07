@@ -208,6 +208,8 @@ class IBDataFetcher:
         self._ib_ready: bool = False                 # True only after contract is resolved
         self._realtime_subscriptions: Dict[str, object] = {}
         self._new_bar_callbacks: List[Callable] = []
+        self._disconnect_callbacks: List[Callable] = []  # notify server on disconnect
+        self._heartbeat_task: Optional[asyncio.Task] = None
 
         # Unified per-symbol state
         # Aggregated in-progress bars: "symbol:bar_size_key" → bar dict
@@ -358,6 +360,14 @@ class IBDataFetcher:
                 # qualifyContractsAsync to silently hang on reqContractDetails.
                 logger.info("Waiting 2 s for TWS to finish initializing…")
                 await asyncio.sleep(2)
+                
+                # Attach disconnect event handler for auto-recovery
+                self.ib.disconnectedEvent += self._on_ib_disconnect
+                logger.info("IB disconnect handler registered")
+                
+                # Start heartbeat monitoring
+                self._start_heartbeat()
+                
                 return
             except Exception as e:
                 logger.warning("IB connect attempt %d failed: %s", attempt, e)
@@ -366,9 +376,81 @@ class IBDataFetcher:
         raise ConnectionError(f"Cannot connect to IB TWS at {config.IB_HOST}:{config.IB_PORT}")
 
     def disconnect(self):
+        # Stop heartbeat before disconnecting
+        if self._heartbeat_task and not self._heartbeat_task.done():
+            self._heartbeat_task.cancel()
+            self._heartbeat_task = None
         if self.ib and self.ib.isConnected():
             self.ib.disconnect()
             logger.info("Disconnected from IB TWS")
+    
+    def _on_ib_disconnect(self):
+        """Called by ib_insync when TWS connection drops."""
+        logger.warning("[IB Disconnect Event] TWS connection lost — reconnect loop will retry")
+        self._ib_ready = False
+        
+        # Stop heartbeat
+        if self._heartbeat_task and not self._heartbeat_task.done():
+            self._heartbeat_task.cancel()
+            self._heartbeat_task = None
+        
+        # Notify server to broadcast disconnection status
+        for cb in self._disconnect_callbacks:
+            try:
+                cb()
+            except Exception as exc:
+                logger.error("Disconnect callback error: %s", exc)
+    
+    def add_disconnect_callback(self, callback: Callable):
+        """Register a callback to be invoked when IB disconnects."""
+        self._disconnect_callbacks.append(callback)
+    
+    def _start_heartbeat(self):
+        """Start background heartbeat task to detect stale connections."""
+        if self._heartbeat_task and not self._heartbeat_task.done():
+            return  # already running
+        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+        logger.info("IB heartbeat monitoring started (every 30s)")
+    
+    async def _heartbeat_loop(self):
+        """Periodically ping IB to verify connection health.
+        
+        Uses reqCurrentTime() as a lightweight health check.  If it fails or
+        times out, marks connection as dead so the reconnect loop picks it up.
+        """
+        while True:
+            try:
+                await asyncio.sleep(30)  # check every 30 seconds
+                if not self.ib or not self.ib.isConnected():
+                    logger.warning("[Heartbeat] IB not connected, stopping heartbeat")
+                    break
+                
+                # Send lightweight ping request
+                try:
+                    server_time = await asyncio.wait_for(
+                        self.ib.reqCurrentTimeAsync(), timeout=10.0
+                    )
+                    logger.debug("[Heartbeat] IB alive — server time: %s", server_time)
+                except asyncio.TimeoutError:
+                    logger.error("[Heartbeat] reqCurrentTime timed out — connection stale")
+                    self._ib_ready = False
+                    # Force disconnect to trigger reconnect loop
+                    try:
+                        self.ib.disconnect()
+                    except Exception:
+                        pass
+                    break
+                except Exception as e:
+                    logger.error("[Heartbeat] reqCurrentTime failed: %s — connection unhealthy", e)
+                    self._ib_ready = False
+                    break
+                    
+            except asyncio.CancelledError:
+                logger.info("[Heartbeat] Task cancelled")
+                break
+            except Exception as e:
+                logger.error("[Heartbeat] Unexpected error: %s", e)
+                break
 
     # ─── Contract ────────────────────────────────────────────────────────────
 

@@ -198,6 +198,8 @@ class MESDatafeed {
         this._handleBarUpdate(msg);
       } else if (msg.type === 'history_ready') {
         this._handleHistoryReady(msg);
+      } else if (msg.type === 'ib_connection_status') {
+        this._handleConnectionStatus(msg);
       } else if (msg.type === 'analysis') {
         if (this._onAnalysis) this._onAnalysis(msg.data);
       } else if (msg.type === 'snapshot') {
@@ -221,6 +223,9 @@ class MESDatafeed {
     const barRes = resMap[msg.bar_size];
     if (!barRes) return;
 
+    // Server broadcasts bare symbol (e.g. "MES"), but chart subscriptions may
+    // use token form (e.g. "MES@CONT_FRONT", "MES@202506").  Extract base
+    // symbol from the subscription name for comparison.
     const msgSymbol = msg.symbol || 'MES';
     const tvBar = {
       time:   msg.bar.time * 1000,
@@ -231,7 +236,8 @@ class MESDatafeed {
       volume: msg.bar.volume,
     };
     for (const sub of Object.values(this._subscriptions)) {
-      if (sub.resolution === barRes && sub.symbol === msgSymbol) sub.onTick(tvBar);
+      const subBase = sub.symbol.includes('@') ? sub.symbol.split('@')[0] : sub.symbol;
+      if (sub.resolution === barRes && subBase === msgSymbol) sub.onTick(tvBar);
     }
   }
 
@@ -256,6 +262,35 @@ class MESDatafeed {
           console.warn('onResetCacheNeededCallback failed:', err);
         }
       }
+    }
+  }
+  
+  // ── _handleConnectionStatus ──────────────────────────────────────────────
+  //
+  // IB TWS connection status changed (connected/disconnected).  When TWS
+  // reconnects after a restart, refresh all active chart subscriptions so
+  // real-time updates resume automatically.
+  _handleConnectionStatus(msg) {
+    console.log(`DataFeed: IB connection ${msg.status} — ${msg.message || ''}`);
+    
+    if (msg.status === 'connected') {
+      // TWS reconnected — refresh all active subscriptions to resume updates
+      console.log('Refreshing all chart subscriptions after IB reconnect...');
+      for (const sub of Object.values(this._subscriptions)) {
+        if (sub.onResetCacheNeededCallback) {
+          try {
+            sub.onResetCacheNeededCallback();
+          } catch (err) {
+            console.warn('onResetCacheNeededCallback failed:', err);
+          }
+        }
+      }
+      
+      // Show success notification (optional — can add UI toast here)
+      console.info('✓ IB TWS connected — chart updates resumed');
+    } else if (msg.status === 'disconnected') {
+      // Show warning notification (optional — can add UI toast here)
+      console.warn('⚠ IB TWS disconnected — chart updates paused, reconnecting...');
     }
   }
 }
