@@ -590,6 +590,10 @@ function initChart() {
       const baseSym = _currentSymbol.split('@')[0];
       loadContractOptions(baseSym).then(() => syncContractSelector());
       loadCycleAnalyses();
+      // Session switch (RTH ↔ ETH) triggers onSymbolChanged BEFORE bar data reloads.
+      // The bar reload wipes all ephemeral (disableSave:true) shapes, so we must
+      // redraw once after onDataLoaded fires for the new session.
+      chart.onDataLoaded().subscribe(null, () => { drawAllActiveAnalyses(); }, true);
     });
 
     // Load market cycle analyses for the current symbol
