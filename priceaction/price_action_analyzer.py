@@ -46,14 +46,19 @@ def find_swing_points(bars: List[dict], lookback: int = None) -> Tuple[List[dict
     swing_lows = []
 
     for i in range(lookback, len(bars) - lookback):
-        window = bars[i - lookback: i + lookback + 1]
         hi = bars[i]["high"]
         lo = bars[i]["low"]
+        # Strict swing test: the pivot must be strictly higher/lower than every
+        # neighbour on both sides.  Using ``>=`` (or ``== max``) causes flat
+        # tops/bottoms — several bars sharing the same extreme — to each be
+        # recorded, double-counting the same price level and inflating touches.
+        left  = bars[i - lookback: i]
+        right = bars[i + 1: i + lookback + 1]
 
-        if hi == max(b["high"] for b in window):
+        if all(hi > b["high"] for b in left) and all(hi > b["high"] for b in right):
             swing_highs.append({**bars[i], "index": i, "price": hi})
 
-        if lo == min(b["low"] for b in window):
+        if all(lo < b["low"] for b in left) and all(lo < b["low"] for b in right):
             swing_lows.append({**bars[i], "index": i, "price": lo})
 
     return swing_highs, swing_lows
@@ -81,7 +86,7 @@ def cluster_levels(points: List[dict], merge_pct: float = None) -> List[dict]:
     current_group = [prices[0]]
     for price in prices[1:]:
         reference = current_group[0]
-        if abs(price - reference) / reference * 100 <= merge_pct:
+        if abs(price - reference) / max(abs(reference), 1e-9) * 100 <= merge_pct:
             current_group.append(price)
         else:
             groups.append(current_group)
@@ -136,7 +141,7 @@ def select_primary_levels(
             continue
         if (not is_support) and price < current_price:
             continue
-        dist_pct = abs(price - current_price) / current_price * 100
+        dist_pct = abs(price - current_price) / max(abs(current_price), 1e-9) * 100
         if dist_pct <= max_distance_pct:
             side_levels.append(l)
 
@@ -152,7 +157,7 @@ def select_primary_levels(
     for l in side_levels:
         touches = float(l.get("touches", 0))
         last_time = int(l.get("last_time", 0) or 0)
-        dist_pct = abs(l["price"] - current_price) / current_price * 100
+        dist_pct = abs(l["price"] - current_price) / max(abs(current_price), 1e-9) * 100
 
         recency = 0.0
         if latest_time > 0 and last_time > 0:

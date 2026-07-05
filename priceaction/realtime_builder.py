@@ -59,6 +59,29 @@ def persist_completed_bar(
             symbol, timeframe, bar.get("time"), "; ".join(violations),
         )
         return 0
+
+    # ── Phantom-bar guard ────────────────────────────────────────────────
+    # When the bar-builder's slot rolls over without any real ticks (e.g.
+    # CME 16:00-17:00 CT maintenance break, or a brief feed outage), the
+    # in-progress bar can be dispatched with V=0 and O=H=L=C == previous
+    # close. validate_bar does not catch this (V<0 only).  Reject it so a
+    # flat zero-volume tick never lands in the bars table where it shows
+    # up as an OHLC anomaly on the chart.
+    try:
+        o = float(bar.get("open", 0))
+        h = float(bar.get("high", 0))
+        l = float(bar.get("low", 0))
+        c = float(bar.get("close", 0))
+        v = float(bar.get("volume", 0))
+    except (TypeError, ValueError):
+        o = h = l = c = v = 0.0
+    if v == 0 and o == h == l == c:
+        logger.info(
+            "Skipping phantom realtime-completed bar %s/%s ts=%s "
+            "(V=0, O=H=L=C=%s) — likely maintenance-break boundary",
+            symbol, timeframe, bar.get("time"), c,
+        )
+        return 0
     # Tag the bar with the front-month contract for *bar.time*. Realtime
     # data always streams from a specific monthly contract (front month at
     # the time of the trade), even when the subscription was created via

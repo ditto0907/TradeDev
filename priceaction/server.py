@@ -636,6 +636,36 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="MES Price Action Server", lifespan=lifespan)
 
 
+# ─── Optional Token Auth ───────────────────────────────────────────────────────
+# When config.API_TOKEN is set, sensitive endpoints require the token in the
+# X-API-Token header or ?token= query param.  Read-only chart data and static
+# assets stay open so the TradingView frontend keeps working; state-changing
+# and destructive endpoints are protected.
+_PROTECTED_PREFIXES = (
+    "/api/order", "/api/flatten", "/api/data/delete", "/api/data/fix",
+    "/api/data/validate_all", "/api/data/bg_validate", "/api/trades/upload",
+    "/api/strategy/backtest",
+)
+_PROTECTED_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+
+@app.middleware("http")
+async def api_token_middleware(request: Request, call_next):
+    token = config.API_TOKEN
+    if token:
+        path = request.url.path
+        needs_auth = (
+            request.method in _PROTECTED_METHODS
+            or any(path.startswith(p) for p in _PROTECTED_PREFIXES)
+        )
+        # Never protect static assets or the chart data feed itself.
+        if needs_auth and not (path.startswith("/static") or path.startswith("/charting_library")):
+            provided = request.headers.get("X-API-Token") or request.query_params.get("token")
+            if provided != token:
+                return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    return await call_next(request)
+
+
 # ─── Debug Middleware ──────────────────────────────────────────────────────────
 
 @app.middleware("http")
@@ -1066,7 +1096,8 @@ async def get_history(
 
     # Re-query DB after successful fetches
     if any_fetched:
-        bars = db.get_bars(sym, key, from_ts=from_ts, to_ts=to_ts)
+        bars = db.get_bars(sym, key, from_ts=from_ts, to_ts=to_ts,
+                           contract_month=routed_cm)
         logger.info("[%s/%s] After IB fill: %d bars in range", sym, key, len(bars))
 
     # ── Step 4: Fill internal gaps using calendar-aware detection ────────────
@@ -1118,7 +1149,8 @@ async def get_history(
                                 sym, key, chunk_start, chunk_end, e)
                         chunk_start = chunk_end
                 if filled_any:
-                    bars = db.get_bars(sym, key, from_ts=from_ts, to_ts=to_ts)
+                    bars = db.get_bars(sym, key, from_ts=from_ts, to_ts=to_ts,
+                                       contract_month=routed_cm)
                     logger.info("[%s/%s] After internal fill: %d bars", sym, key, len(bars))
                 else:
                     _ib_fetch_cooldown[_internal_gap_cooldown_key] = now_ts + 300
@@ -1182,13 +1214,19 @@ async def get_history(
         return resp
 
     # ── Append in-progress realtime bar (if any) ────────────────────────────
-    rt_key = (sym, key)
-    rt_bar = _prev_completed_bar.get(rt_key)
-    if rt_bar and from_ts <= rt_bar["time"] <= to_ts:
-        if bars and bars[-1]["time"] == rt_bar["time"]:
-            bars[-1] = rt_bar
-        elif not bars or rt_bar["time"] > bars[-1]["time"]:
-            bars.append(rt_bar)
+    # Only meaningful for the live front-month series: the realtime bar is the
+    # unadjusted front-month price.  Appending it to a specific *past* month
+    # token or to a ratio/difference-adjusted continuous view would inject a
+    # wrong/unadjusted price, so restrict to the bare symbol and CONT_FRONT.
+    _append_rt = (routed_cm is None) and (routed_method in (None, "front"))
+    if _append_rt:
+        rt_key = (sym, key)
+        rt_bar = _prev_completed_bar.get(rt_key)
+        if rt_bar and from_ts <= rt_bar["time"] <= to_ts:
+            if bars and bars[-1]["time"] == rt_bar["time"]:
+                bars[-1] = rt_bar
+            elif not bars or rt_bar["time"] > bars[-1]["time"]:
+                bars.append(rt_bar)
 
     return {
         "s": "ok",
@@ -1375,6 +1413,19 @@ async def skill_get_bars(
             if start_min <= t < end_min:
                 filtered.append(b)
         bars = filtered
+
+    # For 1D bars, attach an explicit exchange trade-date label.
+    # Daily bar timestamps are anchored at UTC midnight, where the UTC date
+    # equals the exchange trading day (e.g. ts 1780012800 -> 2026-05-29).
+    # Consumers MUST NOT astimezone() a 1D timestamp to ET — that shifts it
+    # to the prior calendar day and mis-dates PDH/PDL. This field removes the
+    # ambiguity by stamping the trading day directly.
+    if key == "1D":
+        from datetime import datetime as _dt2, timezone as _tz2
+        for b in bars:
+            b["trade_date"] = _dt2.fromtimestamp(
+                b["time"], tz=_tz2.utc
+            ).strftime("%Y-%m-%d")
 
     return {
         "symbol": sym,
@@ -1650,6 +1701,23 @@ async def api_data_issues(
     }
 
 
+def _safe_data_path(data_dir: Path, filename: str) -> Optional[Path]:
+    """Resolve *filename* within *data_dir*, rejecting path traversal.
+
+    Returns the resolved Path if it is strictly inside ``data_dir``, else None.
+    ``os.path.basename`` strips any directory components first so that inputs
+    like ``../../etc/passwd`` cannot escape the data folder.
+    """
+    base = os.path.basename(filename or "")
+    if not base or base in (".", ".."):
+        return None
+    resolved = (data_dir / base).resolve()
+    try:
+        resolved.relative_to(data_dir.resolve())
+    except ValueError:
+        return None
+    return resolved
+
 
 @app.get("/api/trades")
 async def get_trades():
@@ -1681,15 +1749,14 @@ async def list_trade_files():
 async def get_trades_from_file(filename: str):
     """Parse and return trades from a specific CSV file."""
     data_dir = Path(__file__).parent / "data"
-    filepath = (data_dir / filename).resolve()
-    # Prevent path traversal
-    if not str(filepath).startswith(str(data_dir.resolve())):
+    filepath = _safe_data_path(data_dir, filename)
+    if filepath is None:
         return JSONResponse(status_code=400, content={"error": "Invalid filename"})
     if not filepath.exists():
         return JSONResponse(status_code=404, content={"error": "File not found"})
     try:
         text = filepath.read_text(encoding="utf-8-sig", errors="replace")
-        trades = parse_csv_content(text, source_file=filename)
+        trades = parse_csv_content(text, source_file=filepath.name)
         return trades
     except Exception as e:
         logger.error("Trade file parse error: %s", e)
@@ -1700,17 +1767,25 @@ async def get_trades_from_file(filename: str):
 async def upload_trades(file: UploadFile):
     """Save uploaded CSV to data/ folder and return parsed trades."""
     try:
+        save_name = os.path.basename(file.filename or "trade_log_upload.csv")
+        # Validate extension and size before processing.
+        if not save_name.lower().endswith(".csv"):
+            return JSONResponse(status_code=400,
+                                content={"error": "Only .csv files are accepted"})
         content = await file.read()
+        _MAX_UPLOAD_BYTES = 10 * 1024 * 1024   # 10 MB
+        if len(content) > _MAX_UPLOAD_BYTES:
+            return JSONResponse(status_code=413,
+                                content={"error": "File too large (max 10 MB)"})
         text = content.decode("utf-8-sig", errors="replace")
-        save_name = file.filename or "trade_log_upload.csv"
         trades = parse_csv_content(text, source_file=save_name)
         if not trades:
             return {"filename": None, "trades": []}
         # Save to data/ folder with original filename
         data_dir = Path(__file__).parent / "data"
         data_dir.mkdir(parents=True, exist_ok=True)
-        save_path = (data_dir / save_name).resolve()
-        if not str(save_path).startswith(str(data_dir.resolve())):
+        save_path = _safe_data_path(data_dir, save_name)
+        if save_path is None:
             return JSONResponse(status_code=400, content={"error": "Invalid filename"})
         save_path.write_bytes(content)
         # Persist into trade_logs table (preserving any user annotations)
@@ -1727,20 +1802,33 @@ async def upload_trades(file: UploadFile):
 
 @app.delete("/api/trades/file/{filename}")
 async def delete_trade_file(filename: str):
-    """Delete a trade CSV file from data/ directory and its DB rows."""
+    """Delete a trade CSV file from data/ directory and its DB rows.
+
+    The trade panel is now DB-backed, so rows may exist for a source_file
+    whose CSV was already removed from disk.  We therefore delete the DB rows
+    regardless of whether the file is still present, and unlink the file only
+    if it exists.
+    """
     data_dir = Path(__file__).parent / "data"
-    filepath = (data_dir / filename).resolve()
-    if not str(filepath).startswith(str(data_dir.resolve())):
+    filepath = _safe_data_path(data_dir, filename)
+    if filepath is None:
         return JSONResponse(status_code=400, content={"error": "Invalid filename"})
-    if not filepath.exists():
-        return JSONResponse(status_code=404, content={"error": "File not found"})
-    filepath.unlink()
+    file_existed = filepath.exists()
+    if file_existed:
+        try:
+            filepath.unlink()
+        except Exception as exc:
+            logger.warning("Failed to unlink %s: %s", filepath.name, exc)
+    removed = 0
     try:
-        removed = db.delete_trade_logs_by_source(filename)
-        logger.info("Deleted trade file: %s (and %d DB rows)", filename, removed)
+        removed = db.delete_trade_logs_by_source(filepath.name)
     except Exception as exc:
         logger.warning("delete_trade_logs_by_source failed: %s", exc)
-    return {"success": True}
+    if not file_existed and removed == 0:
+        return JSONResponse(status_code=404, content={"error": "Not found"})
+    logger.info("Deleted trade source: %s (file=%s, %d DB rows)",
+                filepath.name, file_existed, removed)
+    return {"success": True, "deleted_rows": removed}
 
 
 # ─── Trade Log Management (DB-backed history with user annotations) ──────────

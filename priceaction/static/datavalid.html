@@ -742,10 +742,36 @@ function showToast(msg,type){
 }
 
 // Helpers
+// Convert a datetime-local string to a Unix timestamp, interpreting the
+// wall-clock in the ACTIVE app timezone (AppTZ) — not the browser's local
+// timezone.  Using browser-local parsing here would shift the query/fix
+// window by the AppTZ↔browser offset (e.g. 12-13h), so validation and fix
+// operations would run over the wrong range.
+function _tzOffsetMs(utcMs, tz){
+  var dtf = new Intl.DateTimeFormat('en-US',{timeZone:tz,hour12:false,
+    year:'numeric',month:'2-digit',day:'2-digit',
+    hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  var map={}; dtf.formatToParts(new Date(utcMs)).forEach(function(p){map[p.type]=p.value;});
+  var asIfUTC = Date.UTC(+map.year,+map.month-1,+map.day,+map.hour,+map.minute,+map.second);
+  return asIfUTC - utcMs;
+}
 function dateToTs(s,end){
   if(!s) return null;
-  var d=s.includes('T')?new Date(s+':00'):new Date(s+(end?'T23:59:59':'T00:00:00'));
-  return Math.floor(d.getTime()/1000);
+  var tz = (window.AppTZ ? AppTZ.get() : Intl.DateTimeFormat().resolvedOptions().timeZone);
+  var datePart, timePart;
+  if(s.includes('T')){
+    var parts=s.split('T'); datePart=parts[0];
+    timePart=parts[1].length===5?parts[1]+':00':parts[1];
+  } else {
+    datePart=s; timePart=end?'23:59:59':'00:00:00';
+  }
+  var dp=datePart.split('-').map(Number), tp=timePart.split(':').map(Number);
+  var asUTC = Date.UTC(dp[0],dp[1]-1,dp[2],tp[0],tp[1]||0,tp[2]||0);
+  var off = _tzOffsetMs(asUTC, tz);
+  var ts = asUTC - off;
+  var off2 = _tzOffsetMs(ts, tz);   // DST-edge correction
+  if(off2 !== off) ts = asUTC - off2;
+  return Math.floor(ts/1000);
 }
 function tsToLocal(ts){return (window.AppTZ?AppTZ.formatTs(ts,{withSeconds:true}):new Date(ts*1000).toLocaleString());}
 function fmtNum(v){if(v==null)return '\u2014';var n=Number(v);return isNaN(n)?String(v):n.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:6});}

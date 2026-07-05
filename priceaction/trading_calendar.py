@@ -121,10 +121,10 @@ _SESSION_BUILDERS = {
 def _jpn_holidays(year: int) -> set:
     """Simplified Japanese market holidays.  Add more as needed."""
     holidays = set()
-    # New Year's (Dec 31 - Jan 3)
+    # New Year's (Dec 31 - Jan 3).  Dec 31 must be tagged in THIS year's set
+    # (keyed by d.year in is_holiday), not the previous year's.
     holidays.update([date(year, 1, d) for d in range(1, 4)])
-    if year > 1:
-        holidays.add(date(year - 1, 12, 31))
+    holidays.add(date(year, 12, 31))
     # Coming of Age Day (2nd Monday in Jan)
     d = date(year, 1, 1)
     while d.weekday() != 0:
@@ -132,6 +132,11 @@ def _jpn_holidays(year: int) -> set:
     holidays.add(d + timedelta(weeks=1))
     # National Foundation Day
     holidays.add(date(year, 2, 11))
+    # Emperor's Birthday — Feb 23 from 2020; previously Dec 23 (Akihito era).
+    if year >= 2020:
+        holidays.add(date(year, 2, 23))
+    elif year <= 2018:
+        holidays.add(date(year, 12, 23))
     # Vernal Equinox (approx Mar 20)
     holidays.add(date(year, 3, 20))
     # Showa Day
@@ -161,6 +166,18 @@ def _jpn_holidays(year: int) -> set:
     holidays.add(date(year, 11, 3))
     # Labor Thanksgiving Day
     holidays.add(date(year, 11, 23))
+
+    # 振替休日 (substitute holiday): when a national holiday falls on a Sunday,
+    # the following non-holiday day becomes a holiday.
+    substitutes = set()
+    for h in list(holidays):
+        if h.year == year and h.weekday() == 6:  # Sunday
+            nxt = h + timedelta(days=1)
+            while nxt in holidays or nxt in substitutes:
+                nxt += timedelta(days=1)
+            if nxt.year == year:
+                substitutes.add(nxt)
+    holidays.update(substitutes)
     return holidays
 
 

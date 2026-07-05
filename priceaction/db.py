@@ -127,6 +127,13 @@ def _conn():
         conn.rollback()
         raise
     finally:
+        # Reset any per-call state (e.g. row_factory set by list_* helpers) so
+        # the next borrower of this pooled connection gets default tuple rows
+        # instead of leaking sqlite3.Row behaviour across calls.
+        try:
+            conn.row_factory = None
+        except Exception:
+            pass
         # Return to pool if it was from pool and pool not full
         if not temp_conn:
             try:
@@ -1101,16 +1108,16 @@ def get_ib_cache_bars(
 
     # Derive contract_month from the token so callers (e.g. data_validator
     # writing fixed bars back via insert_bars) get a tag insert_bars accepts.
-    # MONTH:YYYYMM → YYYYMM ; CONT → derive front-month from ts.
+    # MONTH:YYYYMM → YYYYMM.  CONT (continuous / back-adjusted) MUST return an
+    # empty month: continuous bars are re-adjusted by IB on every roll and must
+    # never be written into the ``bars`` table (see data_validator.fix_bars,
+    # which skips empty-month / CONT bars).  Deriving a month here previously
+    # let back-adjusted prices overwrite real per-contract bars and get locked
+    # in as ``ib_validated`` — a data-corruption bug.
     def _cm_from_token(tok: str, ts: int) -> str:
         if tok and tok.startswith("MONTH:") and len(tok) >= 12:
             return tok[6:]
-        if tok == "CONT":
-            try:
-                from contract_calendar import active_contract
-                return active_contract(int(ts), symbol)
-            except Exception:
-                return ""
+        # CONT and anything else → empty (not writable to the bars table).
         return ""
 
     return [

@@ -18,6 +18,7 @@ Usage:
 """
 import asyncio
 import logging
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,6 +29,10 @@ import config
 logger = logging.getLogger(__name__)
 
 HEADERS = ["Datetime", "Open", "High", "Low", "Close", "Volume"]
+
+# Drop the oldest buffered bars beyond this cap if Google Sheets is
+# unreachable for a long time, so the buffer can't grow without bound.
+_MAX_BUFFER_BARS = 5000
 
 
 def _bar_to_row(bar: dict) -> list:
@@ -53,6 +58,8 @@ class GoogleSheetsSync:
         self._worksheets: Dict[str, object] = {}
         self._buffer: Dict[str, List[dict]] = {"5min": []}
         self._last_flush = 0.0
+        self._buffer_lock = threading.Lock()
+        self._flushing = False     # guards against overlapping flush threads
 
     def authenticate(self) -> bool:
         """
@@ -89,7 +96,26 @@ class GoogleSheetsSync:
             logger.info("Google Sheets authenticated. Sheet: %s", self._sheet.title)
             return True
         except Exception as e:
-            logger.error("Google Sheets authentication failed: %s", e)
+            # gspread.APIError stringifies as the HTTP Response repr (e.g.
+            # "<Response [200]>"), which hides the real cause.  Dig into the
+            # response body / attributes so the log actually says what went
+            # wrong (permissions, quota, malformed JSON, etc.).
+            detail = repr(e)
+            resp = getattr(e, "response", None)
+            if resp is not None:
+                try:
+                    body = resp.text
+                except Exception:
+                    body = "<unreadable>"
+                detail = (
+                    f"{type(e).__name__} status={getattr(resp, 'status_code', '?')} "
+                    f"body={body[:500]}"
+                )
+            logger.error(
+                "Google Sheets authentication failed: %s",
+                detail,
+                exc_info=True,
+            )
             return False
 
     def _ensure_worksheets(self):
@@ -137,34 +163,74 @@ class GoogleSheetsSync:
 
     def buffer_bar(self, bar_size_key: str, bar: dict):
         """
-        Buffer a new bar. Call flush_buffer() periodically to write to Sheets.
+        Buffer a new bar. Flushing happens on a background thread so the
+        caller (the asyncio event-loop tick handler) is never blocked on
+        synchronous gspread network IO.
         This avoids exceeding Google's 300 req/min rate limit.
         """
         if not self._gc:
             return
-        self._buffer[bar_size_key].append(bar)
+        with self._buffer_lock:
+            self._buffer[bar_size_key].append(bar)
+            # Bound the buffer: drop oldest if Google has been unreachable.
+            buf = self._buffer[bar_size_key]
+            if len(buf) > _MAX_BUFFER_BARS:
+                overflow = len(buf) - _MAX_BUFFER_BARS
+                del buf[:overflow]
+                logger.warning("Sheets buffer over cap — dropped %d oldest %s bars",
+                               overflow, bar_size_key)
         now = time.time()
         if now - self._last_flush >= config.SHEETS_WRITE_INTERVAL_SECONDS:
+            self.flush_async()
+
+    def flush_async(self):
+        """Run flush_buffer() on a daemon thread (non-blocking)."""
+        if not self._gc or self._flushing:
+            return
+        self._flushing = True
+        self._last_flush = time.time()  # reserve the window immediately
+        t = threading.Thread(target=self._flush_worker, daemon=True)
+        t.start()
+
+    def _flush_worker(self):
+        try:
             self.flush_buffer()
+        finally:
+            self._flushing = False
 
     def flush_buffer(self):
-        """Write all buffered bars to Google Sheets and clear the buffer."""
+        """Write all buffered bars to Google Sheets and clear the buffer.
+
+        Safe to call directly (e.g. at shutdown) — performs synchronous
+        gspread IO, so do NOT call from the event-loop thread; use
+        flush_async() for that.
+        """
         if not self._gc:
             return
         for key in ("5min",):
-            bars = self._buffer[key]
-            if not bars:
-                continue
+            with self._buffer_lock:
+                bars = self._buffer[key]
+                if not bars:
+                    continue
+                # Take a snapshot and clear under the lock; restore on failure.
+                pending = list(bars)
+                self._buffer[key] = []
             ws = self._ws(key)
             if not ws:
+                # Put them back so they aren't lost.
+                with self._buffer_lock:
+                    self._buffer[key] = pending + self._buffer[key]
                 continue
             try:
-                rows = [_bar_to_row(b) for b in bars]
+                rows = [_bar_to_row(b) for b in pending]
                 ws.append_rows(rows, value_input_option="USER_ENTERED")
                 logger.debug("Flushed %d %s bars to Google Sheets", len(rows), key)
-                self._buffer[key] = []
             except Exception as e:
                 logger.error("Flush failed for %s: %s", key, e)
+                # Re-buffer the unsent bars (respect the cap).
+                with self._buffer_lock:
+                    merged = pending + self._buffer[key]
+                    self._buffer[key] = merged[-_MAX_BUFFER_BARS:]
         self._last_flush = time.time()
 
 
@@ -180,7 +246,7 @@ if __name__ == "__main__":
             {"time": 1700000000, "open": 5800.0, "high": 5810.0, "low": 5795.0, "close": 5807.0, "volume": 1234},
             {"time": 1700000300, "open": 5807.0, "high": 5815.0, "low": 5803.0, "close": 5812.0, "volume": 987},
         ]
-        sync.initial_upload([], sample_bars)
+        sync.initial_upload(sample_bars)
         print("Test upload complete. Check your Google Sheet.")
     else:
         print("Authentication failed. See the setup instructions in google_sheets_sync.py.")

@@ -76,9 +76,15 @@ def ib_duration(gap_sec: int, max_days: int = 30) -> str:
     """
     gap_sec += 3_600          # +1h buffer to ensure the boundary bar is included
     days = gap_sec / 86_400
-    
+
     # Cap at max_days to avoid IB timeouts on large gaps (e.g., weekends + inactive contracts)
     if days > max_days:
+        logger.warning(
+            "ib_duration: requested span %.1f days exceeds cap %d days — "
+            "IB will only return the most recent %d days ending at the request "
+            "end. Callers must chunk larger ranges to cover the full window.",
+            days, max_days, max_days,
+        )
         days = max_days
     
     if days < 1:
@@ -629,9 +635,31 @@ class IBDataFetcher:
 
         start_ts   = (from_ts // interval) * interval
         end_ts     = ((to_ts + interval - 1) // interval) * interval
+
+        # ── Chunk large intraday spans ───────────────────────────────────────
+        # A single IB request (and ib_duration) caps intraday history at ~30
+        # days, so a wider request would SILENTLY drop the older portion.
+        # Split into <=29-day windows and merge (de-dup by timestamp) so the
+        # full requested range is actually covered.
+        _MAX_SPAN = 29 * 86400
+        if bar_size_key != "1D" and (end_ts - start_ts) > _MAX_SPAN:
+            merged: dict = {}
+            win_end = end_ts
+            while win_end > start_ts:
+                win_start = max(start_ts, win_end - _MAX_SPAN)
+                chunk = await self.fetch_range(
+                    bar_size_key, win_start, win_end, symbol=symbol)
+                for b in chunk:
+                    merged[b["time"]] = b
+                win_end = win_start
+                await asyncio.sleep(1)  # IB pacing between chunks
+            return [merged[t] for t in sorted(merged)]
+
         end_dt     = datetime.fromtimestamp(end_ts, tz=timezone.utc)
         end_str    = end_dt.strftime("%Y%m%d %H:%M:%S UTC")
-        dur_str    = ib_duration(end_ts - start_ts)
+        # Daily bars can span years; allow a much larger duration cap for 1D.
+        _max_days  = 3650 if bar_size_key == "1D" else 30
+        dur_str    = ib_duration(end_ts - start_ts, max_days=_max_days)
 
         inst = config.INSTRUMENTS.get(symbol)
 
@@ -903,13 +931,26 @@ class IBDataFetcher:
         state = self._tick_state[symbol]
         prev_price = state.get("prev_price", float("nan"))
         prev_size = state.get("prev_size", float("nan"))
+        prev_last_time = state.get("prev_last_time")
 
-        # Only treat as a real trade when price OR size changed.
+        # Determine the trade's own timestamp (used both for new-trade detection
+        # and for bucketing below).
+        trade_time = getattr(ticker, "lastTime", None) or getattr(ticker, "time", None)
+        cur_last_time = trade_time if isinstance(trade_time, datetime) else None
+
+        # Treat as a real trade when price OR size changed, OR when the trade
+        # timestamp advanced (which catches consecutive same-price/same-size
+        # trades that would otherwise be dropped, under-counting volume).
         # Idle ticks (bid/ask updates, heartbeats) carry the stale `ticker.last`
-        # from a previous trade — must NOT feed them into the bar builder, or
-        # a boundary-crossing idle tick will create a new bar whose OPEN is
-        # an old, unrelated price.
-        is_real_trade = (price != prev_price) or (size != prev_size)
+        # from a previous trade AND an unchanged lastTime — those must NOT feed
+        # the bar builder, or a boundary-crossing idle tick would open a new bar
+        # with an old, unrelated price.
+        time_advanced = (
+            cur_last_time is not None
+            and prev_last_time is not None
+            and cur_last_time > prev_last_time
+        )
+        is_real_trade = (price != prev_price) or (size != prev_size) or time_advanced
         if not is_real_trade:
             # Still allow throttled broadcast of the current in-progress bar
             # so the chart stays "live" during quiet periods.
@@ -924,15 +965,15 @@ class IBDataFetcher:
 
         state["prev_price"] = price
         state["prev_size"] = size
+        state["prev_last_time"] = cur_last_time
         vol_delta = float(size)
 
         # Bucket by the trade's own timestamp, NOT by wall clock.
         # Network latency from IB can be 50–500ms; a trade at 09:34:59.8 may
         # arrive locally at 09:35:00.1 and would otherwise be misbucketed
         # into the next bar (corrupting both bars' OPEN/close).
-        trade_time = getattr(ticker, "lastTime", None) or getattr(ticker, "time", None)
-        if isinstance(trade_time, datetime):
-            ts = int(trade_time.timestamp())
+        if cur_last_time is not None:
+            ts = int(cur_last_time.timestamp())
         else:
             ts = int(time.time())
 
@@ -980,6 +1021,13 @@ class IBDataFetcher:
             self._rt_current[rt_key] = cur
             self._append_bar_multi(symbol, key, cur)
         else:
+            # Out-of-order / late tick: its bucket is older than the current
+            # in-progress bar.  Merging it into the current bar would corrupt
+            # that bar's H/L/C/V with an unrelated older trade, so discard it.
+            if bar_ts < cur["time"]:
+                logger.debug("Discarding late tick for %s: bar_ts=%s < cur=%s",
+                             rt_key, bar_ts, cur["time"])
+                return
             if is_bar:
                 cur["high"] = max(cur["high"], tick_high)
                 cur["low"]  = min(cur["low"], tick_low)

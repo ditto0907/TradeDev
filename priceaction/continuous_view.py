@@ -87,7 +87,7 @@ def _adjustment_factors(
     is intentional — we don't fabricate data.
     """
     if method == "front":
-        return {cm: (0.0 if False else 0.0) for cm in contract_order}
+        return {cm: 0.0 for cm in contract_order}
 
     if method == "cont_ratio":
         identity = 1.0
@@ -107,14 +107,31 @@ def _adjustment_factors(
         if not new_bars or not old_bars:
             factors[old_cm] = factors[new_cm]
             continue
-        new_first_ts = new_bars[0]["time"]
-        # Find the most recent old bar at or before new_first_ts
-        old_close = None
-        for b in reversed(old_bars):
-            if b["time"] <= new_first_ts:
-                old_close = float(b["close"])
+
+        # Correct roll adjustment uses the two contracts' closes at the SAME
+        # timestamp on the roll day (the overlap), so only the pure
+        # contract-to-contract price difference is removed — NOT the real
+        # market move that happens between two different timestamps.
+        old_by_ts = {b["time"]: float(b["close"]) for b in old_bars}
+        old_close = new_close = None
+        for nb in new_bars:
+            t = nb["time"]
+            if t in old_by_ts:
+                new_close = float(nb["close"])
+                old_close = old_by_ts[t]
                 break
-        new_close = float(new_bars[0]["close"])
+
+        # Fallback (no overlapping timestamp): approximate with the last old
+        # close at/just before the new contract's first bar.  Less accurate,
+        # but avoids fabricating data when the contracts don't overlap.
+        if old_close is None:
+            new_first_ts = new_bars[0]["time"]
+            for b in reversed(old_bars):
+                if b["time"] <= new_first_ts:
+                    old_close = float(b["close"])
+                    break
+            new_close = float(new_bars[0]["close"])
+
         if old_close is None or old_close == 0:
             factors[old_cm] = factors[new_cm]
             continue

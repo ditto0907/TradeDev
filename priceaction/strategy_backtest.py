@@ -4,8 +4,8 @@ IBS 2-Bar Strategy Backtest Engine.
 Signal Definition:
   IBS = (Close − Low) / (High − Low)
 
-  Long  — Bar 1 bullish (Close ≥ Open)  AND Bar 2 IBS ≥ threshold
-  Short — Bar 1 bearish (Close ≤ Open)  AND Bar 2 IBS ≤ (1 − threshold)
+  Long  — Bar 1 bullish (Close > Open)  AND Bar 2 IBS ≥ threshold
+  Short — Bar 1 bearish (Close < Open)  AND Bar 2 IBS ≤ (1 − threshold)
 
 Entry  : Bar 2 close (market-on-close simulation)
 Stop   : Entry ± 2-bar range  (max(H1,H2) − min(L1,L2))
@@ -48,11 +48,11 @@ def compute_ibs(bar: dict) -> float:
 
 
 def _is_bullish(bar: dict) -> bool:
-    return bar["close"] >= bar["open"]
+    return bar["close"] > bar["open"]
 
 
 def _is_bearish(bar: dict) -> bool:
-    return bar["close"] <= bar["open"]
+    return bar["close"] < bar["open"]
 
 
 # ─── Session / time-of-day filter helpers ─────────────────────────────────────
@@ -114,8 +114,13 @@ def _bar_in_session(bar_ts: int, session: str, symbol: str,
     # Time-of-day filter
     if time_range is not None:
         t_start, t_end = time_range
-        if not (t_start <= local_time < t_end):
-            return False
+        if t_start <= t_end:
+            if not (t_start <= local_time < t_end):
+                return False
+        else:
+            # Wraps past midnight (e.g. 18:00-06:00 for an overnight window)
+            if not (local_time >= t_start or local_time < t_end):
+                return False
 
     return True
 
@@ -205,7 +210,15 @@ def run_backtest(
 
     proximity_pct = config.IBS_SR_PROXIMITY_PCT
     context_lookback = config.IBS_CONTEXT_LOOKBACK
-    tick_value = config.MES_TICK_VALUE
+
+    # Per-instrument point value / tick size (fall back to MES defaults).
+    _inst = config.INSTRUMENTS.get(symbol, {})
+    tick_value = _inst.get("point_value", config.MES_TICK_VALUE)
+    tick_size  = _inst.get("tick_size", 0.25)
+
+    # Cost model: commission per contract per side + slippage in price units.
+    commission_per_side = getattr(config, "BACKTEST_COMMISSION_PER_CONTRACT", 0.0)
+    slippage_price = getattr(config, "BACKTEST_SLIPPAGE_TICKS", 0.0) * tick_size
 
     # ── Load bars from DB ──────────────────────────────────────────────────────
     all_bars = db.get_bars(symbol, timeframe, from_ts=from_ts, to_ts=to_ts)
@@ -253,26 +266,63 @@ def run_backtest(
             if direction == "long":
                 if bar2["high"] >= target_price:
                     hit_target = True
-                elif bar2["low"] <= stop_price:
+                if bar2["low"] <= stop_price:
                     hit_stop = True
             else:  # short
                 if bar2["low"] <= target_price:
                     hit_target = True
-                elif bar2["high"] >= stop_price:
+                if bar2["high"] >= stop_price:
                     hit_stop = True
 
             if hit_target or hit_stop:
-                exit_price = target_price if hit_target else stop_price
-                contracts  = open_trade["contracts"]
-                if direction == "long":
-                    pnl = (exit_price - entry_price) * tick_value * contracts
+                # Same-bar ambiguity: if BOTH the stop and target lie inside the
+                # bar's range we cannot know which was touched first from OHLC
+                # alone.  Resolve conservatively to the STOP (worst case) to
+                # avoid the optimistic bias that inflates win-rate.
+                ambiguous = hit_target and hit_stop
+                took_target = hit_target and not hit_stop
+
+                if took_target:
+                    fill = target_price
+                    outcome = "win"
                 else:
-                    pnl = (entry_price - exit_price) * tick_value * contracts
+                    fill = stop_price
+                    outcome = "ambiguous" if ambiguous else "loss"
+
+                # Gap-through fill: if the bar opened already beyond the
+                # stop/target, the realistic fill is the open price, not the
+                # trigger price (models overnight/weekend gaps).
+                bar_open = bar2["open"]
+                if direction == "long":
+                    if outcome == "win" and bar_open >= target_price:
+                        fill = bar_open
+                    elif outcome != "win" and bar_open <= stop_price:
+                        fill = bar_open
+                else:  # short
+                    if outcome == "win" and bar_open <= target_price:
+                        fill = bar_open
+                    elif outcome != "win" and bar_open >= stop_price:
+                        fill = bar_open
+
+                exit_price = fill
+                contracts  = open_trade["contracts"]
+                # Apply slippage against us on the exit fill.
+                if direction == "long":
+                    eff_exit  = exit_price - slippage_price
+                    gross_pnl = (eff_exit - entry_price) * tick_value * contracts
+                else:
+                    eff_exit  = exit_price + slippage_price
+                    gross_pnl = (entry_price - eff_exit) * tick_value * contracts
+
+                # Commission on both entry and exit legs.
+                commission = commission_per_side * contracts * 2
+                pnl = gross_pnl - commission
 
                 open_trade["exit_time"]  = bar2["time"]
                 open_trade["exit_price"] = exit_price
+                open_trade["commission"] = round(commission, 2)
                 open_trade["pnl"]        = round(pnl, 2)
-                open_trade["outcome"]    = "win" if hit_target else "loss"
+                open_trade["outcome"]    = outcome
                 open_trade["bars_held"]  = i - open_trade["_entry_idx"]
                 trades.append(open_trade)
                 open_trade = None
@@ -417,9 +467,12 @@ def _compute_summary(trades: List[dict], bars_used: int, data_source: str) -> di
     executed = [t for t in trades if t["context_pass"] == 1]
     filtered = [t for t in trades if t["context_pass"] == 0]
 
-    closed = [t for t in executed if t["outcome"] in ("win", "loss")]
+    # "ambiguous" trades were filled conservatively at the stop, so they
+    # count as losses for P&L/statistics but are tracked separately too.
+    closed = [t for t in executed if t["outcome"] in ("win", "loss", "ambiguous")]
     wins   = [t for t in closed if t["outcome"] == "win"]
-    losses = [t for t in closed if t["outcome"] == "loss"]
+    losses = [t for t in closed if t["outcome"] in ("loss", "ambiguous")]
+    ambiguous = [t for t in closed if t["outcome"] == "ambiguous"]
 
     total_pnl  = sum(t["pnl"] for t in closed if t["pnl"] is not None)
     gross_win  = sum(t["pnl"] for t in wins   if t["pnl"] is not None)
@@ -449,6 +502,7 @@ def _compute_summary(trades: List[dict], bars_used: int, data_source: str) -> di
         "total":           len(executed),
         "wins":            len(wins),
         "losses":          len(losses),
+        "ambiguous":       len(ambiguous),
         "win_rate":        round(len(wins) / len(closed), 4) if closed else 0.0,
         "total_pnl":       round(total_pnl, 2),
         "avg_win":         round(gross_win / len(wins), 2) if wins else 0.0,

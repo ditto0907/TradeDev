@@ -87,8 +87,17 @@ def us_market_holidays(year: int) -> Set[date]:
     """
     holidays: Set[date] = set()
 
-    # 1. New Year's Day
-    holidays.add(_observed(date(year, 1, 1)))
+    # 1. New Year's Day.
+    # Per CME/NYSE convention, when Jan 1 falls on a Saturday the market does
+    # NOT close the preceding Friday (no observance).  When it falls on a
+    # Sunday it is observed the following Monday.  We must never roll the
+    # observed date back into the previous year, or it would be stored in the
+    # wrong year's set and never match in is_us_market_holiday().
+    _ny = date(year, 1, 1)
+    if _ny.weekday() == 6:          # Sunday → observed Monday Jan 2
+        holidays.add(_ny + timedelta(days=1))
+    elif _ny.weekday() < 5:         # weekday → itself (Saturday: no observance)
+        holidays.add(_ny)
 
     # 2. MLK Day (3rd Monday in January)
     holidays.add(_nth_weekday(year, 1, 0, 3))

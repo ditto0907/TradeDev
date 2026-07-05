@@ -148,6 +148,34 @@ curl "http://localhost:8000/api/skill/bars?symbol=MNQ&from_dt=2026-04-08 09:30&t
 
 When the user asks "market cycle at 11:00", they want to know what YOU COULD SEE at 11:00, not what happened after.
 
+**⚠️ Daily (1D) Bar Date Convention — Critical for PDH/PDL:**
+
+Daily bar timestamps are anchored at **UTC midnight**, where the **UTC date
+equals the exchange trading day**. Each 1D bar in the response also carries an
+explicit `trade_date` field — **always read that field**, never convert a 1D
+timestamp to ET yourself.
+
+```
+• A 1D bar with ts 1780012800 → trade_date "2026-05-29" (the FULL 5/29 RTH session)
+• ❌ NEVER astimezone() a 1D ts to ET — it shifts to 5/28 20:00 and mis-dates the bar
+• PDH/PDL = the daily bar whose trade_date is the PRIOR trading day
+```
+
+To get the PDH/PDL for an analysis on date D, fetch a window of recent daily
+bars and **select by the `trade_date` field** — pick the bar whose `trade_date`
+is the prior trading day. Do **NOT** rely on `to_dt` to exclude date D's own
+daily bar: because the 1D timestamp sits at UTC midnight (= ET prior-day 20:00),
+date D's daily bar leaks into a `to_dt=<D-1>` ET-day query window.
+
+```bash
+# PDH/PDL for analyzing 2026-05-29:
+curl "http://localhost:8000/api/skill/bars?symbol=MES&resolution=1D&from_dt=2026-05-25&to_dt=2026-05-29"
+# → from the returned bars, pick the one with trade_date == "2026-05-28"
+#   (the prior trading day). Its high = PDH, low = PDL.
+# ⚠️ Do NOT just take the last bar — the last bar is trade_date 2026-05-29
+#   (date D itself) = hindsight bias.
+```
+
 ### Write Analysis Results
 
 ```

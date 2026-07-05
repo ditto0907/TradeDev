@@ -24,6 +24,33 @@ class IBOrderManager:
         self._contract = contract
         self._trades   = {}   # orderId (int) → Trade
         self._brackets = {}   # orderId (int) → list[int]  (entry → [tp_id, sl_id])
+        self._entry_ids = set()   # orderIds that are bracket *entry* legs
+
+    # ─── Validation helpers ────────────────────────────────────
+
+    @property
+    def _min_tick(self) -> Optional[float]:
+        """Contract minimum tick size, if IB populated it on the contract."""
+        mt = getattr(self._contract, "minTick", None)
+        try:
+            return float(mt) if mt else None
+        except (TypeError, ValueError):
+            return None
+
+    def _validate_price(self, label: str, price: float) -> None:
+        """Reject obviously invalid prices (non-positive / off-tick)."""
+        if price is None:
+            return
+        if price <= 0:
+            raise ValueError(f"{label} must be positive (got {price})")
+        mt = self._min_tick
+        if mt and mt > 0:
+            # Allow a small float tolerance around the tick grid.
+            steps = price / mt
+            if abs(steps - round(steps)) > 1e-4:
+                raise ValueError(
+                    f"{label} {price} is not a multiple of tick size {mt}"
+                )
 
     # ─── Place ───────────────────────────────────────────────────────────────
 
@@ -39,6 +66,13 @@ class IBOrderManager:
         action     = action.upper()
         order_type = order_type.lower()
         tif        = tif.upper()
+
+        if action not in ("BUY", "SELL"):
+            raise ValueError(f"action must be BUY or SELL (got {action!r})")
+        if not isinstance(quantity, int) or quantity <= 0:
+            raise ValueError(f"quantity must be a positive integer (got {quantity!r})")
+        self._validate_price("limit_price", limit_price)
+        self._validate_price("stop_price", stop_price)
 
         if order_type == "market":
             order = MarketOrder(action, quantity, tif=tif)
@@ -75,7 +109,7 @@ class IBOrderManager:
         )
         return self._trade_to_dict(trade)
 
-    # ─── Bracket Order (OCA group) ───────────────────────────────────────────
+    # ─── Bracket Order (parent/child + OCA group) ────────────────────────────
 
     def place_bracket_order(
         self,
@@ -90,44 +124,106 @@ class IBOrderManager:
     ) -> list:
         """
         Place a bracket order: entry + take-profit + stop-loss.
-        TP and SL are placed as an OCA group so filling one cancels the other.
+
+        The TP/SL legs are linked to the entry via ``parentId`` and the entry
+        transmits last (``transmit=False`` on all but the final leg), so IB
+        holds the protective legs inactive until the entry fills.  This
+        prevents a naked reverse position if the protective legs would
+        otherwise trigger before the entry is filled.  The two exit legs also
+        share an OCA group so filling one cancels the other.
+
         Returns a list of order dicts [entry, tp, sl].
         """
-        # Place the entry order first
-        entry = self.place_order(action, quantity, order_type,
-                                 limit_price=limit_price, stop_price=stop_price,
-                                 tif=tif)
-        results = [entry]
+        action      = action.upper()
+        order_type  = order_type.lower()
+        tif         = tif.upper()
 
-        exit_action = "SELL" if action.upper() == "BUY" else "BUY"
+        if action not in ("BUY", "SELL"):
+            raise ValueError(f"action must be BUY or SELL (got {action!r})")
+        if not isinstance(quantity, int) or quantity <= 0:
+            raise ValueError(f"quantity must be a positive integer (got {quantity!r})")
+
+        # Validate all prices are positive / on-tick.
+        for label, px in (("limit_price", limit_price), ("stop_price", stop_price),
+                          ("tp_price", tp_price), ("sl_price", sl_price)):
+            self._validate_price(label, px)
+
+        # Directional sanity of the protective legs relative to the entry
+        # reference price (limit for LIMIT entries, stop for STOP entries).
+        ref = limit_price if limit_price is not None else stop_price
+        if ref is not None:
+            if action == "BUY":
+                if tp_price is not None and tp_price <= ref:
+                    raise ValueError("For a BUY, take-profit must be above the entry price")
+                if sl_price is not None and sl_price >= ref:
+                    raise ValueError("For a BUY, stop-loss must be below the entry price")
+            else:  # SELL
+                if tp_price is not None and tp_price >= ref:
+                    raise ValueError("For a SELL, take-profit must be below the entry price")
+                if sl_price is not None and sl_price <= ref:
+                    raise ValueError("For a SELL, stop-loss must be above the entry price")
+
+        exit_action = "SELL" if action == "BUY" else "BUY"
         oca_group   = f"oca_bracket_{uuid.uuid4().hex[:8]}"
+        has_children = tp_price is not None or sl_price is not None
 
-        # Take-profit (limit order on exit side)
+        # ── Entry leg (built manually so we can hold transmit) ──────────────
+        if order_type == "market":
+            entry_order = MarketOrder(action, quantity, tif=tif)
+        elif order_type == "limit":
+            if limit_price is None:
+                raise ValueError("limit_price required for LIMIT entry")
+            entry_order = LimitOrder(action, quantity, limit_price, tif=tif)
+        elif order_type == "stop":
+            if stop_price is None:
+                raise ValueError("stop_price required for STOP entry")
+            entry_order = StopOrder(action, quantity, stop_price, tif=tif)
+        elif order_type == "stop_limit":
+            if limit_price is None or stop_price is None:
+                raise ValueError("limit_price and stop_price required for STOP LIMIT entry")
+            entry_order = Order(orderType="STP LMT", action=action,
+                                totalQuantity=quantity, lmtPrice=limit_price,
+                                auxPrice=stop_price, tif=tif)
+        else:
+            raise ValueError(f"Unknown order type: {order_type!r}")
+
+        # Hold transmit until the final child so IB registers the whole bracket
+        # atomically; if there are no children the entry transmits immediately.
+        entry_order.transmit = not has_children
+        entry_trade = self._ib.placeOrder(self._contract, entry_order)
+        entry_id = entry_trade.order.orderId
+        self._trades[entry_id] = entry_trade
+        self._entry_ids.add(entry_id)
+        logger.info("Bracket ENTRY placed: %s %d %s %s orderId=%s (children=%s)",
+                    action, quantity, order_type.upper(),
+                    self._contract.localSymbol, entry_id, has_children)
+        results = [self._trade_to_dict(entry_trade)]
+
+        legs = []
         if tp_price is not None:
-            tp_order = LimitOrder(exit_action, quantity, tp_price, tif=tif.upper())
-            tp_order.ocaGroup = oca_group
-            tp_order.ocaType  = 1  # Cancel remaining on fill
-            tp_trade = self._ib.placeOrder(self._contract, tp_order)
-            self._trades[tp_trade.order.orderId] = tp_trade
-            results.append(self._trade_to_dict(tp_trade))
-            logger.info("Bracket TP placed: %s %d LMT @ %s ocaGroup=%s orderId=%s",
-                        exit_action, quantity, tp_price, oca_group, tp_trade.order.orderId)
-
-        # Stop-loss (stop order on exit side)
+            tp_order = LimitOrder(exit_action, quantity, tp_price, tif=tif)
+            legs.append(("TP", tp_order))
         if sl_price is not None:
-            sl_order = StopOrder(exit_action, quantity, sl_price, tif=tif.upper())
-            sl_order.ocaGroup = oca_group
-            sl_order.ocaType  = 1
-            sl_trade = self._ib.placeOrder(self._contract, sl_order)
-            self._trades[sl_trade.order.orderId] = sl_trade
-            results.append(self._trade_to_dict(sl_trade))
-            logger.info("Bracket SL placed: %s %d STP @ %s ocaGroup=%s orderId=%s",
-                        exit_action, quantity, sl_price, oca_group, sl_trade.order.orderId)
+            sl_order = StopOrder(exit_action, quantity, sl_price, tif=tif)
+            legs.append(("SL", sl_order))
 
-        # Track bracket group: every member maps to all siblings
-        all_ids = [r["order_id"] for r in results]
-        for oid in all_ids:
-            self._brackets[oid] = [x for x in all_ids if x != oid]
+        for idx, (kind, child) in enumerate(legs):
+            child.parentId = entry_id
+            child.ocaGroup = oca_group
+            child.ocaType  = 1  # cancel remaining on fill
+            # Last leg transmits the whole bracket.
+            child.transmit = (idx == len(legs) - 1)
+            child_trade = self._ib.placeOrder(self._contract, child)
+            self._trades[child_trade.order.orderId] = child_trade
+            results.append(self._trade_to_dict(child_trade))
+            logger.info("Bracket %s placed: %s %d @ %s parent=%s ocaGroup=%s orderId=%s",
+                        kind, exit_action, quantity,
+                        getattr(child, "lmtPrice", None) or getattr(child, "auxPrice", None),
+                        entry_id, oca_group, child_trade.order.orderId)
+
+        # Track the group so cancelling the *entry* cascades to the children.
+        child_ids = [r["order_id"] for r in results[1:]]
+        self._brackets[entry_id] = child_ids
 
         return results
 
@@ -163,12 +259,15 @@ class IBOrderManager:
             return False
         self._ib.cancelOrder(trade.order)
         logger.info("Order cancel requested: orderId=%s", order_id)
-        # Auto-cancel bracket siblings
-        self._cancel_bracket_siblings(order_id)
+        # Only cascade to protective legs when cancelling the *entry* leg.
+        # Cancelling a single exit leg (e.g. TP) must NOT remove the
+        # remaining protective stop, or the position would be left naked.
+        if order_id in self._entry_ids:
+            self._cancel_bracket_siblings(order_id)
         return True
 
     def _cancel_bracket_siblings(self, order_id: int):
-        """Cancel all sibling orders in the same bracket group."""
+        """Cancel the child legs of a bracket whose *entry* is order_id."""
         siblings = self._brackets.get(order_id, [])
         for sib_id in siblings:
             trade = self._find_trade(sib_id)
@@ -204,15 +303,14 @@ class IBOrderManager:
         """
         positions = self._ib.positions()
         for pos in positions:
-            if (pos.contract.symbol == self._contract.symbol
-                    and pos.contract.secType in ("FUT", "CONTFUT")
+            if (pos.contract.conId == self._contract.conId
                     and pos.position != 0):
                 action = "SELL" if pos.position > 0 else "BUY"
                 qty = abs(int(pos.position))
                 logger.info("Flatten: %s %d %s (current pos: %s)",
                             action, qty, self._contract.localSymbol, pos.position)
                 return self.place_order(action, qty, "market")
-        logger.info("Flatten: no open position found for %s", self._contract.symbol)
+        logger.info("Flatten: no open position found for %s", self._contract.localSymbol)
         return None
 
     # ─── Position Query ──────────────────────────────────────────────────────
@@ -221,8 +319,7 @@ class IBOrderManager:
         """Return current position for the managed contract."""
         positions = self._ib.positions()
         for pos in positions:
-            if (pos.contract.symbol == self._contract.symbol
-                    and pos.contract.secType in ("FUT", "CONTFUT")):
+            if pos.contract.conId == self._contract.conId:
                 return {
                     "symbol":    pos.contract.symbol,
                     "position":  int(pos.position),

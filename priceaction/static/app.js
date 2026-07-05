@@ -1,5 +1,39 @@
 'use strict';
 
+// ── HTML/JS escaping helpers (XSS safety) ──────────────────────────────────────
+// _escHtml: for text/HTML content contexts.
+// _escJsAttr: for values interpolated into a single-quoted JS string that itself
+//   sits inside a double-quoted HTML attribute (e.g. onclick="fn('${x}')").
+function _escHtml(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c]));
+}
+function _escJsAttr(s) {
+  return String(s == null ? '' : s)
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'")
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+// Format a {currency: amount} map into a compact P&L string, keeping each
+// currency separate (never sum JPY into USD).  e.g. {USD:120,JPY:-3000}
+// → "+$120  −¥3,000".
+const _CCY_SYMBOL = { USD: '$', JPY: '¥', EUR: '€', GBP: '£' };
+function _fmtPnlByCcy(map) {
+  const keys = Object.keys(map);
+  if (!keys.length) return '$0';
+  return keys.sort().map(ccy => {
+    const v = map[ccy];
+    const sym = _CCY_SYMBOL[ccy] || (ccy + ' ');
+    const sign = v >= 0 ? '+' : '−';
+    return `${sign}${sym}${Math.abs(v).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+  }).join('  ');
+}
+
 // ── Constants ──────────────────────────────────────────────────────────────────
 
 const CYCLE_COLORS = {
@@ -569,8 +603,10 @@ function initChart() {
     loadWorkingOrders();
 
     // Sync _currentSymbol with the chart's actual symbol (may differ from default
-    // when load_last_chart restores a previous session)
-    try { _currentSymbol = chart.symbol(); } catch {}
+    // when load_last_chart restores a previous session).  Always store the BASE
+    // symbol (strip any @CONT_FRONT / @YYYYMM token) so downstream comparisons
+    // against WS messages (which carry the bare symbol) and ?symbol= queries work.
+    try { _currentSymbol = chart.symbol().split('@')[0]; } catch {}
 
     // Load initial contract options and switch to front month
     loadContractOptions(_currentSymbol.split('@')[0]).then(frontToken => {
@@ -586,14 +622,17 @@ function initChart() {
 
     // Reload analyses (and redraw active ones) whenever the chart symbol changes
     chart.onSymbolChanged().subscribe(null, () => {
-      try { _currentSymbol = chart.symbol(); } catch {}
-      const baseSym = _currentSymbol.split('@')[0];
+      try { _currentSymbol = chart.symbol().split('@')[0]; } catch {}
+      const baseSym = _currentSymbol;
       loadContractOptions(baseSym).then(() => syncContractSelector());
       loadCycleAnalyses();
       // Session switch (RTH ↔ ETH) triggers onSymbolChanged BEFORE bar data reloads.
       // The bar reload wipes all ephemeral (disableSave:true) shapes, so we must
       // redraw once after onDataLoaded fires for the new session.
-      chart.onDataLoaded().subscribe(null, () => { drawAllActiveAnalyses(); }, true);
+      chart.onDataLoaded().subscribe(null, () => {
+        drawAllActiveAnalyses();
+        redrawShownTrades();
+      }, true);
     });
 
     // Load market cycle analyses for the current symbol
@@ -808,6 +847,19 @@ function showBracketConfirm(action, orderType, limitPrice, stopPrice, qty) {
       }
       const tp = snapToTick(tpRaw);
       const sl = snapToTick(slRaw);
+      // Directional sanity: for a BUY the TP must be above and SL below the
+      // entry (reverse for a SELL).  Catches transposed TP/SL before it hits IB.
+      const entry = entryPrice;
+      if (entry != null && !isNaN(entry)) {
+        if (isBuy && (tp <= entry || sl >= entry)) {
+          showToast('For a BUY: take-profit must be above and stop-loss below the entry', 'error');
+          return;
+        }
+        if (!isBuy && (tp >= entry || sl <= entry)) {
+          showToast('For a SELL: take-profit must be below and stop-loss above the entry', 'error');
+          return;
+        }
+      }
       placeBracketOrder(action, orderType, limitPrice, stopPrice, tp, sl);
     },
   });
@@ -866,22 +918,37 @@ function showConfirmDialog({ title, body, confirmClass, confirmText, onConfirm, 
   const cancelBtn = document.getElementById('confirm-cancel');
   okBtn.focus();
 
-  const close = () => overlay.remove();
-  const dismiss = () => { close(); if (onCancel) onCancel(); };
+  // Guard so the confirm action can only ever run once, no matter how the
+  // dialog is dismissed (button click, Enter key, or both firing together).
+  let settled = false;
+  const cleanup = () => {
+    document.removeEventListener('keydown', onKey);
+    overlay.remove();
+  };
+  const confirm = () => {
+    if (settled) return;
+    settled = true;
+    cleanup();
+    onConfirm();
+  };
+  const dismiss = () => {
+    if (settled) return;
+    settled = true;
+    cleanup();
+    if (onCancel) onCancel();
+  };
 
   cancelBtn.addEventListener('click', dismiss);
   overlay.addEventListener('click', (e) => {
     if (e.target === overlay) dismiss();
   });
-  okBtn.addEventListener('click', () => {
-    onConfirm();
-    close();
-  });
+  okBtn.addEventListener('click', confirm);
 
-  // ESC to dismiss
+  // Keyboard: ESC to dismiss, Enter to confirm. preventDefault stops the
+  // focused OK button from also firing a native click on the same Enter.
   const onKey = (e) => {
-    if (e.key === 'Escape') { dismiss(); document.removeEventListener('keydown', onKey); }
-    if (e.key === 'Enter')  { onConfirm(); close(); document.removeEventListener('keydown', onKey); }
+    if (e.key === 'Escape') { e.preventDefault(); dismiss(); }
+    else if (e.key === 'Enter') { e.preventDefault(); confirm(); }
   };
   document.addEventListener('keydown', onKey);
 }
@@ -1184,21 +1251,32 @@ function updatePositionPanel() {
 
 async function loadTradeFileList() {
   try {
-    const res = await fetch('/api/trades/files');
-    const files = await res.json();
-    // Load file list and eagerly fetch trades for each file
-    const fetches = files.map(async f => {
-      if (!_tradeFiles[f.name]) {
-        _tradeFiles[f.name] = { trades: null, shown: false, expanded: true };
-      }
-      if (!_tradeFiles[f.name].trades) {
-        await loadTradesForFile(f.name);
-      }
+    // Source of truth: DB trade_logs (includes user annotations + stable ids),
+    // grouped by source_file to preserve the per-file show/hide-on-chart UX.
+    const rows = await fetch('/api/tradelogs').then(r => r.json());
+    const byFile = {};
+    (Array.isArray(rows) ? rows : []).forEach(t => {
+      const fn = t.source_file || '(unknown)';
+      (byFile[fn] = byFile[fn] || []).push(t);
     });
-    await Promise.all(fetches);
+    // Display each file's trades ascending by entry_time.
+    Object.values(byFile).forEach(list => list.sort((a, b) => (a.entry_time || 0) - (b.entry_time || 0)));
+    // Rebuild _tradeFiles, preserving each file's shown/expanded UI state.
+    const prevState = _tradeFiles;
+    _tradeFiles = {};
+    Object.keys(byFile).forEach(fn => {
+      const prev = prevState[fn] || {};
+      _tradeFiles[fn] = {
+        trades:   byFile[fn],
+        shown:    prev.shown || false,
+        expanded: prev.expanded !== false,
+      };
+    });
+    redrawShownTrades();
+    _updateTradeCount();
     renderTradeTable();
   } catch (e) {
-    console.warn('Trade file list load error:', e);
+    console.warn('Trade DB load error:', e);
   }
 }
 
@@ -1210,17 +1288,9 @@ function toggleFileExpand(filename) {
 }
 
 async function loadTradesForFile(filename) {
-  try {
-    const res = await fetch(`/api/trades/file/${encodeURIComponent(filename)}`);
-    const trades = await res.json();
-    if (_tradeFiles[filename]) {
-      _tradeFiles[filename].trades = trades;
-    }
-    return trades;
-  } catch (e) {
-    console.warn(`Trade file load error (${filename}):`, e);
-    return [];
-  }
+  // Trades are already loaded from the DB by loadTradeFileList(); return the
+  // cached rows.  Kept as an async shim so existing callers stay unchanged.
+  return _tradeFiles[filename]?.trades || [];
 }
 
 async function toggleFileOnChart(filename) {
@@ -1270,20 +1340,39 @@ async function deleteTradeFile(filename) {
 async function handleTradeCSVUpload(input) {
   const file = input.files?.[0];
   if (!file) return;
+  // Client-side validation before uploading.
+  if (!/\.csv$/i.test(file.name)) {
+    alert('Please choose a .csv file.');
+    input.value = '';
+    return;
+  }
+  if (file.size > 10 * 1024 * 1024) {
+    alert('File too large (max 10 MB).');
+    input.value = '';
+    return;
+  }
   try {
     const formData = new FormData();
     formData.append('file', file);
     const res = await fetch('/api/trades/upload', { method: 'POST', body: formData });
     const data = await res.json();
-    if (!data.trades?.length) {
-      alert('No filled trades found in CSV.');
+    if (!res.ok || !data.trades?.length) {
+      alert(data.error || 'No filled trades found in CSV.');
+      input.value = '';
       return;
     }
     const filename = data.filename;
-    _tradeFiles[filename] = { trades: data.trades, shown: true, expanded: true };
-    drawTradeMarkersForFile(filename, data.trades);
-    _showTrades = true;
-    document.getElementById('leg-trades')?.classList.remove('sr-off');
+    // The upload endpoint upserts into the DB (preserving annotations); reload
+    // from the DB so rows carry stable ids + any existing annotations, then
+    // show the newly-uploaded file on the chart.
+    await loadTradeFileList();
+    if (_tradeFiles[filename]) {
+      _tradeFiles[filename].shown = true;
+      _tradeFiles[filename].expanded = true;
+      drawTradeMarkersForFile(filename, _tradeFiles[filename].trades || []);
+      _showTrades = true;
+      document.getElementById('leg-trades')?.classList.remove('sr-off');
+    }
     _updateTradeCount();
     renderTradeTable();
     console.log(`[Trades] Uploaded ${data.trades.length} trades from ${filename}`);
@@ -1292,6 +1381,24 @@ async function handleTradeCSVUpload(input) {
     alert('Failed to parse CSV file.');
   }
   input.value = '';
+}
+
+// Persist a trade annotation (market_cycle / notes / …) to the DB and update
+// the in-memory cache so re-renders keep the edit.
+async function saveTradeAnnotation(id, field, value) {
+  if (id == null) return;
+  try {
+    await fetch(`/api/tradelogs/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ [field]: value }),
+    });
+    Object.values(_tradeFiles).forEach(f => {
+      (f.trades || []).forEach(t => { if (t.id === id) t[field] = value; });
+    });
+  } catch (e) {
+    console.warn('saveTradeAnnotation failed:', e);
+  }
 }
 
 function clearTradeShapesForFile(filename) {
@@ -1319,8 +1426,17 @@ function drawTradeMarkersForFile(filename, trades) {
 
   if (!trades.length) return;
 
-  trades.forEach(trade => {
+  // Only plot trades that belong to the instrument currently on the chart.
+  // Execution shapes are placed by (time, price); plotting an MNQ/NK225 trade
+  // on an MES chart would land the marker at a wrong price on the wrong
+  // instrument, corrupting the replay.  A trade with no symbol is assumed MES.
+  const curSym = _currentSymbol || 'MES';
+  const drawable = trades.filter(t => (t.symbol || 'MES') === curSym);
+  if (!drawable.length) return;
+
+  drawable.forEach(trade => {
     try {
+      if (trade.entry_price == null || trade.entry_time == null) return;
       const isLong     = trade.direction === 'long';
       const entryDir   = isLong ? 'buy' : 'sell';
       const entryColor = isLong ? '#26a69a' : '#ef5350';
@@ -1415,14 +1531,40 @@ function _updateTradeCount() {
   countEl.textContent = total ? `${total}` : '';
 }
 
-function locateTradeOnChart(entryTime, exitTime) {
+function locateTradeOnChart(entryTime, exitTime, symbol) {
   if (!_widget) return;
   let chart;
   try { chart = _widget.activeChart(); } catch { return; }
-  // Show 30min padding on each side
-  const from = entryTime - 1800;
+  const from = entryTime - 1800;   // 30min padding on each side
   const to = (exitTime || entryTime) + 1800;
+
+  // If the trade belongs to a different instrument, switch the chart to it
+  // first so the replay shows the correct bars, then set the range once the
+  // new symbol's data has loaded.
+  const tradeSym = symbol || 'MES';
+  const curSym = _currentSymbol || 'MES';
+  if (tradeSym && tradeSym !== curSym) {
+    const res = (() => { try { return chart.resolution(); } catch { return '5'; } })();
+    _widget.setSymbol(tradeSym, res, () => {
+      try { chart.setVisibleRange({ from, to }); } catch {}
+    });
+    return;
+  }
   chart.setVisibleRange({ from, to });
+}
+
+// Redraw execution markers for every file currently toggled "shown".
+// Called after a symbol change so markers for the newly-selected instrument
+// appear (and markers for other instruments are dropped by the symbol filter
+// inside drawTradeMarkersForFile).
+function redrawShownTrades() {
+  if (!_widget || !_showTrades) return;
+  Object.keys(_tradeFiles).forEach(fn => {
+    const entry = _tradeFiles[fn];
+    if (entry && entry.shown && entry.trades) {
+      drawTradeMarkersForFile(fn, entry.trades);
+    }
+  });
 }
 
 function renderTradeTable() {
@@ -1432,20 +1574,22 @@ function renderTradeTable() {
   const filenames = Object.keys(_tradeFiles).sort();
 
   if (!filenames.length) {
-    tbody.innerHTML = '<tr><td colspan="7"><div class="empty-table">No trade logs — upload a CSV to view</div></td></tr>';
+    tbody.innerHTML = '<tr><td colspan="9"><div class="empty-table">No trade logs — upload a CSV to view</div></td></tr>';
     if (info) info.textContent = '';
     return;
   }
 
   // Compute global stats
-  let totalPnl = 0, wins = 0, losses = 0, totalCount = 0, totalWinAmt = 0, totalLossAmt = 0;
+  let wins = 0, losses = 0, totalCount = 0, totalWinAmt = 0, totalLossAmt = 0;
+  const pnlByCcy = {};   // currency → summed P&L (never mix currencies)
   filenames.forEach(fn => {
     const f = _tradeFiles[fn];
     if (f.trades) {
       totalCount += f.trades.length;
       f.trades.forEach(t => {
         if (t.pnl != null) {
-          totalPnl += t.pnl;
+          const ccy = t.currency || 'USD';
+          pnlByCcy[ccy] = (pnlByCcy[ccy] || 0) + t.pnl;
           if (t.pnl >= 0) { wins++; totalWinAmt += t.pnl; }
           else { losses++; totalLossAmt += Math.abs(t.pnl); }
         }
@@ -1458,8 +1602,10 @@ function renderTradeTable() {
       const avgWin = wins > 0 ? totalWinAmt / wins : 0;
       const avgLoss = losses > 0 ? totalLossAmt / losses : 0;
       const rr = avgLoss > 0 ? (avgWin / avgLoss).toFixed(2) : '—';
+      const pnlStr = _fmtPnlByCcy(pnlByCcy);
+      const anyPos = Object.values(pnlByCcy).reduce((a, b) => a + (b >= 0 ? 1 : -1), 0) >= 0;
       info.innerHTML = `<span style="color:var(--text-dim)">${totalCount} trades</span>` +
-        ` &nbsp;|&nbsp; <span style="color:${totalPnl >= 0 ? 'var(--green)' : 'var(--red)'}">P&L: ${totalPnl >= 0 ? '+' : ''}$${totalPnl.toFixed(0)}</span>` +
+        ` &nbsp;|&nbsp; <span style="color:${anyPos ? 'var(--green)' : 'var(--red)'}">P&L: ${pnlStr}</span>` +
         ` &nbsp;|&nbsp; WR: ${wr}% (${wins}W ${losses}L)` +
         ` &nbsp;|&nbsp; RR: ${rr}`;
     } else {
@@ -1475,11 +1621,13 @@ function renderTradeTable() {
     const count = f.trades ? f.trades.length : '—';
 
     // Per-file stats
-    let fPnl = 0, fWins = 0, fLosses = 0, fWinAmt = 0, fLossAmt = 0;
+    let fWins = 0, fLosses = 0, fWinAmt = 0, fLossAmt = 0;
+    const fPnlByCcy = {};
     if (f.trades) {
       f.trades.forEach(t => {
         if (t.pnl != null) {
-          fPnl += t.pnl;
+          const ccy = t.currency || 'USD';
+          fPnlByCcy[ccy] = (fPnlByCcy[ccy] || 0) + t.pnl;
           if (t.pnl >= 0) { fWins++; fWinAmt += t.pnl; } else { fLosses++; fLossAmt += Math.abs(t.pnl); }
         }
       });
@@ -1488,9 +1636,10 @@ function renderTradeTable() {
     const fAvgWin = fWins > 0 ? fWinAmt / fWins : 0;
     const fAvgLoss = fLosses > 0 ? fLossAmt / fLosses : 0;
     const fRr = fAvgLoss > 0 ? (fAvgWin / fAvgLoss).toFixed(2) : '—';
+    const fAnyPos = Object.values(fPnlByCcy).reduce((a, b) => a + (b >= 0 ? 1 : -1), 0) >= 0;
     const fStatsHtml = f.trades && f.trades.length
       ? `<span style="color:var(--text-dim)">${count} trades</span>` +
-        ` &nbsp;|&nbsp; <span style="color:${fPnl >= 0 ? 'var(--green)' : 'var(--red)'}">P&L: ${fPnl >= 0 ? '+' : ''}$${fPnl.toFixed(0)}</span>` +
+        ` &nbsp;|&nbsp; <span style="color:${fAnyPos ? 'var(--green)' : 'var(--red)'}">P&L: ${_fmtPnlByCcy(fPnlByCcy)}</span>` +
         ` &nbsp;|&nbsp; <span style="color:var(--text-dim)">WR: ${fWr}%</span>` +
         ` &nbsp;|&nbsp; <span style="color:var(--text-dim)">RR: ${fRr}</span>`
       : '';
@@ -1502,13 +1651,13 @@ function renderTradeTable() {
 
     // File group header row
     html += `<tr class="trade-file-header" style="background:var(--panel);border-bottom:1px solid var(--border)">
-      <td colspan="7" style="padding:5px 8px">
+      <td colspan="9" style="padding:5px 8px">
         <div style="display:flex;align-items:center;gap:8px">
-          <span style="cursor:pointer;font-size:12px;opacity:0.6;user-select:none;flex-shrink:0" onclick="toggleFileExpand('${fn.replace(/'/g, "\\'")}')">${chevron}</span>
-          <span style="cursor:pointer;display:inline-flex;align-items:center;opacity:0.7;flex-shrink:0" onclick="toggleFileOnChart('${fn.replace(/'/g, "\\'")}')" title="${isShown ? 'Hide from chart' : 'Show on chart'}">${eyeIcon}</span>
-          <span style="font-size:12px;font-weight:500;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:160px;max-width:280px">${fn}</span>
+          <span style="cursor:pointer;font-size:12px;opacity:0.6;user-select:none;flex-shrink:0" onclick="toggleFileExpand('${_escJsAttr(fn)}')">${chevron}</span>
+          <span style="cursor:pointer;display:inline-flex;align-items:center;opacity:0.7;flex-shrink:0" onclick="toggleFileOnChart('${_escJsAttr(fn)}')" title="${isShown ? 'Hide from chart' : 'Show on chart'}">${eyeIcon}</span>
+          <span style="font-size:12px;font-weight:500;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:160px;max-width:280px">${_escHtml(fn)}</span>
           <span style="font-size:11px;white-space:nowrap;flex-shrink:0;margin-left:12px">${fStatsHtml}</span>
-          <span style="margin-left:auto;cursor:pointer;display:inline-flex;align-items:center;opacity:0.5;flex-shrink:0" onclick="if(confirm('Delete ${fn.replace(/'/g, "\\'")}?'))deleteTradeFile('${fn.replace(/'/g, "\\'")}')" title="Delete file">
+          <span style="margin-left:auto;cursor:pointer;display:inline-flex;align-items:center;opacity:0.5;flex-shrink:0" onclick="if(confirm('Delete ${_escJsAttr(fn)}?'))deleteTradeFile('${_escJsAttr(fn)}')" title="Delete file">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>
           </span>
         </div>
@@ -1522,23 +1671,37 @@ function renderTradeTable() {
         const sideClass = t.direction === 'long' ? 'up' : 'down';
         const dt = t.entry_time ? new Date(t.entry_time * 1000) : null;
         const dateStr = dt ? `${dt.toLocaleDateString()} ${dt.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}` : '—';
-        const pnlStr = t.pnl != null ? `${t.pnl >= 0 ? '+' : ''}$${t.pnl.toFixed(0)}` : '—';
+        const pnlStr = t.pnl != null
+          ? _fmtPnlByCcy({ [t.currency || 'USD']: t.pnl })
+          : '—';
         const pnlClass = t.pnl != null ? (t.pnl >= 0 ? 'up' : 'down') : '';
         const locateBtn = t.entry_time
-          ? `<span style="cursor:pointer;opacity:0.5;margin-left:4px;display:inline-flex;vertical-align:middle" onclick="locateTradeOnChart(${t.entry_time},${t.exit_time || t.entry_time})" title="Locate on chart"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/></svg></span>`
+          ? `<span style="cursor:pointer;opacity:0.5;margin-left:4px;display:inline-flex;vertical-align:middle" onclick="locateTradeOnChart(${t.entry_time},${t.exit_time || t.entry_time},'${_escJsAttr(t.symbol || 'MES')}')" title="Locate on chart"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/><line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/></svg></span>`
           : '';
+        // Editable annotation cells (persist to DB via /api/tradelogs/{id}).
+        const annDisabled = t.id == null ? 'disabled' : '';
+        const cycleCell = `<input value="${_escHtml(t.market_cycle || '')}" ${annDisabled}
+            style="width:100%;font-size:11px;background:transparent;color:var(--text);border:1px solid transparent"
+            onfocus="this.style.borderColor='var(--border)'"
+            onblur="this.style.borderColor='transparent';saveTradeAnnotation(${t.id},'market_cycle',this.value)">`;
+        const notesCell = `<input value="${_escHtml(t.notes || '')}" ${annDisabled}
+            style="width:100%;font-size:11px;background:transparent;color:var(--text);border:1px solid transparent"
+            onfocus="this.style.borderColor='var(--border)'"
+            onblur="this.style.borderColor='transparent';saveTradeAnnotation(${t.id},'notes',this.value)">`;
         html += `<tr>
           <td>${dateStr}${locateBtn}</td>
-          <td>${t.symbol || 'MES'}</td>
+          <td>${_escHtml(t.symbol || 'MES')}</td>
           <td class="${sideClass}">${side}</td>
           <td>${t.qty || 1}</td>
           <td>${t.entry_price != null ? t.entry_price.toFixed(2) : '—'}</td>
           <td>${t.exit_price != null ? t.exit_price.toFixed(2) : '—'}</td>
           <td class="${pnlClass}">${pnlStr}</td>
+          <td>${cycleCell}</td>
+          <td>${notesCell}</td>
         </tr>`;
       });
     } else if (isExpanded && (!f.trades || !f.trades.length)) {
-      html += `<tr><td colspan="7" style="text-align:center;color:var(--text-dim);font-size:11px;padding:4px">Loading...</td></tr>`;
+      html += `<tr><td colspan="9" style="text-align:center;color:var(--text-dim);font-size:11px;padding:4px">Loading...</td></tr>`;
     }
   });
 
@@ -1551,10 +1714,16 @@ function connectPriceFeed(datafeed) {
   const origEnsure = datafeed._ensureWebSocket.bind(datafeed);
   datafeed._ensureWebSocket = function() {
     origEnsure();
-    if (datafeed._ws) {
-      const origOnMsg = datafeed._ws.onmessage;
-      datafeed._ws.onmessage = function(event) {
-        if (origOnMsg) origOnMsg.call(datafeed._ws, event);
+    // Only wrap onmessage ONCE per socket instance.  _ensureWebSocket is
+    // called on every subscribeBars (symbol/resolution change); without this
+    // guard each call would stack another wrapper, causing handlePriceMessage
+    // to run N+1 times per message and leaking closures.
+    const ws = datafeed._ws;
+    if (ws && !ws._priceFeedWrapped) {
+      ws._priceFeedWrapped = true;
+      const origOnMsg = ws.onmessage;
+      ws.onmessage = function(event) {
+        if (origOnMsg) origOnMsg.call(ws, event);
         handlePriceMessage(event);
       };
     }
@@ -2196,8 +2365,20 @@ async function placeOrder() {
   const qty     = parseInt(document.getElementById('order-qty')?.value) || 1;
   const type    = document.getElementById('order-type')?.value || 'market';
   const tif     = document.getElementById('order-tif')?.value  || 'day';
-  const limitPx = parseFloat(document.getElementById('order-price')?.value) || null;
-  const stopPx  = parseFloat(document.getElementById('order-stop')?.value)  || null;
+  let limitPx = parseFloat(document.getElementById('order-price')?.value);
+  let stopPx  = parseFloat(document.getElementById('order-stop')?.value);
+  limitPx = isNaN(limitPx) ? null : snapToTick(limitPx);
+  stopPx  = isNaN(stopPx)  ? null : snapToTick(stopPx);
+
+  // Validate required prices for the selected order type before submitting.
+  if ((type === 'limit' || type === 'stop_limit') && (limitPx == null || limitPx <= 0)) {
+    showToast('Enter a valid limit price', 'error');
+    return;
+  }
+  if ((type === 'stop' || type === 'stop_limit') && (stopPx == null || stopPx <= 0)) {
+    showToast('Enter a valid stop price', 'error');
+    return;
+  }
 
   const body = {
     action:      _orderSide.toUpperCase(),
@@ -2662,7 +2843,12 @@ function handleCycleAnalysisWS(msg) {
     // New analysis arrived
     _mcAnalyses.unshift(msg.analysis);
     renderAnalysisTable();
-    if (msg.analysis.active && _widget) {
+    // Only draw on the chart when the analysis belongs to the symbol we're
+    // currently viewing — otherwise another contract's annotations would be
+    // painted onto this chart.
+    const curSym = _currentSymbol || 'MES';
+    const sameSym = !msg.analysis.symbol || msg.analysis.symbol === curSym;
+    if (msg.analysis.active && sameSym && _widget) {
       try {
         const chart = _widget.activeChart();
         drawOneAnalysis(chart, msg.analysis);
@@ -2677,7 +2863,9 @@ function handleCycleAnalysisWS(msg) {
       if (!_widget) return;
       let chart;
       try { chart = _widget.activeChart(); } catch { return; }
-      if (rec.active) {
+      const curSym = _currentSymbol || 'MES';
+      const sameSym = !rec.symbol || rec.symbol === curSym;
+      if (rec.active && sameSym) {
         drawOneAnalysis(chart, rec);
       } else {
         removeOneAnalysis(chart, rec.id);
@@ -2839,15 +3027,15 @@ function renderAnalysisTable() {
     const toggleTitle = a.active ? 'Hide from chart' : 'Show on chart';
     // Create short summary preview
     const summary = (a.summary || '').length > 60
-      ? a.summary.substring(0, 60) + '…'
-      : (a.summary || '—');
+      ? _escHtml(a.summary.substring(0, 60)) + '…'
+      : _escHtml(a.summary || '—');
 
     return `<tr class="${activeClass}">
       <td>${created}</td>
-      <td>${a.symbol || ''}</td>
+      <td>${_escHtml(a.symbol || '')}</td>
       <td>${period}</td>
-      <td>${a.timeframe || ''}</td>
-      <td>${a.session || ''}</td>
+      <td>${_escHtml(a.timeframe || '')}</td>
+      <td>${_escHtml(a.session || '')}</td>
       <td class="mc-summary-cell" onclick="showSummaryModal(${a.id})" title="Click to view full summary">${summary}</td>
       <td>${annCount}</td>
       <td class="mc-actions">

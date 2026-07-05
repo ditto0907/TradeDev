@@ -117,6 +117,17 @@ def _last_business_day(year: int, month: int, symbol: str) -> date:
     return d
 
 
+def _nth_last_business_day(year: int, month: int, n: int, symbol: str) -> date:
+    """Return the *n*-th-to-last business day of the month (n=1 → last)."""
+    d = _last_business_day(year, month, symbol)
+    count = 1
+    while count < n:
+        d -= timedelta(days=1)
+        if _is_business_day(d, symbol):
+            count += 1
+    return d
+
+
 def _bday_offset(d: date, offset: int, symbol: str) -> date:
     """Return the date *offset* business days away from *d* (signed)."""
     if offset == 0:
@@ -183,7 +194,10 @@ def rollover_date(symbol: str, year: int, month: int) -> date:
 
     if rtype == "n_bdays_before_ltd":
         n = int(rule.get("n", 1))
-        ltd = _last_business_day(year, month, symbol)
+        # LTD may be the true last business day (default) or the nth-to-last
+        # (e.g. COMEX metals settle on the 3rd-to-last business day).
+        ltd_nth = int(rule.get("ltd_nth_last", 1))
+        ltd = _nth_last_business_day(year, month, ltd_nth, symbol)
         return _bday_offset(ltd, -n, symbol)
 
     if rtype == "second_friday":

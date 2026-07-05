@@ -114,9 +114,10 @@ class MESDatafeed {
       .then(data => {
         if (data.s === 'no_data') {
           const meta = { noData: true };
-          // nextTime is in SECONDS — same unit as periodParams.from/to.
-          // Do NOT multiply by 1000; bar timestamps use ms but nextTime does not.
-          if (data.nextTime != null) meta.nextTime = data.nextTime;
+          // The JS Datafeed API expects nextTime as a Unix timestamp in
+          // MILLISECONDS (see HistoryMetadata in datafeed-api.d.ts).  The
+          // backend returns seconds, so convert here.
+          if (data.nextTime != null) meta.nextTime = data.nextTime * 1000;
           onResult([], meta);
           return;
         }
@@ -188,6 +189,7 @@ class MESDatafeed {
     this._ws.onopen = () => {
       console.log('DataFeed WebSocket connected');
       this._wsReady = true;
+      this._reconnectDelay = 1500;  // reset backoff on a successful connect
     };
 
     this._ws.onmessage = (event) => {
@@ -210,16 +212,18 @@ class MESDatafeed {
     };
 
     this._ws.onclose = () => {
-      console.log('DataFeed WebSocket closed, reconnecting in 3s…');
       this._wsReady = false;
-      setTimeout(() => this._ensureWebSocket(), 3000);
+      // Exponential backoff so a dead backend doesn't cause a reconnect storm.
+      this._reconnectDelay = Math.min((this._reconnectDelay || 1500) * 2, 30000);
+      console.log(`DataFeed WebSocket closed, reconnecting in ${this._reconnectDelay}ms…`);
+      setTimeout(() => this._ensureWebSocket(), this._reconnectDelay);
     };
 
     this._ws.onerror = err => console.error('DataFeed WebSocket error:', err);
   }
 
   _handleBarUpdate(msg) {
-    const resMap = { '5min': '5', '15min': '15', '60min': '60', '1D': '1D' };
+    const resMap = { '5min': '5', '15min': '15', '30min': '30', '60min': '60', '1D': '1D' };
     const barRes = resMap[msg.bar_size];
     if (!barRes) return;
 
@@ -249,13 +253,15 @@ class MESDatafeed {
   // matching active subscription so the chart re-queries `/api/history` and
   // displays the freshly-populated bars without requiring a manual reload.
   _handleHistoryReady(msg) {
-    const resMap = { '5min': '5', '15min': '15', '60min': '60', '1D': '1D' };
+    const resMap = { '5min': '5', '15min': '15', '30min': '30', '60min': '60', '1D': '1D' };
     const tfRes = resMap[msg.timeframe];
     if (!tfRes) return;
     const msgSymbol = msg.symbol || 'MES';
     console.log(`DataFeed: history_ready for ${msgSymbol}/${msg.timeframe} — refreshing widgets (+${msg.added_bars || 0} bars)`);
     for (const sub of Object.values(this._subscriptions)) {
-      if (sub.resolution === tfRes && sub.symbol === msgSymbol && sub.onResetCacheNeededCallback) {
+      // Subscriptions may use token form (MES@CONT_FRONT); compare base symbol.
+      const subBase = sub.symbol.includes('@') ? sub.symbol.split('@')[0] : sub.symbol;
+      if (sub.resolution === tfRes && subBase === msgSymbol && sub.onResetCacheNeededCallback) {
         try {
           sub.onResetCacheNeededCallback();
         } catch (err) {

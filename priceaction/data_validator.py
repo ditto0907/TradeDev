@@ -674,10 +674,21 @@ async def fix_bars(
     ts_filter: Optional[set] = set(timestamps) if timestamps is not None else None
 
     fixed_bars: List[dict] = []
+
+    def _is_continuous(bar: dict) -> bool:
+        """True if the bar came from a continuous (back-adjusted) contract.
+        Such bars must never be written into the per-contract ``bars`` table."""
+        tok = bar.get("contract_token")
+        if tok is not None and tok != "" and not str(tok).startswith("MONTH:"):
+            return True
+        return not bar.get("contract_month")
+
     # Fix mismatched bars with IB data
     for m in mismatches:
         if ts_filter is not None and m["time"] not in ts_filter:
             continue
+        if _is_continuous(m["ib"]):
+            continue  # never overwrite real bars with continuous data
         bar = dict(m["ib"])
         bar["source"] = "ib_validated"
         fixed_bars.append(bar)
@@ -686,6 +697,8 @@ async def fix_bars(
     for bar in ib_only:
         if ts_filter is not None and bar["time"] not in ts_filter:
             continue
+        if _is_continuous(bar):
+            continue  # continuous bars are not per-contract; skip
         b = dict(bar)
         b["source"] = "ib_validated"
         fixed_bars.append(b)
@@ -1060,21 +1073,38 @@ async def background_validate(
                         )
                         _ib_req_reset()
                         async with gate:
-                            if fix:
-                                result = await fix_bars(
-                                    sym, tf, chunk_start, chunk_incl_end,
-                                    fetcher=fetcher,
-                                )
-                                # Re-validate after the fix to compute residual issues.
-                                result = await validate_bars(
-                                    sym, tf, chunk_start, chunk_incl_end,
-                                    fetcher=fetcher,
-                                )
-                            else:
-                                result = await validate_bars(
-                                    sym, tf, chunk_start, chunk_incl_end,
-                                    fetcher=fetcher,
-                                )
+                            # Roll-overlap safety: if this chunk spans more than
+                            # one contract month, validate/fix each month
+                            # separately so same-timestamp bars from different
+                            # contracts are not compared/overwritten against
+                            # each other (_compare_bars keys by timestamp).
+                            _chunk_bars = db.get_bars(sym, tf, chunk_start, chunk_incl_end)
+                            _months = sorted({
+                                b.get("contract_month") for b in _chunk_bars
+                                if b.get("contract_month")
+                            })
+                            _targets = _months if len(_months) > 1 else [None]
+
+                            _agg: dict = {}
+                            for _cm in _targets:
+                                if fix:
+                                    await fix_bars(
+                                        sym, tf, chunk_start, chunk_incl_end,
+                                        fetcher=fetcher, contract_month=_cm,
+                                    )
+                                    _r = await validate_bars(
+                                        sym, tf, chunk_start, chunk_incl_end,
+                                        fetcher=fetcher, contract_month=_cm,
+                                    )
+                                else:
+                                    _r = await validate_bars(
+                                        sym, tf, chunk_start, chunk_incl_end,
+                                        fetcher=fetcher, contract_month=_cm,
+                                    )
+                                for k, v in _r.items():
+                                    if isinstance(v, (int, float)):
+                                        _agg[k] = _agg.get(k, 0) + v
+                            result = _agg
 
                         # Roll all detectable issues into a single counter so a
                         # range with calendar gaps or one-sided bars is not

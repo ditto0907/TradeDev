@@ -102,18 +102,26 @@ def _fetch_bars(
 
 
 def _prev_day_close(symbol: str, date_str: str) -> Optional[float]:
-    """Get the prior trading day's RTH close (best-effort)."""
+    """Get the prior trading day's RTH close (best-effort).
+
+    1D bars are anchored at UTC midnight, where `trade_date` equals the
+    exchange trading day. A single-day ET query window leaks the *next*
+    day's 1D bar (its UTC-midnight ts maps to ET prior-day 20:00), so we
+    fetch a window and select the bar whose `trade_date` is the most recent
+    one strictly before `date_str`.
+    """
     d = datetime.strptime(date_str, "%Y-%m-%d").date()
-    # Look back up to 5 calendar days to skip weekends/holidays
-    for days in range(1, 6):
-        prev = d - timedelta(days=days)
-        ds = prev.strftime("%Y-%m-%d")
-        try:
-            bars = _fetch_bars(symbol, "1D", ds, ds, session="RTH")
-            if bars:
-                return float(bars[-1]["close"])
-        except Exception as e:
-            logger.debug("prev_day_close fetch error %s: %s", ds, e)
+    from_d = (d - timedelta(days=10)).strftime("%Y-%m-%d")
+    to_d = d.strftime("%Y-%m-%d")
+    try:
+        bars = _fetch_bars(symbol, "1D", from_d, to_d, session="RTH")
+    except Exception as e:
+        logger.debug("prev_day_close fetch error: %s", e)
+        return None
+    prior = [b for b in bars if b.get("trade_date", "") < date_str]
+    if prior:
+        # bars are chronological; the last strictly-prior one is the PDC
+        return float(prior[-1]["close"])
     return None
 
 
@@ -232,7 +240,16 @@ def get_context_bars(
         from_d = (end_d - timedelta(days=10)).strftime("%Y-%m-%d")
         to_d = end_d.strftime("%Y-%m-%d")
         try:
-            out["1D"] = _fetch_bars(symbol, "1D", from_d, to_d, session="RTH")
+            d1_bars = _fetch_bars(symbol, "1D", from_d, to_d, session="RTH")
+            # Exclude the signal day's own (and any later) 1D bar to avoid
+            # hindsight bias: a 1D bar's `trade_date` equals its exchange
+            # trading day. Keep only strictly-prior trading days so the most
+            # recent remaining bar is the true PDH/PDL source.
+            sig_day = end_d.strftime("%Y-%m-%d")
+            out["1D"] = [
+                b for b in d1_bars
+                if b.get("trade_date", "") < sig_day
+            ]
         except Exception as e:
             logger.debug("1D fetch failed: %s", e)
             out["1D"] = []
@@ -353,25 +370,29 @@ def calculate_outcomes(
         day_bars[dt.strftime("%Y%m%d")].append(b)
 
     def _outcome(sig: dict, ratio: float) -> str:
+        """Return 'Y' (target hit), 'N' (stop hit / no trigger), or
+        'skip' (cannot evaluate — missing prior bar)."""
         sig_ts = int(sig["bar_ts"])
         prev_ts = sig_ts - 300  # 5 min before = first bar of pair
         b_curr = ts_to_bar.get(sig_ts)
         b_prev = ts_to_bar.get(prev_ts)
         if not b_curr or not b_prev:
-            return "N"
+            # Missing a bar (data gap) — cannot evaluate; skip rather than
+            # silently scoring it as a loss (which would bias the win-rate).
+            return "skip"
         entry = b_curr["close"]
         direction = sig["direction"]
         if direction == "Bull":
             sl = b_prev["low"]
             risk = entry - sl
             if risk <= 0:
-                return "N"
+                return "skip"
             tp = entry + risk * ratio
         else:
             sl = b_prev["high"]
             risk = sl - entry
             if risk <= 0:
-                return "N"
+                return "skip"
             tp = entry - risk * ratio
 
         # Scan bars strictly after signal, same day only
@@ -379,27 +400,35 @@ def calculate_outcomes(
         after = [b for b in day_bars[date_str] if int(b["time"]) > sig_ts]
         for b in after:
             if direction == "Bull":
-                if b["high"] >= tp:
-                    return "Y"
-                if b["low"] <= sl:
-                    return "N"
+                hit_tp = b["high"] >= tp
+                hit_sl = b["low"] <= sl
             else:
-                if b["low"] <= tp:
-                    return "Y"
-                if b["high"] >= sl:
-                    return "N"
+                hit_tp = b["low"] <= tp
+                hit_sl = b["high"] >= sl
+            # Same-bar ambiguity → resolve conservatively to the stop ('N').
+            if hit_tp and hit_sl:
+                return "N"
+            if hit_tp:
+                return "Y"
+            if hit_sl:
+                return "N"
         return "N"  # end of day, not triggered
 
     outcomes = []
     wins_1r = wins_2r = 0
+    total_1r = total_2r = 0
     for sig, row in zip(sigs, rows):
         r1 = _outcome(sig, 1.0)
         r2 = _outcome(sig, 2.0)
         outcomes.append({"row": row, "r1": r1, "r2": r2})
-        if r1 == "Y":
-            wins_1r += 1
-        if r2 == "Y":
-            wins_2r += 1
+        if r1 != "skip":
+            total_1r += 1
+            if r1 == "Y":
+                wins_1r += 1
+        if r2 != "skip":
+            total_2r += 1
+            if r2 == "Y":
+                wins_2r += 1
 
     total = len(outcomes)
     # Write to sheet
@@ -409,10 +438,12 @@ def calculate_outcomes(
 
     return json.dumps({
         "total": total,
+        "evaluated_1r": total_1r,
+        "evaluated_2r": total_2r,
         "wins_1r": wins_1r,
         "wins_2r": wins_2r,
-        "win_pct_1r": round(wins_1r / total, 3) if total else 0,
-        "win_pct_2r": round(wins_2r / total, 3) if total else 0,
+        "win_pct_1r": round(wins_1r / total_1r, 3) if total_1r else 0,
+        "win_pct_2r": round(wins_2r / total_2r, 3) if total_2r else 0,
         "outcomes": outcomes,
     }, ensure_ascii=False)
 

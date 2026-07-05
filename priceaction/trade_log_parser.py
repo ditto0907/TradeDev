@@ -55,6 +55,15 @@ if MATCH_STRATEGY not in ("FILO", "FIFO"):
                    MATCH_STRATEGY)
     MATCH_STRATEGY = "FILO"
 
+# Lucid/TopstepX "Fill Time" has no timezone suffix.  Its wall-clock offset
+# from UTC (in hours) is configurable so users in a different timezone can
+# align fills to the K-line correctly.  Default +8 (Asia/Shanghai).
+try:
+    LUCID_FILL_TZ_OFFSET_H: float = float(os.environ.get("LUCID_FILL_TZ_OFFSET_H", "8"))
+except ValueError:
+    logger.warning("Invalid LUCID_FILL_TZ_OFFSET_H — using 8")
+    LUCID_FILL_TZ_OFFSET_H = 8.0
+
 # ─── Contract specs ──────────────────────────────────────────────────────────
 # Multiplier = $/JPY value per point.  Used to compute pnl from price diff.
 CONTRACT_SPECS = {
@@ -174,6 +183,17 @@ def _match_legs(legs: List[dict], strategy: str = "") -> List[dict]:
     opens: List[dict] = []
     trades: List[dict] = []
 
+    def _matches(o: dict, close_leg: dict, opposite: str) -> bool:
+        """An open leg matches a close leg if side is opposite and symbol
+        matches; when BOTH carry a specific contract month they must be equal
+        so that overlapping roll contracts (e.g. MESM6 vs MESH6) don't cross."""
+        if o["side"] != opposite or o["symbol"] != close_leg["symbol"]:
+            return False
+        oc, lc = o.get("contract"), close_leg.get("contract")
+        if oc and lc:
+            return oc == lc
+        return True
+
     for leg in legs:
         if leg["is_open"]:
             opens.append(dict(leg, _remaining=leg["qty"]))
@@ -184,10 +204,10 @@ def _match_legs(legs: List[dict], strategy: str = "") -> List[dict]:
         while remaining > 0 and opens:
             if strategy == "FIFO":
                 idx = next((i for i, o in enumerate(opens)
-                            if o["side"] == opp and o["symbol"] == leg["symbol"]), -1)
+                            if _matches(o, leg, opp)), -1)
             else:  # FILO / LIFO
                 idx = next((i for i in range(len(opens) - 1, -1, -1)
-                            if opens[i]["side"] == opp and opens[i]["symbol"] == leg["symbol"]),
+                            if _matches(opens[i], leg, opp)),
                            -1)
             if idx < 0:
                 logger.debug("Close leg without matching open: %s", leg)
@@ -325,7 +345,18 @@ def _parse_ib(text: str, source_file: str = "") -> List[dict]:
             continue
 
         symbol, contract = _normalize_symbol(raw_sym, currency=currency)
-        is_open = ("O" in code) and ("C" not in code)
+        # IB "Code" is a semicolon-separated token list, e.g. "O", "C;P",
+        # "O;P", "Ep" (expired), "A" (assignment).  Classify by explicit
+        # Open/Close tokens; skip legs that are neither (can't be paired).
+        code_tokens = {c.strip() for c in re.split(r"[;,]", code) if c.strip()}
+        if "O" in code_tokens and "C" not in code_tokens:
+            is_open = True
+        elif "C" in code_tokens and "O" not in code_tokens:
+            is_open = False
+        else:
+            logger.debug("IB %s: skipping leg with ambiguous code %r",
+                         source_file or "<text>", code)
+            continue
 
         legs.append({
             "broker":      "ib",
@@ -383,7 +414,16 @@ def _parse_topstep(text: str, source_file: str = "") -> List[dict]:
             if not entry_raw or not ep_raw:
                 continue
             dir_raw = get(row, _TS_DIRECTION).lower()
-            direction = "long" if any(w == dir_raw for w in ("long", "buy", "b")) else "short"
+            if any(w == dir_raw for w in ("long", "buy", "b", "bot", "buytoopen", "buytoclose")):
+                direction = "long"
+            elif any(w == dir_raw for w in ("short", "sell", "s", "sld", "selltoopen", "selltoclose")):
+                direction = "short"
+            else:
+                # Unknown/blank direction — skip rather than silently assuming
+                # short, which would flip entry/exit and the P&L sign.
+                logger.warning("Topstep %s: skipping row with unrecognized direction %r",
+                               source_file or "<text>", dir_raw)
+                continue
             ts_in  = _parse_dt(entry_raw)
             ts_out = _parse_dt(get(row, _TS_EXIT_TIME))
             if ts_in is None:
@@ -438,7 +478,7 @@ def _parse_lucid(text: str, source_file: str = "") -> List[dict]:
             if row.get("Status", "").strip() != "Filled":
                 continue
             side  = row.get("B/S", "").strip().lower()
-            ts    = _parse_dt(row.get("Fill Time", ""), default_tz_offset_h=8)
+            ts    = _parse_dt(row.get("Fill Time", ""), default_tz_offset_h=LUCID_FILL_TZ_OFFSET_H)
             price = _parse_float(row.get("avgPrice"))
             qty   = int(abs(_parse_float(row.get("filledQty")) or 1))
             raw_sym  = (row.get("Contract") or row.get("Product") or "MES").strip()

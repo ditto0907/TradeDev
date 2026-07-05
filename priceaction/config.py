@@ -45,6 +45,8 @@ INSTRUMENTS = {
         "exchange": "CME",
         "currency": "USD",
         "timezone": "America/New_York",
+        "point_value": 5.0,                     # USD per 1.0 point move
+        "tick_size": 0.25,
         "contract_type": "quarterly",          # quarterly rollover
         "contract_months": [3, 6, 9, 12],      # H M U Z
         "rth_start": (9, 30),                   # local-time RTH window
@@ -58,6 +60,8 @@ INSTRUMENTS = {
         "exchange": "CME",
         "currency": "USD",
         "timezone": "America/New_York",
+        "point_value": 2.0,                     # USD per 1.0 point move
+        "tick_size": 0.25,
         "contract_type": "quarterly",
         "contract_months": [3, 6, 9, 12],
         "rth_start": (9, 30),
@@ -70,6 +74,8 @@ INSTRUMENTS = {
         "exchange": "OSE.JPN",
         "currency": "JPY",
         "timezone": "Asia/Tokyo",
+        "point_value": 100.0,                  # JPY per 1.0 point move (¥100/pt)
+        "tick_size": 5.0,
         "contract_type": "quarterly",          # quarterly is the liquid cycle
         "contract_months": [3, 6, 9, 12],       # H M U Z (serial months exist but illiquid)
         "rth_start": (8, 45),                   # JST RTH window
@@ -85,6 +91,8 @@ INSTRUMENTS = {
         "exchange": "OSE.JPN",
         "currency": "JPY",
         "timezone": "Asia/Tokyo",
+        "point_value": 10.0,                   # JPY per 1.0 point move (¥10/pt)
+        "tick_size": 5.0,
         "contract_type": "quarterly",          # was monthly; switched to quarterly main
         "contract_months": [3, 6, 9, 12],
         "rth_start": (8, 45),
@@ -96,13 +104,15 @@ INSTRUMENTS = {
         "exchange": "COMEX",
         "currency": "USD",
         "timezone": "America/New_York",
+        "point_value": 10.0,                   # USD per 1.0 point move ($10/pt, 10 oz)
+        "tick_size": 0.1,
         "contract_type": "bi-monthly",         # Feb,Apr,Jun,Aug,Oct,Dec
         "contract_months": [2, 4, 6, 8, 10, 12],
         "rth_start": (9, 30),
         "rth_end":   (17, 0),
-        # COMEX metal: roll one business day before Last Trading Day
-        # (which is itself the 3rd-to-last business day of the month).
-        "rollover_rule": {"type": "n_bdays_before_ltd", "n": 1},
+        # COMEX metal: Last Trading Day is the 3rd-to-last business day of the
+        # contract month; the front contract rolls one business day before LTD.
+        "rollover_rule": {"type": "n_bdays_before_ltd", "n": 1, "ltd_nth_last": 3},
     },
 }
 
@@ -114,8 +124,17 @@ WORKSHEET_5MIN = "5min"
 SHEETS_WRITE_INTERVAL_SECONDS = 30    # Buffer real-time bars and flush every N seconds
 
 # ─── FastAPI Server ───────────────────────────────────────────────────────────
-SERVER_HOST = "0.0.0.0"
-SERVER_PORT = 8000
+# Bind to localhost by default so the trading API (which can place/cancel
+# real orders) is NOT exposed to the local network.  Override with the
+# SERVER_HOST env var (e.g. SERVER_HOST=0.0.0.0) only on a trusted network.
+SERVER_HOST = os.environ.get("SERVER_HOST", "127.0.0.1")
+SERVER_PORT = int(os.environ.get("SERVER_PORT", "8000"))
+
+# Optional shared-secret token.  When set (via the API_TOKEN env var), every
+# state-changing / sensitive API request must carry it in the
+# ``X-API-Token`` header (or ``?token=`` query param).  Empty = auth disabled
+# (safe only when bound to 127.0.0.1).
+API_TOKEN = os.environ.get("API_TOKEN", "")
 
 # ─── Price Action Analysis ────────────────────────────────────────────────────
 SR_LOOKBACK = 5           # bars on each side for swing high/low detection
@@ -142,3 +161,8 @@ IBS_SR_PROXIMITY_PCT = 0.30    # % distance to consider "near" an S/R level
 IBS_CONTEXT_LOOKBACK = 200     # rolling bars for S/R context (prevents look-ahead bias)
 MES_TICK_VALUE       = 5.0     # USD per point for MES ($5/pt)
 MAX_STOP_LOSS        = 200.0   # max USD risk per trade; contracts = floor(max_stop / (stop_dist * tick_value))
+
+# ─── Backtest cost model ──────────────────────────────────────────────────────
+# Applied per contract, per side (entry + exit each incur commission/slippage).
+BACKTEST_COMMISSION_PER_CONTRACT = 0.62   # round-turn ~$1.24 typical micro futures
+BACKTEST_SLIPPAGE_TICKS          = 1.0    # ticks of slippage assumed per side

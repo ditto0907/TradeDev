@@ -76,6 +76,38 @@ def _client() -> httpx.Client:
     return httpx.Client(base_url=BASE_URL, timeout=TIMEOUT)
 
 
+def _err(msg: str) -> str:
+    """Return a structured error JSON string for the MCP client."""
+    return json.dumps({"error": str(msg)}, ensure_ascii=False)
+
+
+def _request(method: str, path: str, **kwargs) -> tuple[Optional[dict], Optional[str]]:
+    """Perform an HTTP request to the backend, returning (data, error_json).
+
+    Never raises: connection/timeout/HTTP errors are converted into a
+    structured error string so the MCP client gets a clean message instead
+    of a raw traceback.
+    """
+    try:
+        with _client() as c:
+            resp = c.request(method, path, **kwargs)
+            resp.raise_for_status()
+            return resp.json(), None
+    except httpx.ConnectError:
+        return None, _err(f"Cannot reach TradeDev backend at {BASE_URL}. Is the server running?")
+    except httpx.TimeoutException:
+        return None, _err(f"Request to {path} timed out after {TIMEOUT}s.")
+    except httpx.HTTPStatusError as e:
+        body = ""
+        try:
+            body = e.response.text[:300]
+        except Exception:
+            pass
+        return None, _err(f"Backend returned HTTP {e.response.status_code} for {path}: {body}")
+    except Exception as e:
+        return None, _err(f"Request to {path} failed: {e}")
+
+
 def _ts_for_date_rth(date_str: str) -> tuple[int, int]:
     """Convert 'YYYY-MM-DD' to RTH start/end Unix timestamps (ET)."""
     from zoneinfo import ZoneInfo
@@ -84,7 +116,6 @@ def _ts_for_date_rth(date_str: str) -> tuple[int, int]:
     start = datetime(d.year, d.month, d.day, 9, 30, tzinfo=et)
     end = datetime(d.year, d.month, d.day, 16, 0, tzinfo=et)
     return int(start.timestamp()), int(end.timestamp())
-
 
 # ---------------------------------------------------------------------------
 # Tool 1: Read K-line Bars
@@ -122,7 +153,10 @@ def get_bars(
     }
 
     if date:
-        ts_from, ts_to = _ts_for_date_rth(date)
+        try:
+            ts_from, ts_to = _ts_for_date_rth(date)
+        except ValueError:
+            return _err(f"Invalid date {date!r}. Use 'YYYY-MM-DD'.")
         params["from"] = ts_from
         params["to"] = ts_to
     else:
@@ -131,12 +165,12 @@ def get_bars(
         if to_ts is not None:
             params["to"] = to_ts
 
-    with _client() as c:
-        resp = c.get("/api/skill/bars", params=params)
-        resp.raise_for_status()
-        data = resp.json()
+    data, err = _request("GET", "/api/skill/bars", params=params)
+    if err:
+        return err
 
     bars = data.get("bars", [])
+    limit = max(0, int(limit or 0))
     if limit and len(bars) > limit:
         bars = bars[-limit:]
         data["bars"] = bars
@@ -183,7 +217,12 @@ def save_analysis(
     Returns:
         JSON with success status and the assigned analysis ID.
     """
-    ann_list = json.loads(annotations)
+    try:
+        ann_list = json.loads(annotations)
+    except (json.JSONDecodeError, TypeError) as e:
+        return _err(f"annotations must be a valid JSON array string: {e}")
+    if not isinstance(ann_list, list):
+        return _err("annotations must be a JSON array of annotation objects")
 
     payload = {
         "symbol": symbol,
@@ -195,10 +234,10 @@ def save_analysis(
         "annotations": ann_list,
     }
 
-    with _client() as c:
-        resp = c.post("/api/skill/analysis", json=payload)
-        resp.raise_for_status()
-        return json.dumps(resp.json(), ensure_ascii=False)
+    data, err = _request("POST", "/api/skill/analysis", json=payload)
+    if err:
+        return err
+    return json.dumps(data, ensure_ascii=False)
 
 
 # ---------------------------------------------------------------------------
@@ -227,10 +266,10 @@ def list_analyses(
     if timeframe:
         params["timeframe"] = timeframe
 
-    with _client() as c:
-        resp = c.get("/api/skill/analyses", params=params)
-        resp.raise_for_status()
-        return json.dumps(resp.json(), ensure_ascii=False)
+    data, err = _request("GET", "/api/skill/analyses", params=params)
+    if err:
+        return err
+    return json.dumps(data, ensure_ascii=False)
 
 
 # ---------------------------------------------------------------------------
@@ -247,13 +286,14 @@ def toggle_analysis(analysis_id: int, active: bool) -> str:
     Returns:
         JSON with success status.
     """
-    with _client() as c:
-        resp = c.put(
-            f"/api/skill/analyses/{analysis_id}/active",
-            params={"active": str(active).lower()},
-        )
-        resp.raise_for_status()
-        return json.dumps(resp.json(), ensure_ascii=False)
+    data, err = _request(
+        "PUT",
+        f"/api/skill/analyses/{analysis_id}/active",
+        params={"active": str(active).lower()},
+    )
+    if err:
+        return err
+    return json.dumps(data, ensure_ascii=False)
 
 
 # ---------------------------------------------------------------------------
@@ -269,10 +309,10 @@ def delete_analysis(analysis_id: int) -> str:
     Returns:
         JSON with success status.
     """
-    with _client() as c:
-        resp = c.delete(f"/api/skill/analyses/{analysis_id}")
-        resp.raise_for_status()
-        return json.dumps(resp.json(), ensure_ascii=False)
+    data, err = _request("DELETE", f"/api/skill/analyses/{analysis_id}")
+    if err:
+        return err
+    return json.dumps(data, ensure_ascii=False)
 
 
 # ---------------------------------------------------------------------------
