@@ -60,8 +60,8 @@ from functools import lru_cache
 from typing import Dict, List, Optional
 from zoneinfo import ZoneInfo
 
-import config
-from market_holidays import is_us_market_holiday
+from core import config
+from marketdata.market_holidays import is_us_market_holiday
 
 logger = logging.getLogger(__name__)
 

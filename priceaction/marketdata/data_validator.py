@@ -20,9 +20,9 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 from ib_insync import ContFuture, Future, IB
 
-import config
-import db
-from ib_data_fetcher import (
+from core import config
+from storage import db
+from marketdata.ib_fetcher import (
     RESOLUTION_MAP,
     _bar_to_dict,
     _contract_month_for_ts,
@@ -33,7 +33,7 @@ from ib_data_fetcher import (
 )
 
 if TYPE_CHECKING:
-    from ib_data_fetcher import IBDataFetcher
+    from marketdata.ib_fetcher import IBDataFetcher
 
 
 @asynccontextmanager
@@ -250,7 +250,7 @@ async def get_ib_bars_with_cache(
     # perpetually re-fetch because Sat/Sun are never in the cache yet always
     # appear in the naïve every-interval expected list.
     try:
-        from trading_calendar import get_calendar as _get_cal
+        from marketdata.trading_calendar import get_calendar as _get_cal
         _cal = _get_cal(symbol)
         expected: List[int] = _cal.expected_bars(aligned_from, aligned_to, interval)
     except Exception:
@@ -398,7 +398,7 @@ def _check_price_continuity(
     if not db_bars or len(db_bars) < 2:
         return []
     try:
-        from trading_calendar import get_calendar
+        from marketdata.trading_calendar import get_calendar
         cal = get_calendar(symbol)
     except Exception:
         cal = None
@@ -543,7 +543,7 @@ async def validate_bars(
     # ── OHLCV integrity check ────────────────────────────────────────────
     ohlcv_violations = []
     try:
-        from trading_calendar import get_calendar
+        from marketdata.trading_calendar import get_calendar
         cal = get_calendar(symbol)
         for b in db_bars:
             issues = cal.validate_bar(b)
@@ -568,7 +568,7 @@ async def validate_bars(
     # ── Completeness check (calendar-aware) ──────────────────────────────
     calendar_missing = []
     try:
-        from trading_calendar import get_calendar
+        from marketdata.trading_calendar import get_calendar
         cal = get_calendar(symbol)
         _, interval = _key_to_ib(timeframe)
         actual_ts = [b["time"] for b in db_bars]
@@ -1351,7 +1351,7 @@ def validate_bar(bar: dict, symbol: str = "MES") -> List[str]:
     non-empty list instead of persisting it.
     """
     try:
-        from trading_calendar import get_calendar
+        from marketdata.trading_calendar import get_calendar
         cal = get_calendar(symbol)
         return list(cal.validate_bar(bar))
     except Exception as e:
@@ -1391,7 +1391,7 @@ def classify_gaps(
     if not bars or len(bars) < 2:
         return []
     try:
-        from trading_calendar import get_calendar
+        from marketdata.trading_calendar import get_calendar
         cal = get_calendar(symbol)
         return list(cal.find_gaps(bars, interval))
     except Exception as e:

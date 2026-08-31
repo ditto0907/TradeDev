@@ -28,9 +28,9 @@ import httpx
 from mcp.server.fastmcp import FastMCP
 
 # Make sibling modules importable when run from any cwd
-_HERE = os.path.dirname(os.path.abspath(__file__))
-if _HERE not in sys.path:
-    sys.path.insert(0, _HERE)
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
 
 from strategy.signal_detector import detect_signals  # noqa: E402
 from strategy.sheet_writer import StrategySheet  # noqa: E402

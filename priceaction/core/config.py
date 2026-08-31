@@ -9,7 +9,7 @@ Before running:
 import os
 from pathlib import Path
 
-BASE_DIR = Path(__file__).parent
+BASE_DIR = Path(__file__).resolve().parent.parent
 
 # ─── Interactive Brokers ──────────────────────────────────────────────────────
 IB_HOST = "127.0.0.1"

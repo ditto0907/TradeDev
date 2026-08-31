@@ -14,7 +14,7 @@ Key concepts:
     the normal schedule.
 
 Usage:
-    from trading_calendar import TradingCalendar
+    from marketdata.trading_calendar import TradingCalendar
 
     cal = TradingCalendar("MES")
     cal.is_trading_time(unix_ts)            # → bool
@@ -27,8 +27,8 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
-import config
-from market_holidays import us_market_holidays
+from core import config
+from marketdata.market_holidays import us_market_holidays
 
 logger = logging.getLogger(__name__)
 

@@ -56,8 +56,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-import config  # noqa: E402
-import contract_calendar as cc  # noqa: E402
+from core import config  # noqa: E402
+from marketdata import contract_calendar as cc  # noqa: E402
 
 DB_PATH = ROOT / "data" / "tradedev.db"
 SCHEMA_VERSION_V2 = 2

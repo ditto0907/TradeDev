@@ -8,7 +8,7 @@ Designed to be extended: add equities, crypto, different timeframes, etc.
 just by passing different symbol/timeframe strings.
 
 Usage:
-    import db
+    from storage import db
     db.init_db()
     db.insert_bars("MES", "5min", list_of_bar_dicts)
     bars = db.get_bars("MES", "5min", from_ts=1700000000)
@@ -24,7 +24,7 @@ import threading
 
 logger = logging.getLogger(__name__)
 
-_DB_PATH = Path(__file__).parent / "data" / "tradedev.db"
+_DB_PATH = Path(__file__).resolve().parent.parent / "data" / "tradedev.db"
 
 # Sentinel value for "no upper bound" in timestamp queries.
 # Represents a far-future Unix timestamp (~2286).
@@ -138,7 +138,7 @@ def _conn():
         if not temp_conn:
             try:
                 _pool.put(conn, block=False)
-            except:
+            except Exception:
                 # Pool full, close this connection
                 conn.close()
         else:
@@ -952,7 +952,7 @@ def get_merged_validated_ranges(
     count as clean.  Adjacent and overlapping ranges are merged.
     """
     try:
-        from ib_data_fetcher import _key_to_ib
+        from marketdata.ib_fetcher import _key_to_ib
         _, interval = _key_to_ib(timeframe)
     except Exception:
         interval = 1
@@ -1208,7 +1208,7 @@ def find_gaps(
 
     # Use trading calendar for classification
     try:
-        from trading_calendar import get_calendar
+        from marketdata.trading_calendar import get_calendar
         cal = get_calendar(symbol)
     except Exception:
         cal = None
@@ -1226,7 +1226,7 @@ def find_gaps(
         else:
             # Fallback to basic heuristics when calendar unavailable
             from datetime import datetime, timezone, timedelta
-            from market_holidays import spans_us_holiday
+            from marketdata.market_holidays import spans_us_holiday
             _et = timezone(timedelta(hours=-4))
             d1_et = datetime.fromtimestamp(t1, tz=timezone.utc).astimezone(_et)
             d2_et = datetime.fromtimestamp(t2, tz=timezone.utc).astimezone(_et)
