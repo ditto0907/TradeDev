@@ -152,10 +152,10 @@ Output format:
 
 **File: `static/index.html`**
 - Load TradingView charting library from `/charting_library/charting_library.standalone.js`
-- Load custom `datafeed.js` and `app.js`
+- Load custom `static/js/datafeed.js` and `static/js/main.js`
 - Container div for the TradingView widget
 
-**File: `static/datafeed.js`**
+**File: `static/js/datafeed.js`**
 Custom DataFeed class implementing TradingView's JS API:
 - `onReady(callback)` — Return config with supported_resolutions: ["1", "5"]
 - `resolveSymbol(symbolName, onResolve)` — Fetch from `/api/symbols`
@@ -163,7 +163,7 @@ Custom DataFeed class implementing TradingView's JS API:
 - `subscribeBars(symbolInfo, resolution, onTick, listenerGuid)` — Connect to WebSocket `/ws/realtime`, call onTick with each new bar
 - `unsubscribeBars(listenerGuid)` — Close WebSocket subscription
 
-**File: `static/app.js`**
+**File: `static/js/main.js` + `static/js/app/*.js`**
 - Initialize TradingView widget with custom DataFeed, default to MES 5min
 - Fetch S/R levels from `/api/analysis`
 - Draw horizontal lines for support (green) and resistance (red) using `chart.createMultipointShape()` or `chart.createShape()`

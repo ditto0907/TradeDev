@@ -91,7 +91,7 @@ custom_indicators_getter: function (PineJS) {
 ## 实时数据集成
 
 ### Datafeed 实现
-见 [priceaction/static/datafeed.js](../static/datafeed.js)
+见 [priceaction/static/js/datafeed.js](../static/js/datafeed.js)
 
 **核心方法**:
 - `resolveSymbol()` — 品种信息解析
@@ -102,7 +102,7 @@ custom_indicators_getter: function (PineJS) {
 
 **WebSocket 集成**:
 ```javascript
-// app.js 中
+// main.js / app 模块中
 wsClient.on('bar_update', (msg) => {
   if (msg.symbol && msg.timeframe) {
     datafeed.updateBar(msg.symbol, msg.timeframe, msg.bar);
@@ -399,10 +399,11 @@ WebSocket (bar_update)
 ## 相关文件
 
 ### 前端
-- [static/app.js](../static/app.js) — 主应用逻辑
-- [static/datafeed.js](../static/datafeed.js) — Datafeed 实现
+- [static/js/main.js](../static/js/main.js) — 前端启动入口与全局桥接
+- [static/js/app/](../static/js/app/) — 按职责拆分的 ES modules
+- [static/js/datafeed.js](../static/js/datafeed.js) — Datafeed 实现
 - [static/index.html](../static/index.html) — 主页面
-- [static/tz-selector.js](../static/tz-selector.js) — 时区选择器
+- [static/js/timezone.js](../static/js/timezone.js) — 时区选择器
 
 ### 后端
 - [server.py](../server.py) — FastAPI 服务器

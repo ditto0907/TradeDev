@@ -10,7 +10,7 @@
 graph TB
     subgraph Browser["浏览器"]
         UI["index.html<br/>Grid 布局"]
-        APP["static/js/app.js<br/>前端主逻辑"]
+        APP["static/js/main.js + static/js/app/*.js<br/>前端 ES modules"]
         DF["static/js/datafeed.js<br/>TradingView DataFeed 适配器"]
         TV["TradingView Charting Library v28.5"]
     end
@@ -64,7 +64,7 @@ graph TB
 
 ## 一、前端功能模块
 
-前端入口为 `static/index.html`，脚本位于 `static/js/`：`app.js` 负责交互逻辑，`datafeed.js` 负责 TradingView DataFeed 适配，`timezone.js` 提供时区格式化辅助。
+前端入口为 `static/index.html`，脚本位于 `static/js/`：`main.js` 负责启动与全局事件桥接，`app/*.js` 为按职责拆分的 ES modules，`datafeed.js` 负责 TradingView DataFeed 适配，`timezone.js` 提供时区格式化辅助。
 
 ```mermaid
 graph LR
@@ -459,7 +459,7 @@ sequenceDiagram
 
 ```mermaid
 sequenceDiagram
-    participant UI as 前端 static/js/app.js
+    participant UI as 前端 static/js/main.js + app/*.js
     participant SRV as app/server.py
     participant OM as trading/order_manager.py
     participant TWS as IB TWS
@@ -631,8 +631,8 @@ cd priceaction
 ./scripts/start_server.sh
 
 # 或手动启动：
-# python3 -m uvicorn main:app --host 0.0.0.0 --port 8000 --loop asyncio
-# 兼容旧命令：python3 -m uvicorn server:app --host 0.0.0.0 --port 8000 --loop asyncio
+# python3 -m uvicorn main:app --host 127.0.0.1 --port 8000 --loop asyncio
+# 兼容旧命令：python3 -m uvicorn server:app --host 127.0.0.1 --port 8000 --loop asyncio
 
 # 5. 打开浏览器
 open http://localhost:8000

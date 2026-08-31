@@ -235,7 +235,7 @@ Step 6  兜底 & 实时 bar 拼接
 | 交易 | `POST /api/order`、`POST /api/order/bracket`、`GET /api/orders`、`POST /api/flatten`、`GET /api/position` | `IBOrderManager` 封装 |
 | Chart 持久化 | `{GET,POST,GET} /api/charts[/{id}]`、`study_templates`、`drawing_templates`、`chart_templates` | TradingView save/load |
 | 交易日志 | `GET /api/trades`、`/api/trades/files`、`/api/trades/file/{filename}`、`POST /api/trades/upload` | 人工交易记录导入 |
-| 回测 | `POST /api/strategy/backtest`、`GET /api/strategy/backtests`、`/api/strategy/backtests/{id}/trades` | `strategy_backtest.py` |
+| 回测 | `POST /api/strategy/backtest`、`GET /api/strategy/backtests`、`/api/strategy/backtests/{id}/trades` | `strategy/backtest.py` |
 | 实时 | `WS /ws/realtime` | 前端首连推 snapshot（最近 200 bar + analysis），之后广播 `bar` / `analysis` / `order_update` |
 
 ---

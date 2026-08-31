@@ -103,10 +103,12 @@ TradeDev/
 │
 ├── priceaction/
 │   ├── static/
-│   │   ├── app.js                     # 主应用逻辑 (TradingView 初始化)
-│   │   ├── datafeed.js                # 自定义 Datafeed 实现
 │   │   ├── index.html                 # 主页面 (包含 tv-chart 容器)
-│   │   └── tz-selector.js             # 时区选择器
+│   │   └── js/
+│   │       ├── main.js                # 前端启动入口 + 全局桥接
+│   │       ├── datafeed.js            # 自定义 Datafeed 实现
+│   │       ├── timezone.js            # 时区选择器
+│   │       └── app/                   # 按功能拆分的 ES modules
 │   │
 │   ├── doc/                           # 📂 文档目录 (你在这里)
 │   │   ├── TradingView_README.md      # ← 本文档
@@ -217,7 +219,7 @@ chart.getTimezoneApi().onTimezoneChanged().subscribe(null, (tz) => {
 1. 启用 Debug 模式: https://www.tradingview.com/charting-library-docs/latest/tutorials/enable-debug-mode
 2. 在 `constructor.main()` 中使用 `console.log()`
 3. 检查浏览器控制台的错误信息
-4. 参考 `static/app.js` 中的 S-Bar Count 实现
+4. 参考 `static/js/app/chart.js` 与 `static/js/app/indicators.js` 中的 S-Bar Count 实现
 
 ### Q5: 如何保存用户的图表布局？
 **A**: 实现 `save_load_adapter`：

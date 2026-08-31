@@ -58,10 +58,10 @@ Rolling lookback window (default 200 bars) prevents look-ahead bias.
 |---|---|
 | `priceaction/config.py` | Add IBS strategy config constants |
 | `priceaction/db.py` | Add `strategy_backtests` + `strategy_trades` tables and CRUD |
-| `priceaction/strategy_backtest.py` | **New** — complete backtest engine |
+| `priceaction/strategy/backtest.py` | **New** — complete backtest engine |
 | `priceaction/server.py` | Add `/api/strategy/*` endpoints |
 | `priceaction/static/index.html` | Add Strategy tab + pane + legend toggle |
-| `priceaction/static/app.js` | Add backtest UI, table rendering, chart markers |
+| `priceaction/static/js/main.js` + `priceaction/static/js/app/strategy.js` | Add backtest UI, table rendering, chart markers |
 
 ---
 
