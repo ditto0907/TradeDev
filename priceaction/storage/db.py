@@ -8,7 +8,7 @@ Designed to be extended: add equities, crypto, different timeframes, etc.
 just by passing different symbol/timeframe strings.
 
 Usage:
-    import db
+    from storage import db
     db.init_db()
     db.insert_bars("MES", "5min", list_of_bar_dicts)
     bars = db.get_bars("MES", "5min", from_ts=1700000000)
@@ -138,7 +138,7 @@ def _conn():
         if not temp_conn:
             try:
                 _pool.put(conn, block=False)
-            except:
+            except Exception:
                 # Pool full, close this connection
                 conn.close()
         else:
