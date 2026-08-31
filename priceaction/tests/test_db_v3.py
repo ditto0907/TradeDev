@@ -26,7 +26,7 @@ from pathlib import Path
 # Make ``priceaction/`` importable when running this file directly.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import db  # noqa: E402
+from storage import db  # noqa: E402
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────

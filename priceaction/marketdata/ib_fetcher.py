@@ -12,8 +12,8 @@ from typing import Callable, Dict, List, Optional
 
 from ib_insync import IB, ContFuture, Future, RealTimeBar, util
 
-import config
-import ib_log_translator  # auto-installs translation filter on import
+from core import config
+from integrations import ib_log_translator  # auto-installs translation filter on import
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +116,7 @@ def _contract_month_for_ts(ts: int, symbol: str = "MES") -> str:
     2nd-Friday SQ).  For US equity-index futures this always returns one
     of the quarterly months (3/6/9/12) — never an auto-derived month.
     """
-    from contract_calendar import active_contract
+    from marketdata.contract_calendar import active_contract
     return active_contract(int(ts), symbol)
 
 
@@ -293,7 +293,7 @@ class IBDataFetcher:
 
     def _sync_legacy_bars(self):
         """Keep self.bars["5min"] in sync with _symbol_bars for MES."""
-        import config as _cfg
+        from core import config as _cfg
         primary = getattr(_cfg, "MES_SYMBOL", "MES")
         # Find the primary symbol key (matches MES_SYM in server.py)
         sym_key = "MES"
@@ -333,7 +333,7 @@ class IBDataFetcher:
                 b["contract_month"] = _contract_month_for_ts(int(b["time"]), symbol)
         # Imported locally to keep this module free of import-time side
         # effects if db.py is not yet ready.
-        import db as _db
+        from storage import db as _db
         try:
             saved = _db.insert_bars(symbol, timeframe, bars, source=source)
         except Exception as e:
@@ -839,7 +839,7 @@ class IBDataFetcher:
         code for any single instrument.
         """
         from ib_insync import ContFuture as _ContFuture
-        import db as _db
+        from storage import db as _db
 
         # Subscribe MES first (uses cached contract)
         await self.subscribe_mktdata()

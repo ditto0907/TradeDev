@@ -21,10 +21,10 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 # Project imports
-import config
-import db
-import data_validator
-from ib_data_fetcher import _key_to_ib
+from core import config
+from storage import db
+from marketdata import data_validator
+from marketdata.ib_fetcher import _key_to_ib
 
 logging.basicConfig(
     level=logging.INFO,

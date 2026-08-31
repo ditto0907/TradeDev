@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List
 
-import config
+from core import config
 
 logger = logging.getLogger(__name__)
 

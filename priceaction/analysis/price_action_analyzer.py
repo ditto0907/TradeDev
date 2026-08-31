@@ -20,7 +20,7 @@ Usage:
 """
 from typing import Dict, List, Tuple
 
-import config
+from core import config
 
 
 # ─── Swing Point Detection ────────────────────────────────────────────────────

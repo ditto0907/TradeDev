@@ -19,7 +19,7 @@ from datetime import date, datetime, timezone
 # Make ``priceaction/`` importable when running this file directly.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import contract_calendar as cc  # noqa: E402
+from marketdata import contract_calendar as cc  # noqa: E402
 
 
 def _ts(y, m, d, hh=12, mm=0):

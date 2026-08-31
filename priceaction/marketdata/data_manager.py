@@ -31,7 +31,7 @@ import logging
 import time
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
-import db
+from storage import db
 
 logger = logging.getLogger(__name__)
 

@@ -34,8 +34,8 @@ from __future__ import annotations
 
 from typing import Dict, List, Literal
 
-import db
-from contract_calendar import active_contract
+from storage import db
+from marketdata.contract_calendar import active_contract
 
 Method = Literal["front", "cont_ratio", "cont_difference"]
 

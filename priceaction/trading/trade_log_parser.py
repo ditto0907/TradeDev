@@ -45,7 +45,7 @@ from typing import List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-DATA_DIR = Path(__file__).parent / "data"
+DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
 # ─── Matching strategy ───────────────────────────────────────────────────────
 # How to pair Open executions with Close executions for IB-style brokers.

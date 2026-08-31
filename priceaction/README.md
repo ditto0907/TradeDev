@@ -10,24 +10,23 @@
 graph TB
     subgraph Browser["浏览器"]
         UI["index.html<br/>Grid 布局"]
-        APP["app.js<br/>前端主逻辑"]
-        DF["datafeed.js<br/>TradingView DataFeed 适配器"]
+        APP["static/js/app.js<br/>前端主逻辑"]
+        DF["static/js/datafeed.js<br/>TradingView DataFeed 适配器"]
         TV["TradingView Charting Library v28.5"]
     end
 
     subgraph Backend["FastAPI 后端 :8000"]
-        SRV["server.py<br/>REST API + WebSocket + 生命周期"]
-        OM["order_manager.py<br/>订单管理"]
-        IDF["ib_data_fetcher.py<br/>行情获取 & 实时推流 (统一多品种)"]
-        PA["price_action_analyzer.py<br/>S/R & 市场周期分析"]
-        DB["db.py<br/>SQLite 持久化 (含入库验证)"]
-        TC["trading_calendar.py<br/>交易日历 & 会话管理"]
-        GS["google_sheets_sync.py<br/>Google Sheets 同步"]
-        TLP["trade_log_parser.py<br/>交易日志解析"]
-        TD["test_data.py<br/>模拟数据生成"]
-        CFG["config.py<br/>配置"]
-        DV2["data_validator.py<br/>数据校验 (三层验证)"]
-        SB2["strategy_backtest.py<br/>策略回测"]
+        SRV["app/server.py<br/>REST API + WebSocket + 生命周期"]
+        OM["trading/order_manager.py<br/>订单管理"]
+        IDF["marketdata/ib_fetcher.py<br/>行情获取 & 实时推流 (统一多品种)"]
+        PA["analysis/price_action_analyzer.py<br/>S/R & 市场周期分析"]
+        DB["storage/db.py<br/>SQLite 持久化 (含入库验证)"]
+        TC["marketdata/trading_calendar.py<br/>交易日历 & 会话管理"]
+        GS["integrations/google_sheets_sync.py<br/>Google Sheets 同步"]
+        TLP["trading/trade_log_parser.py<br/>交易日志解析"]
+        CFG["core/config.py<br/>配置"]
+        DV2["marketdata/data_validator.py<br/>数据校验 (三层验证)"]
+        SB2["strategy/backtest.py<br/>策略回测"]
     end
 
     subgraph IB["Interactive Brokers"]
@@ -53,7 +52,6 @@ graph TB
     SRV --> DB
     SRV --> GS
     SRV --> TLP
-    SRV --> TD
 
     OM -->|"ib_insync"| TWS
     IDF -->|"ib_insync"| TWS
@@ -66,7 +64,7 @@ graph TB
 
 ## 一、前端功能模块
 
-前端由三个文件组成：`index.html`（布局 + CSS）、`app.js`（交互逻辑）、`datafeed.js`（TradingView 数据适配）。
+前端入口为 `static/index.html`，脚本位于 `static/js/`：`app.js` 负责交互逻辑，`datafeed.js` 负责 TradingView DataFeed 适配，`timezone.js` 提供时区格式化辅助。
 
 ```mermaid
 graph LR
@@ -358,7 +356,7 @@ curl "http://localhost:8000/api/skill/bars?symbol=MNQ&resolution=5&session=RTH&f
 
 ```mermaid
 graph TB
-    subgraph 启动生命周期["server.py 启动流程"]
+    subgraph 启动生命周期["app/server.py 启动流程"]
         direction TB
         S1["1. db.init_db()"]
         S2["2. 加载 DB 中历史 bar 到内存"]
@@ -375,53 +373,51 @@ graph TB
 ```mermaid
 graph LR
     subgraph 行情数据
-        IDF2["ib_data_fetcher.py"]
-        DB2["db.py"]
+        IDF2["marketdata/ib_fetcher.py"]
+        DB2["storage/db.py"]
     end
     subgraph 订单交易
-        OM2["order_manager.py"]
+        OM2["trading/order_manager.py"]
     end
     subgraph 分析引擎
-        PA2["price_action_analyzer.py"]
-        TLP2["trade_log_parser.py"]
+        PA2["analysis/price_action_analyzer.py"]
+        TLP2["trading/trade_log_parser.py"]
     end
     subgraph 辅助
-        GS2["google_sheets_sync.py"]
-        TD2["test_data.py"]
-        ILT["ib_log_translator.py"]
-        CFG2["config.py"]
-        DV["data_validator.py"]
-        SB["strategy_backtest.py"]
-        MH["market_holidays.py"]
-        RV["run_validation.py"]
+        GS2["integrations/google_sheets_sync.py"]
+        ILT["integrations/ib_log_translator.py"]
+        CFG2["core/config.py"]
+        DV["marketdata/data_validator.py"]
+        SB["strategy/backtest.py"]
+        MH["marketdata/market_holidays.py"]
+        RV["scripts/run_validation.py"]
     end
 ```
 
 | 模块 | 文件 | 职责 |
 |------|------|------|
-| **HTTP/WS 服务** | `server.py` | FastAPI 路由、WebSocket 推流、生命周期管理 |
-| **行情获取** | `ib_data_fetcher.py` | IB 历史数据下载、实时 tick→bar 聚合、合约滚动 |
-| **数据持久化** | `db.py` | SQLite CRUD (K 线、图表布局、模板) |
-| **订单管理** | `order_manager.py` | 单腿/Bracket 下单、改单、撤单、持仓查询 |
-| **技术分析** | `price_action_analyzer.py` | Swing Point → S/R Level 聚类、Wyckoff 市场周期检测 |
-| **交易日志** | `trade_log_parser.py` | 解析 Topstep / IB CSV 交易记录 |
-| **Sheets 同步** | `google_sheets_sync.py` | 实时 bar 写入 Google Sheets |
-| **模拟数据** | `test_data.py` | GBM 模型 + 日内波动率曲线 + 市场周期生成 |
-| **日志翻译** | `ib_log_translator.py` | IB 中文 Unicode 日志解码 |
-| **配置** | `config.py` | IB 连接、合约、分析参数、品种列表 |
-| **数据校验** | `data_validator.py` | DB 与 IB 数据对比校验，支持自动修复 |
-| **策略回测** | `strategy_backtest.py` | IBS 2-Bar 策略回测引擎 |
-| **市场假日** | `market_holidays.py` | 市场假日日历 (用于 gap 分析) |
-| **校验脚本** | `run_validation.py` | 独立数据校验脚本 |
+| **HTTP/WS 服务** | `app/server.py`（兼容 shim：`server.py`） | FastAPI 路由、WebSocket 推流、生命周期管理 |
+| **行情获取** | `marketdata/ib_fetcher.py` | IB 历史数据下载、实时 tick→bar 聚合、合约滚动 |
+| **数据持久化** | `storage/db.py` | SQLite CRUD (K 线、图表布局、模板) |
+| **订单管理** | `trading/order_manager.py` | 单腿/Bracket 下单、改单、撤单、持仓查询 |
+| **技术分析** | `analysis/price_action_analyzer.py` | Swing Point → S/R Level 聚类、Wyckoff 市场周期检测 |
+| **交易日志** | `trading/trade_log_parser.py` | 解析 Topstep / IB CSV 交易记录 |
+| **Sheets 同步** | `integrations/google_sheets_sync.py` | 实时 bar 写入 Google Sheets |
+| **日志翻译** | `integrations/ib_log_translator.py` | IB 中文 Unicode 日志解码 |
+| **配置** | `core/config.py` | IB 连接、合约、分析参数、品种列表 |
+| **数据校验** | `marketdata/data_validator.py` | DB 与 IB 数据对比校验，支持自动修复 |
+| **策略回测** | `strategy/backtest.py` | IBS 2-Bar 策略回测引擎 |
+| **市场假日** | `marketdata/market_holidays.py` | 市场假日日历 (用于 gap 分析) |
+| **校验脚本** | `scripts/run_validation.py` | 独立数据校验脚本 |
 
 ### 3.2 行情数据流
 
 ```mermaid
 sequenceDiagram
     participant TWS as IB TWS
-    participant IDF as ib_data_fetcher
-    participant SRV as server.py
-    participant DB as db.py (SQLite)
+    participant IDF as marketdata/ib_fetcher.py
+    participant SRV as app/server.py
+    participant DB as storage/db.py (SQLite)
     participant WS as WebSocket Clients
     participant TV as TradingView Chart
 
@@ -463,9 +459,9 @@ sequenceDiagram
 
 ```mermaid
 sequenceDiagram
-    participant UI as 前端 app.js
-    participant SRV as server.py
-    participant OM as order_manager
+    participant UI as 前端 static/js/app.js
+    participant SRV as app/server.py
+    participant OM as trading/order_manager.py
     participant TWS as IB TWS
     participant WS as WebSocket
 
@@ -632,10 +628,11 @@ ulimit -n 10240
 
 # 4. 启动服务（推荐使用启动脚本）
 cd priceaction
-./start_server.sh
+./scripts/start_server.sh
 
 # 或手动启动：
-# python3 -m uvicorn server:app --host 0.0.0.0 --port 8000 --loop asyncio
+# python3 -m uvicorn main:app --host 0.0.0.0 --port 8000 --loop asyncio
+# 兼容旧命令：python3 -m uvicorn server:app --host 0.0.0.0 --port 8000 --loop asyncio
 
 # 5. 打开浏览器
 open http://localhost:8000
@@ -645,7 +642,7 @@ open http://localhost:8000
 - **文件描述符限制**：macOS默认限制256，多symbol高频tick会导致 "Too many open files" 错误
   - 临时设置：`ulimit -n 10240`（当前终端会话有效）
   - 永久设置：编辑 `/etc/launchd.conf` 添加 `limit maxfiles 10240 unlimited`
-- **SQLite连接池**：db.py已实现5连接池，自动复用连接，避免频繁创建/关闭
+- **SQLite连接池**：`storage/db.py` 已实现5连接池，自动复用连接，避免频繁创建/关闭
 
 ## 技术栈
 
@@ -668,9 +665,9 @@ open http://localhost:8000
 **核心变更**：实施 `doc/data_redesign_v3.md` 设计，业界对齐 (CQG/Barchart/IQFeed) 的 per-contract bars + derived continuous view 架构。
 
 **已落地**：
-- ✅ **db.py v3 schema**：`bars` 主键扩展为 `(symbol, contract_month, timeframe, ts)`；新增 `source_rank` 列、`bar_revisions` 审计表；`realtime_bars` PK 含 contract_month；`ib_fetch_cache` 由 `contract_month` 改为 `contract_token` ('MONTH:YYYYMM' | 'CONT')，使月合约和 ContFuture 数据可同 ts 共存。
+- ✅ **storage/db.py v3 schema**：`bars` 主键扩展为 `(symbol, contract_month, timeframe, ts)`；新增 `source_rank` 列、`bar_revisions` 审计表；`realtime_bars` PK 含 contract_month；`ib_fetch_cache` 由 `contract_month` 改为 `contract_token` ('MONTH:YYYYMM' | 'CONT')，使月合约和 ContFuture 数据可同 ts 共存。
 - ✅ **Source rank 护栏**：`insert_bars` 强制 `contract_month` 非空、拒绝 `ib_continuous` 落入 fact 表、低 rank 不能覆盖高 rank、所有差异自动写 `bar_revisions`。
-- ✅ **continuous_view.py（新模块）**：`assemble_continuous(symbol, tf, from, to, method)` 在读时由 per-contract bars 拼接 front / cont_ratio / cont_difference 三种连续序列；永不落库。
+- ✅ **marketdata/continuous_view.py（新模块）**：`assemble_continuous(symbol, tf, from, to, method)` 在读时由 per-contract bars 拼接 front / cont_ratio / cont_difference 三种连续序列；永不落库。
 - ✅ **新 API `/api/symbol_list`**：返回所有可路由的 chart token（`MES@CONT_FRONT` / `MES@CONT_RATIO` / `MES@CONT_DIFF` / `MES@YYYYMM`）。
 - ✅ **`/api/history` token 路由**：`symbol` 参数支持 `SYM@SUFFIX` 格式；连续合约请求路由到 `continuous_view.assemble_continuous`，月合约请求按 `contract_month` 过滤；裸 symbol 保留原有 IB 按需补缺逻辑。
 - ✅ **单元测试**：`tests/test_db_v3.py` 37 例 + `tests/test_continuous_view.py` 12 例 — 覆盖 schema、validation、rank-guard、bar_revisions 审计、per-contract 隔离、token 解析、front/ratio/difference 装配。全部通过。
@@ -712,7 +709,7 @@ python -m unittest test_db_v3 test_continuous_view -v
 - 启动流程重构：DB 加载 → 立即 yield → IB 异步初始化
 - `.btab-flex` CSS class 替代内联 `display:flex` 避免显隐冲突
 - 筛选图标采用点击切换模式，输入框隐藏/显示，有内容时图标高亮
-- **db.py连接池**：`Queue(maxsize=10)` + 上下文管理器自动归还连接
+- **`storage/db.py` 连接池**：`Queue(maxsize=10)` + 上下文管理器自动归还连接
 - **K线持久化策略**：实时完成K线（`realtime_completed`）→ IB历史覆盖（`ib_historical`）
 
 ### 2026-04-12 — Skill API & Market Cycle Analysis 增强

@@ -18,8 +18,8 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import db  # noqa: E402
-import continuous_view as cv  # noqa: E402
+from storage import db  # noqa: E402
+from marketdata import continuous_view as cv  # noqa: E402
 
 
 def _b(ts, c, cm, source="ib_monthly"):
