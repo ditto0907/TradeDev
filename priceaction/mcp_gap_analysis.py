@@ -28,6 +28,7 @@ from strategy.gap_detector import analyze_day, TICK_SIZE  # noqa: E402
 BASE_URL = os.environ.get("TRADEDEV_URL", "http://localhost:8000")
 TIMEOUT = 15.0
 ET = ZoneInfo("America/New_York")
+OR_BAR_COUNT = 6  # first 30 minutes on 5min bars
 
 mcp = FastMCP(
     "gap-analysis",
@@ -184,7 +185,7 @@ def analyze_gaps(
         if err:
             return err
 
-        or_bars = bars_5m[:6]
+        or_bars = bars_5m[:OR_BAR_COUNT]
         or_high = max((float(b["high"]) for b in or_bars), default=None)
         or_low = min((float(b["low"]) for b in or_bars), default=None)
 
@@ -244,7 +245,7 @@ def get_key_levels(symbol: str = "MES", date: str = "") -> str:
         if err:
             return err
 
-        or_bars = bars_5m[:6]
+        or_bars = bars_5m[:OR_BAR_COUNT]
         payload = {
             "PDH": pd_levels.get("PDH"),
             "PDL": pd_levels.get("PDL"),

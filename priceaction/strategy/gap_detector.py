@@ -123,9 +123,12 @@ def detect_g3_micro_gaps(bars: list[dict], tick: float, atr20: list[float]) -> l
 
     for i in range(1, len(bars) - 1):
         b_prev = bars[i - 1]
+        b_curr = bars[i]
         b_next = bars[i + 1]
 
-        if int(bars[i]["time"]) - int(b_prev["time"]) != BAR_SECONDS:
+        if int(b_curr["time"]) - int(b_prev["time"]) != BAR_SECONDS:
+            continue
+        if int(b_next["time"]) - int(b_curr["time"]) != BAR_SECONDS:
             continue
 
         atr_th = 0.0
@@ -143,8 +146,8 @@ def detect_g3_micro_gaps(bars: list[dict], tick: float, atr20: list[float]) -> l
                         gap_id=gid,
                         gap_type="G3",
                         direction="Bull",
-                        create_ts=int(bars[i]["time"]),
-                        create_bar_cnt=_bar_cnt_for_ts(int(bars[i]["time"])),
+                        create_ts=int(b_curr["time"]),
+                        create_bar_cnt=_bar_cnt_for_ts(int(b_curr["time"])),
                         low=gap_low_bull,
                         high=gap_high_bull,
                         size_ticks=round(size / tick, 3),
@@ -166,8 +169,8 @@ def detect_g3_micro_gaps(bars: list[dict], tick: float, atr20: list[float]) -> l
                         gap_id=gid,
                         gap_type="G3",
                         direction="Bear",
-                        create_ts=int(bars[i]["time"]),
-                        create_bar_cnt=_bar_cnt_for_ts(int(bars[i]["time"])),
+                        create_ts=int(b_curr["time"]),
+                        create_bar_cnt=_bar_cnt_for_ts(int(b_curr["time"])),
                         low=gap_low_bear,
                         high=gap_high_bear,
                         size_ticks=round(size / tick, 3),
@@ -187,9 +190,11 @@ def detect_g4_breakout_gaps(bars: list[dict], key_levels: dict) -> list[Gap]:
         return out
 
     gid = 1
-    tick = TICK_SIZE["MES"]
+    tick = max(float(key_levels.get("_tick", TICK_SIZE["MES"])), 1e-12)
 
     for key, val in key_levels.items():
+        if str(key).startswith("_"):
+            continue
         if val is None:
             continue
         try:
@@ -201,8 +206,7 @@ def detect_g4_breakout_gaps(bars: list[dict], key_levels: dict) -> list[Gap]:
         for i, b in enumerate(bars):
             b_low = float(b["low"])
             b_high = float(b["high"])
-            b_close = float(b["close"])
-            if b_low > level and b_close > level:
+            if b_low > level:
                 touched_later = any(float(x["low"]) <= level for x in bars[i + 1:])
                 if touched_later:
                     continue
@@ -226,7 +230,7 @@ def detect_g4_breakout_gaps(bars: list[dict], key_levels: dict) -> list[Gap]:
                 break
 
             # Bear breakout: mirror logic.
-            if b_high < level and b_close < level:
+            if b_high < level:
                 touched_later = any(float(x["high"]) >= level for x in bars[i + 1:])
                 if touched_later:
                     continue
@@ -259,7 +263,7 @@ def detect_g5_ema_gap_bars(bars: list[dict], ema20: list[float]) -> tuple[list[G
         return out, G5Heartbeat(direction="", current_streak=0, max_streak_today=0, ema_touch_events=[])
 
     gid = 1
-    tick = TICK_SIZE["MES"]
+    tick = max(float(TICK_SIZE["MES"]), 1e-12)
     current_dir = ""
     streak = 0
     max_streak = 0
@@ -379,6 +383,7 @@ def track_gap_lifecycle(
             _push("CLOSED", b, depth)
         if reversed_:
             _push("REVERSED", b, depth)
+            break
 
         if idx in checkpoints and not tested_once:
             _push("HELD", b, depth)
@@ -408,13 +413,16 @@ def analyze_day(
     ema20 = compute_ema20(bars)
     atr20 = compute_atr(bars, n=20)
 
+    key_levels_for_g4 = dict(key_levels or {})
+    key_levels_for_g4["_tick"] = float(tick)
     g3 = detect_g3_micro_gaps(bars, float(tick), atr20)
-    g4 = detect_g4_breakout_gaps(bars, key_levels)
+    g4 = detect_g4_breakout_gaps(bars, key_levels_for_g4)
     g5, hb = detect_g5_ema_gap_bars(bars, ema20)
 
     all_gaps = sorted(g3 + g4 + g5, key=lambda g: (g.create_ts, g.gap_type, g.direction))
     for i, g in enumerate(all_gaps, start=1):
         g.gap_id = i
+        g.size_ticks = round((float(g.high) - float(g.low)) / max(float(tick), 1e-12), 3)
 
     events: list[GapEvent] = []
     for g in all_gaps:
