@@ -65,20 +65,31 @@
 ## 项目结构
 ```
 priceaction/
-├── server.py            # FastAPI 主服务
-├── config.py            # 配置（IB连接、品种、参数）
-├── db.py                # SQLite 数据层（含入库验证）
-├── ib_data_fetcher.py   # IB 历史数据拉取（统一多品种架构）
-├── trading_calendar.py  # 交易日历（按交易所的交易时段与假日）
-├── data_validator.py    # 数据校验与修复（三层验证）
-├── analyzer.py          # 价格行为分析（S/R检测）
-├── market_holidays.py   # 市场假日日历
-├── refactor.md          # 数据架构重构设计文档
-├── static/
-│   ├── index.html       # 前端页面
-│   ├── app.js           # 前端逻辑
-│   ├── datafeed.js      # TradingView Datafeed 适配
-│   └── datavalid.html   # 数据校验与维护页面
+├── server.py            # 根目录 shim（兼容 uvicorn server:app）
+├── main.py              # 入口（uvicorn app 装配）
+├── app/                 # Web 接入层（FastAPI）
+│   ├── __init__.py      # create_app() 工厂
+│   ├── server.py        # 薄编排层：装配 app、挂载中间件与路由
+│   ├── state.py         # AppState（全局状态收敛）
+│   ├── lifespan.py      # 生命周期（IB init、后台任务、重连）
+│   ├── middleware.py    # token auth + datafeed debug 中间件
+│   ├── websocket.py     # /ws/realtime + broadcast()
+│   └── routers/         # 按业务域拆分的路由
+│       ├── udf.py       # TradingView UDF datafeed 端点
+│       ├── orders.py    # 下单/撤单/持仓
+│       ├── skill.py     # 市场周期技能分析
+│       ├── charts.py    # 图表布局/模板存取
+│       ├── strategy.py  # 策略回测
+│       ├── datavalid.py # 数据校验与维护
+│       └── trades.py    # 交易记录与统计
+├── core/                # config.py
+├── marketdata/          # ib_fetcher, realtime_builder, data_manager, ...
+├── storage/             # db.py
+├── trading/             # order_manager, trade_log_parser, trade_stats
+├── analysis/            # price_action_analyzer
+├── strategy/            # backtest, signal_detector, gap_detector, ...
+├── integrations/        # google_sheets_sync, mcp_*, ib_log_translator
+├── static/              # 前端页面与 JS
 └── data/                # 交易日志 CSV 文件
 ```
 

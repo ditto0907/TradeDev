@@ -50,14 +50,16 @@ priceaction/
 
 **约束**：Phase 1 不拆 `server.py`、不重命名函数/类、不调整业务流程。
 
-### Phase 2
+### Phase 2 ✅（已完成）
 
 目标：拆分接入层职责，收敛全局状态。
 
-- 将 `app/server.py` 中的 REST API 按业务域拆到 `app/routers/`：`udf.py`、`orders.py`、`analysis.py`、`skill.py`、`charts.py`、`strategy.py`、`datavalid.py`、`trades.py`。
-- 抽离生命周期、WebSocket、中间件到 `app/lifespan.py`、`app/websocket.py`、`app/middleware.py`。
-- 将模块级全局变量（如 `fetcher`、`_ws_clients`、`_order_mgr`、cooldown map 等）收敛到统一 `AppState` 对象，降低隐式耦合。
-- 从 `server.py` 中继续抽出 `trade_stats.py` 等纯领域逻辑。
+- ✅ 将 `app/server.py` 中的 REST API 按业务域拆到 `app/routers/`：`udf.py`、`orders.py`、`skill.py`、`charts.py`、`strategy.py`、`datavalid.py`、`trades.py`。
+- ✅ 抽离生命周期、WebSocket、中间件到 `app/lifespan.py`、`app/websocket.py`、`app/middleware.py`。
+- ✅ 将模块级全局变量（`fetcher`、`_ws_clients`、`_order_mgr`、cooldown map 等）收敛到 `app/state.py` 的 `AppState` 对象，通过 `request.app.state.app_state` 访问。
+- ✅ 从 `server.py` 中抽出 `trading/trade_stats.py` 纯领域逻辑。
+- ✅ `app/server.py` 从 2853 行精简至 64 行（仅剩薄编排层）。
+- ✅ 验证：`python -m unittest discover` 通过（94 tests OK），`from app.server import app` 可正常 import。
 
 ### Phase 3
 
