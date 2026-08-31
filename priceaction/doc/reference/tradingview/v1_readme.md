@@ -8,18 +8,18 @@
 
 ### 🎯 快速开始
 
-1. **[官方文档索引](./TradingView_Official_Docs_Index.md)**  
+1. **[官方文档索引](./v1_official_docs_index.md)**  
    - TradingView 官方文档的完整链接索引
    - API 参考、教程、最佳实践
    - 适合初次接触 TradingView 的开发者
 
-2. **[项目使用总结](./TradingView_Project_Usage.md)**  
+2. **[项目使用总结](./v1_project_usage.md)**  
    - 本项目中如何使用 TradingView
    - 配置详解、自定义指标、实时数据集成
    - 与后端 FastAPI 的集成方式
    - **推荐先阅读此文档了解项目实际使用**
 
-3. **[组件功能说明](./TradingView_ChartingLibrary_Components.md)**  
+3. **[组件功能说明](./v1_charting_library_components.md)**  
    - 日历/日期相关组件详解
    - 时间导航 API (setVisibleRange, TimeScale API)
    - 日期选择器集成方案
@@ -33,42 +33,42 @@
 
 #### 日历/日期选择组件
 → **没有原生日历组件**，但有日期导航 API：
-- 查看 [组件功能说明 - 日历/日期相关组件](./TradingView_ChartingLibrary_Components.md#日历日期相关组件)
+- 查看 [组件功能说明 - 日历/日期相关组件](./v1_charting_library_components.md#日历日期相关组件)
 - 使用 `setVisibleRange()` 设置时间范围
 - 集成第三方日历库（Flatpickr、react-datepicker）
 - 内置 "Go To Date" 对话框
 
 #### 时区管理
-→ 查看 [项目使用总结 - 时区管理](./TradingView_Project_Usage.md#时区管理)
+→ 查看 [项目使用总结 - 时区管理](./v1_project_usage.md#时区管理)
 - Timezone API 使用方法
 - 双向绑定实现（Chart ↔ 顶部选择器）
 - 时区变化事件监听
 
 #### 自定义指标
-→ 查看 [项目使用总结 - 自定义指标](./TradingView_Project_Usage.md#自定义指标)
+→ 查看 [项目使用总结 - 自定义指标](./v1_project_usage.md#自定义指标)
 - S-Bar Count 指标实现
 - Pine Script 子集语法
 - `custom_indicators_getter` 配置
 
 #### 实时数据推送
-→ 查看 [项目使用总结 - 实时数据集成](./TradingView_Project_Usage.md#实时数据集成)
+→ 查看 [项目使用总结 - 实时数据集成](./v1_project_usage.md#实时数据集成)
 - Datafeed 实现 (`datafeed.js`)
 - WebSocket 集成
 - `subscribeBars()` / `updateBar()` API
 
 #### 连续合约拼接
-→ 查看 [项目使用总结 - 连续合约支持](./TradingView_Project_Usage.md#1-连续合约支持)
+→ 查看 [项目使用总结 - 连续合约支持](./v1_project_usage.md#1-连续合约支持)
 - `MES@CONT_FRONT` / `MES@202606` 语法
 - 后端 `continuous_view.py` 实现
 - 前月、比例调整、差价调整三种模式
 
 #### 右键菜单定制
-→ 查看 [项目使用总结 - 右键菜单](./TradingView_Project_Usage.md#右键菜单)
+→ 查看 [项目使用总结 - 右键菜单](./v1_project_usage.md#右键菜单)
 - `onContextMenu()` API
 - 快速下单菜单实现
 
 #### 保存/加载布局
-→ 查看 [项目使用总结 - 保存/加载布局](./TradingView_Project_Usage.md#保存加载布局)
+→ 查看 [项目使用总结 - 保存/加载布局](./v1_project_usage.md#保存加载布局)
 - `save_load_adapter` 实现
 - 与 SQLite 数据库集成
 - `chart_layouts` 表结构
@@ -111,10 +111,10 @@ TradeDev/
 │   │       └── app/                   # 按功能拆分的 ES modules
 │   │
 │   ├── doc/                           # 📂 文档目录 (你在这里)
-│   │   ├── TradingView_README.md      # ← 本文档
-│   │   ├── TradingView_Official_Docs_Index.md
-│   │   ├── TradingView_ChartingLibrary_Components.md
-│   │   └── TradingView_Project_Usage.md
+│   │   ├── v1_readme.md               # ← 本文档
+│   │   ├── v1_official_docs_index.md
+│   │   ├── v1_charting_library_components.md
+│   │   └── v1_project_usage.md
 │   │
 │   ├── server.py                      # FastAPI 后端
 │   ├── continuous_view.py             # 连续合约拼接逻辑
@@ -199,7 +199,7 @@ chart.getTimezoneApi().onTimezoneChanged().subscribe(null, (tz) => {
 2. 通过 `setVisibleRange()` API 设置时间范围
 3. 或使用内置的 "Go To Date" 对话框 (`executeActionById('ChartDialogsShowGoToDate')`)
 
-详见 [组件功能说明](./TradingView_ChartingLibrary_Components.md#常见问题)
+详见 [组件功能说明](./v1_charting_library_components.md#常见问题)
 
 ### Q2: 时间戳单位是秒还是毫秒？
 **A**: **取决于 API**：
@@ -232,7 +232,7 @@ save_load_adapter: {
 }
 ```
 
-详见 [项目使用总结 - 保存/加载布局](./TradingView_Project_Usage.md#保存加载布局)
+详见 [项目使用总结 - 保存/加载布局](./v1_project_usage.md#保存加载布局)
 
 ---
 

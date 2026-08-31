@@ -5,7 +5,7 @@ Wraps the gspread client and exposes high-level operations:
   - update_analysis(row_idx, ...)   → writes J–O columns (LLM analysis)
   - read_all_signals()              → returns all data rows for inspection
 
-Sheet layout (see doc/strategy_research_v1.md §4.2):
+Sheet layout (see doc/strategy/v2_strategy_research.md §4.2):
   Row 1: category headers (PB, Pattern, Context...)
   Row 2: sub-headers (Date, Bar Cnt, ...)
   Row 3+: data rows

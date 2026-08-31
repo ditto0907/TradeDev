@@ -4,7 +4,7 @@ Realtime Builder — facade for real-time bar aggregation and persistence.
 Today the heavy lifting (tick → 5-min bar aggregation, ``_rt_current`` state
 management, new-bar callbacks) still lives inside ``IBDataFetcher`` where it
 was consolidated during the v1 refactor — the "unified tick handler" path
-described in ``doc/refactor.md``.  This module exposes a stable, narrow API
+described in ``doc/data/v2_kline_arch_refactor.md``.  This module exposes a stable, narrow API
 so ``server.py`` and any future extractors only couple to
 ``realtime_builder`` instead of the fetcher's internals.
 

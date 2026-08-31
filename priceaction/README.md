@@ -662,7 +662,7 @@ open http://localhost:8000
 
 ### 2026-05-02 — v3 数据架构重构（Phase 1-4）
 
-**核心变更**：实施 `doc/data_redesign_v3.md` 设计，业界对齐 (CQG/Barchart/IQFeed) 的 per-contract bars + derived continuous view 架构。
+**核心变更**：实施 `doc/data/v3_data_redesign.md` 设计，业界对齐 (CQG/Barchart/IQFeed) 的 per-contract bars + derived continuous view 架构。
 
 **已落地**：
 - ✅ **storage/db.py v3 schema**：`bars` 主键扩展为 `(symbol, contract_month, timeframe, ts)`；新增 `source_rank` 列、`bar_revisions` 审计表；`realtime_bars` PK 含 contract_month；`ib_fetch_cache` 由 `contract_month` 改为 `contract_token` ('MONTH:YYYYMM' | 'CONT')，使月合约和 ContFuture 数据可同 ts 共存。
@@ -692,7 +692,7 @@ python -m unittest test_db_v3 test_continuous_view -v
 - ✅ Data Validation Tab 完整修复：Gap 检查、Source 查询、IB 数据对比
 - ✅ 表格筛选图标：所有底部面板表格通过 🔍 图标切换列筛选
 - ✅ Strategy Backtest Tab：IBS 2-Bar 策略回测，支持参数调整 & 图表定位
-- ✅ 数据流文档 (dataflow.md)：详细时序图、流程图、架构图
+- ✅ 数据流文档 (`doc/data/v1_dataflow.md`)：详细时序图、流程图、架构图
 - ✅ **SQLite连接池**：实现5连接池复用，避免高频tick时"Too many open files"错误
 - ✅ **K线完整性修复**：完成的K线立即写入DB（`source=realtime_completed`），避免缺失最新完成K线
 - ✅ **Data Valid时间选择器**：非循环滚动（小时00-23停止，分钟00-55/5min停止）

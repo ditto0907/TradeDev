@@ -1,6 +1,7 @@
 # `server.py` — 模块走读
 
-> 路径：`priceaction/server.py`（~2193 行）
+> **状态**：Snapshot（2026-04-17）— 基于当时单文件 `server.py`；目录重构后已拆分为 `app/`（`lifespan.py` / `middleware.py` / `websocket.py` / `routers/`），根目录 `server.py` 仅为 shim。架构叙述仍具参考价值，行号与路径以当前代码为准。
+> 路径：`priceaction/server.py`（~2193 行，快照时）
 > 角色：FastAPI 服务入口。对外提供 TradingView UDF / WebSocket / 订单 / 数据校验 / 回测 / 策略分析 等全部 HTTP 接口；对内编排 `ib_data_fetcher` + `db` + `data_validator` + `order_manager` + `price_action_analyzer` 等模块的生命周期。
 
 ---
@@ -146,7 +147,7 @@ def on_new_bar(bar_size_key, bar, symbol=None):
 
 ## 4. `/api/history` 的完整组装流程（~315 行，本 server 最核心接口）
 
-> 这个端点集成了 **L2(DB) + L1(fetcher 内存) + L3(IB 实时拉取) + _prev_completed_bar(实时柱子)** 四层数据，并且用 `trading_calendar` 做休市识别。与 `ib_data_fetcher.md` 里的请求流程一一对应。
+> 这个端点集成了 **L2(DB) + L1(fetcher 内存) + L3(IB 实时拉取) + _prev_completed_bar(实时柱子)** 四层数据，并且用 `trading_calendar` 做休市识别。与 [ib_data_fetcher.md](ib_data_fetcher.md) 里的请求流程一一对应。
 
 ```
 GET /api/history?symbol=&resolution=&from=&to=&countback=

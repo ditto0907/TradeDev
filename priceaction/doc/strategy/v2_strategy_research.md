@@ -1,4 +1,8 @@
-# Strategy Research System — Design v1
+# Strategy Research System — Design
+
+> **状态**：Current — 已实施（`strategy/signal_detector.py`、`strategy/sheet_writer.py`、`integrations/mcp_strategy_research.py`、`strategy-research` skill）
+> **日期**：2026-05-07
+> **上游**：[v1_ibs_backtest.md](v1_ibs_backtest.md) · **相关**：[../skills/v1_gap_analysis_skill_design.md](../skills/v1_gap_analysis_skill_design.md)（缺口特征将回流 Orders 表）
 
 **目标**：提升交易策略研究效率。MCP 程序负责精确量化信号特征，LLM 负责背景与S/R分析，
 人工最终评价并固化系统。

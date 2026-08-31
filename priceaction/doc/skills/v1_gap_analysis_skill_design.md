@@ -1,7 +1,8 @@
-# Gap Analysis Skill 设计方案 v1（定稿待 review）
+# Gap Analysis Skill 设计方案 v1（定稿）
 
-> 状态：设计定稿，未开发。Review 通过后进入 P1（起草 SKILL.md）。
-> 日期：2026-08-31
+> **状态**：Current — 设计定稿，实现方案见 [v1_gap_analysis_implementation_design.md](v1_gap_analysis_implementation_design.md)（编码进行中）
+> **日期**：2026-08-31
+> **相关**：[../strategy/v2_strategy_research.md](../strategy/v2_strategy_research.md)（P3 信号化回流）
 
 ## 1. 定位
 

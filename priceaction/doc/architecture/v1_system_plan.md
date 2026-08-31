@@ -1,5 +1,9 @@
 # Price Action Trading System - Implementation Plan
 
+> **状态**：Superseded — 初版实施计划，系统已按此落地并多轮演进（数据层见 [../data/](../data/)，目录结构见 [v1_directory_refactor_2026-08.md](v1_directory_refactor_2026-08.md)）
+> **日期**：2026-04-09
+> **下游**：[../data/v2_kline_arch_refactor.md](../data/v2_kline_arch_refactor.md)、[../strategy/v0_requirement.md](../strategy/v0_requirement.md)
+
 ## Context
 
 Build a real-time MES (Micro E-mini S&P 500) futures trading visualization system in `/home/user/TradeDev/priceaction/`. The system connects to a local Interactive Brokers TWS/Gateway (127.0.0.1:7497), fetches 1min/5min OHLC data, stores it in Google Sheets, displays 5min K-lines via TradingView charting library, and annotates support/resistance levels and market cycles using price action analysis.

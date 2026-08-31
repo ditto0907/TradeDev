@@ -1,6 +1,8 @@
 # TradeDev 数据流文档 (Data Flow Documentation)
 
-> 本文档描述 TradeDev 系统中数据从 IB TWS 到前端 chart 的完整流转过程。
+> **状态**：Living document — 描述端到端数据流全景；文中模块路径基于目录重构前的平铺结构（如 `server.py` → 现 `app/`，`ib_data_fetcher.py` → 现 `marketdata/ib_fetcher.py`）
+> **日期**：2026-04-14（最后大修）
+> **下游**：[v2_kline_arch_refactor.md](v2_kline_arch_refactor.md) → [v3_data_redesign.md](v3_data_redesign.md)
 > 所有 diagram 使用 Mermaid 格式。
 
 ---

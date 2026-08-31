@@ -34,7 +34,7 @@ MAX_TIMESTAMP = 9_999_999_999
 # Higher rank = more authoritative.  ``insert_bars`` refuses to overwrite an
 # existing row whose source has a higher rank than the incoming bar's source.
 # ``ib_continuous`` is rank 0 because ContFuture data is back-adjusted by IB
-# every rollover and must NOT be persisted to ``bars`` — see doc/data_redesign_v3.md.
+# every rollover and must NOT be persisted to ``bars`` — see doc/data/v3_data_redesign.md.
 SOURCE_RANK = {
     "ib_validated":     100,
     "ib_monthly":        80,
@@ -154,7 +154,7 @@ def init_db() -> None:
     The four bar-related tables (``bars``, ``realtime_bars``,
     ``ib_fetch_cache``, ``validated_ranges``) are recreated on every startup
     if they predate v3 (i.e. lack the v3 columns).  This is safe because the
-    redesign assumes a fresh start — see ``doc/data_redesign_v3.md``.
+    redesign assumes a fresh start — see ``doc/data/v3_data_redesign.md``.
     """
     with _conn() as conn:
         # ── v3 migration: drop pre-v3 bar/cache tables that lack v3 columns ──

@@ -1,5 +1,9 @@
 # PriceAction 目录重构方案
 
+> **状态**：Current — Phase 1 已实施（`app/`、`core/`、`marketdata/`、`storage/`、`trading/` 等目录已落地），Phase 2/3 待推进
+> **日期**：2026-08-31
+> **上游**：[v1_system_plan.md](v1_system_plan.md)
+
 ## 背景
 
 `priceaction/` 目录当前约有 20 个 Python 模块平铺在根目录，职责边界不清晰，后续继续演进会让 import、启动入口、测试维护成本持续上升。该方案用于约束后续目录整理，并作为 Phase 2 / Phase 3 的实施依据。
@@ -82,7 +86,7 @@ priceaction/
 
 ## 验收标准
 
-- `priceaction/doc/refactor_plan.md` 存在并包含完整三阶段方案。
+- `priceaction/doc/architecture/v1_directory_refactor_2026-08.md` 存在并包含完整三阶段方案。
 - 目录结构符合 Phase 1 的目标布局。
 - 所有 import 已修正，根目录 `server.py` shim 可继续工作。
 - `README.md` 中路径、图示、启动说明已同步更新。

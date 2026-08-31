@@ -1,6 +1,6 @@
 """Signal detector — finds 2-consecutive-bar signals in 5min RTH bars.
 
-See doc/strategy_research_v1.md §2 for the strict spec.
+See doc/strategy/v2_strategy_research.md §2 for the strict spec.
 
 Pure functions only — no DB / API / IO. Inputs are bar dicts, outputs are
 SignalRecord dataclasses serializable to dict via asdict().

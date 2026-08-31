@@ -1,8 +1,9 @@
-# K-Line Data Architecture Refactoring — Design Document
+# K-Line Data Architecture Refactoring — Design Document (v2)
 
 > **Date**: 2026-04-16  
 > **Scope**: `priceaction/` directory — K-line data fetch, storage, validation, and display  
-> **Status**: Implemented
+> **Status**: Implemented — superseded in part by [v3_data_redesign.md](v3_data_redesign.md)（存储模型重设计）；服务化分层仍有效  
+> **上游**: [v1_dataflow.md](v1_dataflow.md) · **迁移**: [v2_migration.md](v2_migration.md)
 
 ---
 
@@ -322,7 +323,7 @@ invokes `onResetCacheNeededCallback()` on every subscription whose
 
 ### 9.5 Migration
 
-See `doc/migration_v2.md`.  No schema changes; only existing
+See `doc/data/v2_migration.md`.  No schema changes; only existing
 `contract_month` column values near rollovers may be rewritten.
 
 ### 9.6 Tests

@@ -1,5 +1,9 @@
 # IBS 2-Bar Strategy — Design & Implementation Plan
 
+> **状态**：Implemented — 回测引擎与 Strategy Tab 已落地（`strategy/backtest.py`）
+> **日期**：2026-04-13
+> **上游**：[v0_requirement.md](v0_requirement.md) · **下游**：[v2_strategy_research.md](v2_strategy_research.md)
+
 ## Overview
 
 A backtesting engine for a 2-bar Internal Bar Strength (IBS) momentum strategy on MES (Micro E-mini S&P 500) 5-min bars, with market context filters, 1:1 Risk:Reward, results persisted to SQLite, and a Strategy tab in the TradingView-based UI.

@@ -1,6 +1,6 @@
 """
 Continuous-contract view — derived series assembled at read time from
-per-contract ``bars`` rows.  Per design ``doc/data_redesign_v3.md`` §2,
+per-contract ``bars`` rows.  Per design ``doc/data/v3_data_redesign.md`` §2,
 **we never persist a continuous series as a fact** — IB ContFuture data
 is back-adjusted on every rollover, so a stored continuous bar would have
 to be rewritten constantly.  Instead we keep monthly bars as immutable

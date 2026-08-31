@@ -1,6 +1,7 @@
 # `ib_data_fetcher.py` — 模块走读
 
-> 路径：`priceaction/ib_data_fetcher.py`（~845 行）
+> **状态**：Snapshot（2026-04-17）— 目录重构后该模块已迁移为 `marketdata/ib_fetcher.py`；三层存储架构叙述仍有效，行号与路径以当前代码为准。
+> 路径：`priceaction/ib_data_fetcher.py`（~845 行，快照时；现 `marketdata/ib_fetcher.py`）
 > 角色：IB TWS/Gateway 数据接入层；封装历史数据拉取、实时 tick/bar 聚合、合约月切换，以及"内存缓存"层。
 
 本文档回答四个问题：

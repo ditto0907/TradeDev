@@ -1,3 +1,11 @@
+# 交易系统原始需求记录 (v0)
+
+> **状态**：Historical — 原始需求便签，设计细节已固化到 [v1_ibs_backtest.md](v1_ibs_backtest.md)
+> **日期**：2026-04-12
+> **下游**：[v1_ibs_backtest.md](v1_ibs_backtest.md) → [v2_strategy_research.md](v2_strategy_research.md)
+
+---
+
 我想开发一个交易系统并利用现有能力回测胜率与盈亏比。
 
 信号：

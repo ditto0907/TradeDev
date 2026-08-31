@@ -147,7 +147,7 @@ TradingView.version()
 ## 本地文档
 
 项目中的相关文档：
-- **组件功能说明**: [TradingView_ChartingLibrary_Components.md](./TradingView_ChartingLibrary_Components.md)
+- **组件功能说明**: [v1_charting_library_components.md](./v1_charting_library_components.md)
 - **Changelog**: [../charting_library-master-v28.5/changelog.md](../../charting_library-master-v28.5/changelog.md)
 - **README**: [../charting_library-master-v28.5/README.md](../../charting_library-master-v28.5/README.md)
 - **类型定义**: [../charting_library-master-v28.5/charting_library.d.ts](../../charting_library-master-v28.5/charting_library.d.ts)

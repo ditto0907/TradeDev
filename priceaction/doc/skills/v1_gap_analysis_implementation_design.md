@@ -1,6 +1,6 @@
 # Gap Analysis — Skill & MCP 实现设计（存档）
 
-> 上游设计：`doc/gap_analysis_skill_v1.md`（定稿）。本文档是其落地实现方案（Skill / MCP / 测试）。
+> 上游设计：[v1_gap_analysis_skill_design.md](v1_gap_analysis_skill_design.md)（定稿）。本文档是其落地实现方案（Skill / MCP / 测试）。
 > 日期：2026-08-31
 > 状态：实现方案定稿，编码进行中。测试部分先留方案，编码完成后再实现。
 
@@ -163,7 +163,7 @@ priceaction/
 ├── tests/test_gap_detector.py    ← 新增：单元测试（编码完成后）
 ├── tests/test_gap_skill_api.py   ← 新增：集成冒烟（编码完成后）
 ├── server.py                     ← (P2) 追加 GET /api/skill/gaps
-└── doc/gap_analysis_skill_v1.md  ← 上游设计
+└── v1_gap_analysis_skill_design.md  ← 上游设计
 ```
 
 ## 七、与现有约定的一致性

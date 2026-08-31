@@ -412,8 +412,8 @@ WebSocket (bar_update)
 - [db.py](../db.py) — 数据库操作
 
 ### 文档
-- [TradingView_ChartingLibrary_Components.md](./TradingView_ChartingLibrary_Components.md) — 组件功能说明
-- [TradingView_Official_Docs_Index.md](./TradingView_Official_Docs_Index.md) — 官方文档索引
+- [v1_charting_library_components.md](./v1_charting_library_components.md) — 组件功能说明
+- [v1_official_docs_index.md](./v1_official_docs_index.md) — 官方文档索引
 
 ---
 

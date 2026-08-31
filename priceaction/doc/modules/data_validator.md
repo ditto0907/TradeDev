@@ -1,6 +1,7 @@
 # `data_validator.py` — 模块走读
 
-> 路径：`priceaction/data_validator.py`（~801 行）
+> **状态**：Snapshot（2026-04-17）— 目录重构后该模块已迁移为 `marketdata/data_validator.py`；校验分层叙述仍有效，行号与路径以当前代码为准。
+> 路径：`priceaction/data_validator.py`（~801 行，快照时；现 `marketdata/data_validator.py`）
 > 角色：数据对账层。以 IB 历史数据为 **Source of Truth**，反向校验 SQLite `bars` 表，发现价格/成交量差异、非法 OHLCV、日历缺口；可选择修复（覆盖式写回）。
 
 ---

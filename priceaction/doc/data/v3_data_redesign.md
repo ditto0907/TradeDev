@@ -1,6 +1,8 @@
 # Data Management Redesign — v3
 
-> 状态：方案稿（pending review）
+> **状态**：Current — 已实施（2026-05-02 Phase 1–4 落地：db v3 schema、source rank 护栏、`marketdata/continuous_view.py`、token 路由，详见根 README 更新日志）
+> **日期**：2026-05-02
+> **上游**：[v2_kline_arch_refactor.md](v2_kline_arch_refactor.md)、[v2_migration.md](v2_migration.md)
 > 范围：bars 存储、IB fetch、IB cache、连续合约视图、前端 symbol 选择
 > 前提：**清空所有历史数据**，不做兼容/回补；冷启动重建
 
@@ -300,7 +302,7 @@ TradingView chart 的 `setSymbol()` 会重新走 `getBars` —— 后端按 toke
 10. datavalid.html 显示 contract_month 与 revision history
 
 ### Phase 5 — 文档与验证（半天）
-11. 更新 `README.md`、`doc/dataflow.md`、`doc/ib_data_fetcher.md`
+11. 更新 `README.md`、`doc/data/v1_dataflow.md`、`doc/modules/ib_data_fetcher.md`
 12. 端到端：启动 → 拉 MES 202606 5min 一周 → 切到 MES@CONT_RATIO → 切到 MES@202609 → 各场景手工 check
 
 ---

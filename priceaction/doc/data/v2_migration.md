@@ -1,12 +1,16 @@
 # Migration v1 → v2 (service-oriented refactor)
 
+> **状态**：Historical — v1→v2 迁移已完成（`PRAGMA user_version` = 2）
+> **日期**：2026-04-21
+> **上游**：[v2_kline_arch_refactor.md](v2_kline_arch_refactor.md) · **下游**：[v3_data_redesign.md](v3_data_redesign.md)
+
 > **Scope**: `priceaction/` — splits historical-data management,
 > validation, realtime aggregation, and IB + DB writes into dedicated
 > services with one clear owner per responsibility.
 
 ## Summary
 
-The v2 refactor establishes this layering (see also `doc/refactor.md`):
+The v2 refactor establishes this layering (see also `doc/data/v2_kline_arch_refactor.md`):
 
 ```
 server.py  →  data_manager + data_validator + realtime_builder  →  IBDataFetcher  →  IB / SQLite
