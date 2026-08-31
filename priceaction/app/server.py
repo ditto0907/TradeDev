@@ -1355,9 +1355,9 @@ async def skill_get_bars(
             dt_obj_local = _dt(dt_obj.year, dt_obj.month, dt_obj.day,
                                dt_obj.hour, dt_obj.minute, dt_obj.second, tzinfo=sym_tz)
             from_ts = int(dt_obj_local.timestamp())
-        except ValueError as e:
+        except ValueError:
             return JSONResponse(
-                {"error": f"Invalid from_dt format: {e}. Use 'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM'"},
+                {"error": "Invalid from_dt format. Use 'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM'"},
                 status_code=400
             )
     elif from_ts is None:
@@ -1374,9 +1374,9 @@ async def skill_get_bars(
                 dt_obj_local = _dt(dt_obj.year, dt_obj.month, dt_obj.day,
                                    dt_obj.hour, dt_obj.minute, dt_obj.second, tzinfo=sym_tz)
             to_ts = int(dt_obj_local.timestamp())
-        except ValueError as e:
+        except ValueError:
             return JSONResponse(
-                {"error": f"Invalid to_dt format: {e}. Use 'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM'"},
+                {"error": "Invalid to_dt format. Use 'YYYY-MM-DD' or 'YYYY-MM-DD HH:MM'"},
                 status_code=400
             )
     elif to_ts is None:
@@ -2108,9 +2108,12 @@ async def place_order(req: OrderRequest):
             tif=req.tif,
         )
         return {"success": True, **result}
+    except ValueError as e:
+        logger.error("place_order validation error: %s", e)
+        return JSONResponse({"success": False, "error": "Invalid order request"}, status_code=400)
     except Exception as e:
         logger.error("place_order error: %s", e)
-        return JSONResponse({"success": False, "error": str(e)}, status_code=400)
+        return JSONResponse({"success": False, "error": "Order submission failed"}, status_code=400)
 
 
 @app.post("/api/order/bracket")
@@ -2128,7 +2131,7 @@ async def place_bracket_order(req: BracketOrderRequest):
         return {"success": True, "orders": results}
     except ValueError as e:
         logger.error("place_bracket_order validation error: %s", e)
-        return JSONResponse({"success": False, "error": str(e)}, status_code=400)
+        return JSONResponse({"success": False, "error": "Invalid bracket order request"}, status_code=400)
     except Exception as e:
         logger.error("place_bracket_order error: %s", e)
         return JSONResponse({"success": False, "error": "Order submission failed"}, status_code=400)
@@ -2160,9 +2163,12 @@ async def modify_order(order_id: int, req: ModifyOrderRequest):
             stop_price=req.stop_price,
         )
         return {"success": True, **result}
+    except ValueError as e:
+        logger.error("modify_order validation error: %s", e)
+        return JSONResponse({"success": False, "error": "Invalid order modification request"}, status_code=400)
     except Exception as e:
         logger.error("modify_order error: %s", e)
-        return JSONResponse({"success": False, "error": str(e)}, status_code=400)
+        return JSONResponse({"success": False, "error": "Order modification failed"}, status_code=400)
 
 
 @app.delete("/api/orders")
@@ -2184,7 +2190,7 @@ async def flatten_position():
         return {"success": True, **result}
     except ValueError as e:
         logger.error("flatten validation error: %s", e)
-        return JSONResponse({"success": False, "error": str(e)}, status_code=400)
+        return JSONResponse({"success": False, "error": "Invalid flatten request"}, status_code=400)
     except Exception as e:
         logger.error("flatten error: %s", e)
         return JSONResponse({"success": False, "error": "Flatten failed"}, status_code=400)
@@ -2684,8 +2690,8 @@ async def api_calendar_gaps(    symbol: str = "MES",
 
     try:
         cal = get_calendar(symbol)
-    except ValueError as e:
-        return JSONResponse({"error": str(e)}, status_code=400)
+    except ValueError:
+        return JSONResponse({"error": "Unsupported symbol"}, status_code=400)
 
     bars = db.get_bars(symbol, timeframe,
                        from_ts=from_ts or 0,
